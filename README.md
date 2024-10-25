@@ -46,6 +46,9 @@ The DICOMator is a Blender addon designed to convert selected mesh objects into 
     * Set Density (HU value) and Priority for overlapping regions.
     * Use "Set Default Density" and "Set Default Priority" operators for multiple objects.
 
+
+![GUI](https://github.com/user-attachments/assets/55b11a36-33bb-4c42-84bc-facb3e311efd)
+
 **Configuring Voxelization Settings**
 
 * Open the DICOMator panel and adjust settings:
@@ -55,6 +58,8 @@ The DICOMator is a Blender addon designed to convert selected mesh objects into 
     * **Artifact Simulation:** Configure noise, metal artifacts, partial volume effects, and ring artifacts.
     * **Voxelization Method:** Choose Fast (Ray Casting) or Accurate (Sampling).
         * Adjust Number of Rays/Samples per Voxel for accuracy.
+
+![metal_streaks](https://github.com/user-attachments/assets/714b3bbc-3e8e-442d-bd39-ab766e1b1cfa)
 
 **Running the Voxelization**
 
@@ -67,7 +72,7 @@ The DICOMator is a Blender addon designed to convert selected mesh objects into 
 * File Naming: Files are named based on phase and slice number (e.g., CT_Phase_1_Slice_0001.dcm).
 
 ![skull_multi](https://github.com/user-attachments/assets/b1c62567-4189-4a66-812f-005b57629184)
-![GUI](https://github.com/user-attachments/assets/55b11a36-33bb-4c42-84bc-facb3e311efd)
+
 ![skull_dose_lat](https://github.com/user-attachments/assets/eca22ede-4a6f-47ca-a82c-e53dccb0649d)
 
 ![Lung_geometry](https://github.com/user-attachments/assets/8eb7a3ce-fbaf-4d7d-b70d-33e7b808e0fd)
