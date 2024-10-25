@@ -66,6 +66,12 @@ The DICOMator is a Blender addon designed to convert selected mesh objects into 
 * DICOM Series: Compatible with medical imaging software.
 * File Naming: Files are named based on phase and slice number (e.g., CT_Phase_1_Slice_0001.dcm).
 
+![skull_multi](https://github.com/user-attachments/assets/b1c62567-4189-4a66-812f-005b57629184)
+![GUI](https://github.com/user-attachments/assets/55b11a36-33bb-4c42-84bc-facb3e311efd)
+![skull_dose_lat](https://github.com/user-attachments/assets/eca22ede-4a6f-47ca-a82c-e53dccb0649d)
+
+![Lung_geometry](https://github.com/user-attachments/assets/8eb7a3ce-fbaf-4d7d-b70d-33e7b808e0fd)
+
 **Notes and Tips**
 
 * High-resolution settings and accurate voxelization methods require more processing time and memory.
