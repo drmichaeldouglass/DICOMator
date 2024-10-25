@@ -76,6 +76,7 @@ The DICOMator is a Blender addon designed to convert selected mesh objects into 
 ![skull_dose_lat](https://github.com/user-attachments/assets/eca22ede-4a6f-47ca-a82c-e53dccb0649d)
 
 ![Lung_geometry](https://github.com/user-attachments/assets/8eb7a3ce-fbaf-4d7d-b70d-33e7b808e0fd)
+![4DLungRS](https://github.com/user-attachments/assets/7ce1aed3-df66-4a1c-a0e1-477464da5d55)
 
 **Notes and Tips**
 
