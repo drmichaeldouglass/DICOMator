@@ -1,0 +1,13 @@
+schema_version = "1.0.0"
+id = "synthetic_ct_voxelizer"
+version = "0.1.0"
+name = "Synthetic CT Voxelizer"
+tagline = "Converts mesh objects into a voxelized 3D array for DICOM CT export."
+maintainer = "Michael <your-email@example.com>"
+type = "add-on"
+blender_version_min = "4.2.0"
+license = ["SPDX:GPL-3.0-or-later"]
+wheels = [
+  "./wheels/pydicom-<version>-py3-none-any.whl"
+]
+
