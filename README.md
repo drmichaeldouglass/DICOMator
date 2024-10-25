@@ -1,139 +1,86 @@
-# DICOMator
-A Blender Add-On for making synthetic CT datasets from 3D meshes
 
-Overview
-DICOMator is a Blender addon that converts selected mesh objects into synthetic CT (Computed Tomography) datasets with various CT artifacts. This tool is ideal for generating realistic medical imaging data for simulation, training, or testing purposes.
+## DICOMator: Blender Addon for Synthetic CT Data Generation
 
-Features
-Voxelization of Meshes: Convert selected meshes into voxelized volumes with customizable voxel sizes.
-DICOM Export: Export voxelized data as a series of DICOM CT images compatible with medical imaging software.
-4D CT Series Generation: Create 4D CT datasets over a range of frames to simulate motion (e.g., breathing cycles).
-Artifact Simulation:
-Gaussian Noise: Add realistic noise to CT images.
-Metal Artifacts: Simulate radial streaks around high-density objects.
-Partial Volume Effects: Apply smoothing to mimic partial volume artifacts.
-Ring Artifacts: Introduce ring artifacts commonly seen in CT imaging.
-Beam Hardening: Simulate beam hardening effects.
-Custom Densities and Priorities: Assign specific density values and overlapping priorities to mesh objects.
-Voxelization Methods:
-Fast (Ray Casting): Quick voxelization using ray casting.
-Accurate (Sampling): Precise voxelization using volume sampling.
-Installation
-1. Download the Addon
-Save the provided addon script as a .py file, e.g., voxelizer_extension.py.
-2. Install Dependencies
-The addon requires the following Python packages:
+**Overview**
 
-pydicom
-scikit-image
-The addon attempts to install pydicom automatically. However, you need to install scikit-image manually.
+The DICOMator is a Blender addon designed to convert selected mesh objects into realistic, synthetic CT (Computed Tomography) datasets. It includes various CT artifact simulations, making it ideal for creating training, testing, or simulation data for medical imaging applications.
 
-Installing scikit-image:
-Open Blender and go to the Python Console or use your system's terminal.
+**Features**
 
-Run the following command:
+* **Voxelization of Meshes:** Convert meshes into 3D volumes with customizable voxel sizes.
+* **DICOM Export:** Export voxelized data as a series of DICOM CT images compatible with medical imaging software.
+* **4D CT Series Generation:** Create 4D CT datasets simulating motion (e.g., breathing) across multiple frames.
+* **Artifact Simulation:**
+    * **Gaussian Noise:** Add realistic noise to CT images.
+    * **Metal Artifacts:** Simulate radial streaks around high-density objects.
+    * **Partial Volume Effects:** Apply smoothing to mimic artifacts caused by overlapping structures.
+    * **Ring Artifacts:** Introduce ring artifacts commonly seen in CT imaging.
+    * **Beam Hardening:** Simulate beam hardening effects (currently disabled).
+* **Custom Densities and Priorities:** Assign specific Hounsfield Unit (HU) values and overlapping priorities to mesh objects.
+* **Voxelization Methods:**
+    * **Fast (Ray Casting):** Quick voxelization using ray casting (less accurate).
+    * **Accurate (Sampling):** Precise voxelization using volume sampling (slower).
 
-python
-Copy code
-import bpy
-import subprocess
-subprocess.check_call([bpy.app.binary_path_python, "-m", "pip", "install", "scikit-image"])
-Wait for the installation to complete.
+**Installation**
 
-3. Install the Addon in Blender
-Open Blender.
-Go to Edit > Preferences > Add-ons.
-Click on Install... at the top.
-Navigate to and select the voxelizer_extension.py file.
-Enable the addon by checking the box next to Voxelizer Extension.
-4. Save User Preferences (Optional)
-Click Save Preferences to keep the addon enabled for future Blender sessions.
-Usage
-Preparing Your Scene
-Select Mesh Objects:
+1. **Download the Addon:** Save the provided script as a `.py` file (e.g., `dicomator.py`).
+2. **Install Dependencies:**
+    * `pydicom` (automatic installation attempted)
+    * `scikit-image` (manual installation required)
+        * Open Blender's Python Console or your system's terminal.
+        * Run: `python -m pip install scikit-image`
+3. **Install the Addon in Blender:**
+    * Go to Edit > Preferences > Add-ons.
+    * Click "Install..." and select `dicomator.py`.
+    * Enable the DICOMator checkbox.
+4. **Save User Preferences (Optional):** Click "Save Preferences" to keep the addon enabled for future sessions.
 
-In the 3D Viewport, select the mesh objects you wish to voxelize.
-Only selected mesh objects will be processed.
-Assign Densities and Priorities (Optional):
+**Usage**
 
-With a mesh object selected, open the Voxelizer panel in the sidebar (press N if the sidebar is hidden).
+**Preparing Your Scene**
 
-Under Object Properties, set:
+1. **Select Mesh Objects:** Choose the meshes you want to convert in the 3D Viewport.
+2. **Assign Densities and Priorities (Optional):**
+    * Select a mesh object.
+    * Open the DICOMator panel (press N if hidden).
+    * Set Density (HU value) and Priority for overlapping regions.
+    * Use "Set Default Density" and "Set Default Priority" operators for multiple objects.
 
-Density: The Hounsfield Unit (HU) value to assign to the object.
-Priority: Determines which object's density takes precedence in overlapping regions.
-To set default values for multiple objects:
+**Configuring Voxelization Settings**
 
-Select the desired objects.
-Use the Set Default Density and Set Default Priority operators in the panel.
-Configuring Voxelization Settings
-Open the Voxelizer panel and adjust the following settings:
+* Open the DICOMator panel and adjust settings:
+    * **Voxel Size (mm):** Size of each voxel (smaller = higher resolution, longer processing).
+    * **4D CT Export:** Enable to export over multiple frames.
+        * Set Start and End Frames.
+    * **Artifact Simulation:** Configure noise, metal artifacts, partial volume effects, and ring artifacts.
+    * **Voxelization Method:** Choose Fast (Ray Casting) or Accurate (Sampling).
+        * Adjust Number of Rays/Samples per Voxel for accuracy.
 
-Voxelization Settings
-Voxel Size (mm): Size of each voxel in millimeters. Smaller sizes yield higher resolution but increase computation time.
-Enable 4D CT Export: Toggle to export over a range of frames.
-Start Frame: The first frame to export.
-End Frame: The last frame to export.
-Artifact Simulation
-Add Noise:
-Noise Std Dev: Standard deviation of the Gaussian noise.
-Simulate Metal Artifacts:
-Metal Threshold: Density threshold to identify metal voxels.
-Streak Intensity: Intensity of the simulated streaks.
-Number of Streaks: How many streaks to generate around metal objects.
-Simulate Partial Volume Effects:
-PVE Sigma: Sigma value for Gaussian smoothing.
-Simulate Ring Artifacts:
-Ring Intensity: Intensity of ring artifacts.
-Ring Frequency: Frequency of the rings.
-Simulate Beam Hardening (currently commented out in the code):
-Beam Hardening Metal Threshold: Density threshold for beam hardening simulation.
-Voxelization Method
-Voxelization Method:
-Fast (Ray Casting): Quicker but less accurate.
-Number of Rays per Voxel: Increase for better accuracy.
-Accurate (Sampling): More precise but slower.
-Samples per Voxel: Increase for better accuracy.
-Running the Voxelization
-Once all settings are configured, click Voxelize Selected Objects at the bottom of the Voxelizer panel.
-The addon will process the meshes and export the DICOM series to a folder named DICOM_Output in the same directory as your Blender file.
-Output
-DICOM Series: The output is a series of DICOM files compatible with medical imaging software.
-File Naming: Files are named according to the phase and slice number, e.g., CT_Phase_1_Slice_0001.dcm.
-Notes and Tips
-Performance:
+**Running the Voxelization**
 
-High-resolution settings and accurate voxelization methods significantly increase processing time and memory usage.
-For testing purposes, start with larger voxel sizes and fewer samples or rays.
-Dependencies:
+1. Click "Voxelize Selected Objects" after configuration.
+2. The addon processes meshes and exports the DICOM series to a "DICOM_Output" folder in your Blender file directory.
 
-Ensure pydicom and scikit-image are properly installed.
-If you encounter import errors, reinstall the packages using Blender's Python interpreter.
-Customization:
+**Output**
 
-The addon uses default DICOM metadata. Modify the code if you need to customize patient or study information.
-Beam hardening simulation is currently commented out. You can enable it by uncommenting the relevant sections in the code.
-Error Handling:
+* DICOM Series: Compatible with medical imaging software.
+* File Naming: Files are named based on phase and slice number (e.g., CT_Phase_1_Slice_0001.dcm).
 
-The addon reports errors in Blender's console and info bar. Check these if the addon isn't functioning as expected.
-If no mesh objects are selected, the addon will cancel the operation and report an error.
-Troubleshooting
-Addon Not Appearing:
+**Notes and Tips**
 
-Ensure the addon is installed and enabled in Blender's preferences.
-Check the console for any error messages during installation.
-Missing Dependencies:
+* High-resolution settings and accurate voxelization methods require more processing time and memory.
+* Use larger voxel sizes and fewer samples/rays for initial testing.
+* Ensure `pydicom` and `scikit-image` are installed correctly. Reinstall if needed.
+* The addon uses default DICOM metadata. Modify code for patient/study information customization.
+* Beam hardening simulation is currently disabled (uncomment relevant code sections for activation).
+* Check Blender's console and info bar for any errors.
 
-Reinstall pydicom and scikit-image using Blender's Python interpreter.
-Verify that you are using the correct Python environment associated with Blender.
-Export Issues:
+**Troubleshooting**
 
-Make sure the DICOM_Output directory is writable.
-Check for any error messages indicating issues with file saving.
-Contributing
-Feedback and Improvements:
+* **Addon Not Appearing:** Ensure installation and enabled status in preferences. Check console for installation errors.
+* **Missing Dependencies:** Reinstall `pydicom` and `scikit-image` using Blender's Python interpreter. Verify correct Python environment.
+* **Export Issues:** Verify write permissions for the "DICOM_Output" directory. Check console for file saving errors.
 
-Contributions are welcome! Feel free to submit pull requests or open issues on the GitHub repository.
-Bug Reports:
+**Contributing**
 
-Provide detailed information about the issue, including steps to reproduce and any error messages.
+* Feedback and improvements are welcome!
