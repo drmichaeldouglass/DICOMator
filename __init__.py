@@ -2,7 +2,7 @@ bl_info = {
     "name": "Voxelizer Extension",
     "author": "Your Name",
     "version": (1, 0),
-    "blender": (3, 0, 0),
+    "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Voxelizer",
     "description": "Voxelize selected meshes and export as DICOM CT series",
     "warning": "",

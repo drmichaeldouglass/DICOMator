@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "DICOMator"
-version = "0.1.0"
+version = "0.2.0"
 name = "DICOMator"
 tagline = "Converts mesh objects into DICOM CT files"
 maintainer = "Michael Douglass"
@@ -12,12 +12,12 @@ wheels = [
     "./wheels/imageio-2.36.0-py3-none-any.whl",
     "./wheels/lazy_loader-0.4-py3-none-any.whl",
     "./wheels/networkx-3.4.2-py3-none-any.whl",
-    "./wheels/numpy-2.1.2-cp312-cp312-win_amd64.whl",
+    "./wheels/numpy-2.1.2-cp311-cp311-win_amd64.whl",
     "./wheels/packaging-24.1-py3-none-any.whl",
-    "./wheels/pillow-11.0.0-cp312-cp312-win_amd64.whl",
+    "./wheels/pillow-11.0.0-cp311-cp311-win_amd64.whl",
     "./wheels/pydicom-2.3.1-py3-none-any.whl",
-    "./wheels/scikit_image-0.24.0-cp312-cp312-win_amd64.whl",
-    "./wheels/scipy-1.14.1-cp312-cp312-win_amd64.whl",
+    "./wheels/scikit_image-0.24.0-cp311-cp311-win_amd64.whl",
+    "./wheels/scipy-1.14.1-cp311-cp311-win_amd64.whl",
     "./wheels/tifffile-2024.9.20-py3-none-any.whl"
 ]
 
