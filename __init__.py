@@ -20,6 +20,7 @@ from bpy.props import (
     BoolProperty,
     IntProperty,
     PointerProperty,
+    StringProperty,
 )
 from datetime import datetime
 import os
@@ -40,6 +41,22 @@ except ImportError:
 
 # Property Group for settings
 class VoxelizerSettings(bpy.types.PropertyGroup):
+    
+    
+    patient_name: StringProperty(
+    name="Patient Name",
+    description="Name of the patient",
+    default="Dr. Smith"
+    )
+    
+    patient_id: StringProperty(
+    name="Patient ID",
+    description="Patient identification number",
+    default="000515054"
+    )
+    
+    
+    
     voxel_size: FloatProperty(
         name="Voxel Size (mm)",
         default=2.0,
@@ -189,6 +206,8 @@ class VoxelizeOperator(Operator):
     
         # Voxelization parameters
         voxel_size = settings.voxel_size
+        patient_name = settings.patient_name
+        patient_id = settings.patient_id
         output_dir = bpy.path.abspath("//DICOM_Output")
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
@@ -281,6 +300,8 @@ class VoxelizeOperator(Operator):
                     noise_std_dev=settings.noise_std_dev if settings.enable_noise else 0,
                     phase_info=phase_info,
                     total_phases=total_frames,
+                    patient_name = settings.patient_name,
+                    patient_id = settings.patient_id
                 )
     
                 self.report({'INFO'}, f"Exported phase {frame_index}/{total_frames}")
@@ -351,6 +372,9 @@ class VoxelizeOperator(Operator):
                 noise_std_dev=settings.noise_std_dev if settings.enable_noise else 0,
                 phase_info=phase_info,
                 total_phases=total_frames,
+                patient_name = settings.patient_name,
+                patient_id = settings.patient_id
+
             )
     
             self.report({'INFO'}, f"Exported frame {frame_index}/{total_frames}")
@@ -704,6 +728,8 @@ class VoxelizeOperator(Operator):
         noise_std_dev=0,
         phase_info=None,
         total_phases=1,
+        patient_name = "Dr. Smith",
+        patient_id = "001234567"
         ):
         num_slices = voxel_grid.shape[2]
         for i in range(num_slices):
@@ -719,6 +745,8 @@ class VoxelizeOperator(Operator):
                 phase_info=phase_info,
                 total_phases=total_phases,
                 num_slices=num_slices,
+                patient_id = patient_id,
+                patient_name = patient_name
             )
             if result != {'FINISHED'}:
                 return result  # Handle cancellation if save_dicom_slice failed
@@ -736,6 +764,8 @@ class VoxelizeOperator(Operator):
         phase_info=None,
         total_phases=1,
         num_slices=1,
+        patient_id = "001234567",
+        patient_name = "Dr. Smith"
         ):    
         import pydicom
         from pydicom.dataset import Dataset, FileDataset
@@ -763,8 +793,8 @@ class VoxelizeOperator(Operator):
         ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
     
         # Patient and Study Information
-        ds.PatientName = 'Dr. Smith'
-        ds.PatientID = '000515054'
+        ds.PatientName = patient_name
+        ds.PatientID = patient_id
         ds.PatientBirthDate = ''
         ds.PatientSex = 'M'
     
@@ -1033,6 +1063,12 @@ class VoxelizerPanel(bpy.types.Panel):
         if settings.enable_ring_artifacts:
             layout.prop(settings, 'ring_intensity')
             layout.prop(settings, 'ring_frequency')
+
+        box = layout.box()
+        box.label(text="Patient Information")
+        box.prop(settings, "patient_name")
+        box.prop(settings, "patient_id")
+        box.prop(settings, "patient_sex")
         
         #layout.prop(settings, 'enable_beam_hardening')
         #if settings.enable_beam_hardening:
