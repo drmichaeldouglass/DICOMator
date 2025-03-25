@@ -1,69 +1,107 @@
 bl_info = {
-    "name": "Voxelizer Extension",
-    "author": "Your Name",
-    "version": (1, 0),
+    "name": "DICOMator",
+    "author": "Michael Douglass",
+    "version": (0, 2, 0),
     "blender": (4, 2, 0),
-    "location": "View3D > Sidebar > Voxelizer",
-    "description": "Voxelize selected meshes and export as DICOM CT series",
+    "location": "View3D > Sidebar > DICOMator",
+    "description": "Converts mesh objects into DICOM CT files",
     "warning": "",
-    "wiki_url": "",
-    "category": "Object",
+    "doc_url": "https://github.com/drmichaeldouglass/DICOMator",
+    "category": "3D View",
 }
 
+# Standard library imports
+import os
+import math
+import time
+from datetime import datetime
+from functools import partial
+
+# Blender imports
 import bpy
 import bmesh
-import numpy as np
 from mathutils import Vector
-from bpy.types import Operator, Panel
+from bpy.types import Operator, Panel, PropertyGroup
 from bpy.props import (
     FloatProperty,
     BoolProperty,
     IntProperty,
     PointerProperty,
     StringProperty,
+    EnumProperty,
 )
-from datetime import datetime
-import os
-import math
-from skimage.draw import line
 
-# Ensure pydicom is installed
+# Try to import numpy - required
+try:
+    import numpy as np
+except ImportError:
+    print("NumPy is required but not found. Using bundled wheel.")
+
+# Try to import scikit-image for line drawing
+try:
+    from skimage.draw import line
+except ImportError:
+    print("scikit-image is required but not found. Using bundled wheel.")
+
+# Try to import pydicom - required for DICOM export
 try:
     import pydicom
     from pydicom.dataset import Dataset, FileDataset
+    from pydicom.uid import generate_uid
 except ImportError:
-    import subprocess
-    import sys
-    subprocess.check_call([bpy.app.binary_path_python, "-m", "pip", "install", "pydicom"])
-    import pydicom
-    from pydicom.dataset import Dataset, FileDataset
+    print("pydicom is required but not found. Using bundled wheel.")
 
+# Constants
+AIR_DENSITY = -1000.0  # HU value for air
+DEFAULT_DENSITY = 0.0   # Default density for objects
+MAX_HU_VALUE = 3071     # Maximum HU value
+MIN_HU_VALUE = -1024    # Minimum HU value
 
 # Property Group for settings
-class VoxelizerSettings(bpy.types.PropertyGroup):
+class VoxelizerSettings(PropertyGroup):
+    """Settings for the DICOMator addon."""
     
-    
+    # Patient information
     patient_name: StringProperty(
-    name="Patient Name",
-    description="Name of the patient",
-    default="Dr. Smith"
+        name="Patient Name",
+        description="Name of the patient",
+        default="Anonymous"
     )
     
     patient_id: StringProperty(
-    name="Patient ID",
-    description="Patient identification number",
-    default="000515054"
+        name="Patient ID",
+        description="Patient identification number",
+        default="12345678"
     )
     
+    patient_sex: EnumProperty(
+        name="Patient Sex",
+        description="Sex of the patient",
+        items=[
+            ('M', "Male", "Male"),
+            ('F', "Female", "Female"),
+            ('O', "Other", "Other")
+        ],
+        default='M'
+    )
     
-    
+    # Voxelization settings
     voxel_size: FloatProperty(
         name="Voxel Size (mm)",
         default=2.0,
         min=0.01,
-        description="Size of each voxel"
+        description="Size of each voxel in millimeters"
+    )
+    
+    sampling_density: IntProperty(
+        name="Sampling Density",
+        default=5,
+        min=1,
+        max=10,
+        description="Number of samples per voxel (higher = more accurate but slower)"
     )
 
+    # 4D CT export settings
     enable_4d_export: BoolProperty(
         name="Enable 4D CT Export",
         default=False,
@@ -79,123 +117,107 @@ class VoxelizerSettings(bpy.types.PropertyGroup):
 
     end_frame: IntProperty(
         name="End Frame",
-        default=250,
+        default=10,
         min=1,
         description="End frame for 4D export"
     )
     
+    # Artifact simulation settings
     enable_noise: BoolProperty(
         name="Add Noise",
         default=False,
         description="Add Gaussian noise to the CT images"
     )
+    
     noise_std_dev: FloatProperty(
         name="Noise Std Dev",
         default=20.0,
         min=0.0,
         description="Standard deviation of Gaussian noise"
     )
+    
     # Metal artifact settings
     enable_metal_artifacts: BoolProperty(
         name="Simulate Metal Artifacts",
         default=False,
         description="Simulate metal artifacts in the CT images"
     )
+    
     metal_threshold: FloatProperty(
         name="Metal Threshold",
         default=3000.0,
         min=0.0,
         description="Density threshold to consider voxels as metal"
     )
+    
     streak_intensity: FloatProperty(
         name="Streak Intensity",
         default=500.0,
         description="Intensity change along the streaks"
     )
+    
     num_angles: IntProperty(
         name="Number of Streaks",
         default=36,
         min=1,
         description="Number of radial streaks around metal objects"
     )
+    
     # Partial volume effect settings
     enable_pve: BoolProperty(
         name="Simulate Partial Volume Effects",
         default=False,
         description="Apply smoothing to simulate partial volume effects"
     )
+    
     pve_sigma: FloatProperty(
         name="PVE Sigma",
         default=0.5,
         min=0.0,
         description="Sigma value for Gaussian smoothing"
     )
-    # Additional artifact settings (e.g., Ring Artifacts)
+    
+    # Ring artifact settings
     enable_ring_artifacts: BoolProperty(
         name="Simulate Ring Artifacts",
         default=False,
         description="Simulate ring artifacts in the CT images"
     )
+    
     ring_intensity: FloatProperty(
         name="Ring Intensity",
         default=10.0,
         description="Intensity of the ring artifacts"
     )
+    
     ring_frequency: FloatProperty(
         name="Ring Frequency",
         default=5.0,
         description="Frequency of the rings"
     )
 
-    enable_beam_hardening: BoolProperty(
-        name="Simulate Beam Hardening",
-        default=False,
-        description="Simulate Beam Hardening artifacts in the CT images"
-    )
-
-    metal_threshold_bh: FloatProperty(
-        name="Beam Hardening Metal Threshold",
-        default=3000.0,
-        min=0.0,
-        description="Density threshold to consider voxels as metal"
-    )
-
-    voxelization_method: bpy.props.EnumProperty(
-        name="Voxelization Method",
-        description="Choose between fast and accurate voxelization methods",
-        items=[
-            ('FAST', "Fast (Ray Casting)", "Fast voxelization using ray casting"),
-            ('ACCURATE', "Accurate (Sampling)", "Accurate voxelization using volume sampling")
-        ],
-        default='FAST'
-    )
-    samples_per_voxel: IntProperty(
-        name="Samples per Voxel",
-        default=5,
-        min=1,
-        description="Number of samples per voxel for accurate voxelization"
-    )
-
-    num_rays_per_voxel: IntProperty(
-        name="Number of Rays per Voxel",
-        default=5,
-        min=1,
-        description="Number of rays to cast per voxel for fast voxelization"
+    output_directory: StringProperty(
+        name="Output Directory",
+        description="Directory to save DICOM files",
+        default="//DICOM_Output",
+        subtype='DIR_PATH'
     )
 
 
 # Operator Class
 class VoxelizeOperator(Operator):
+    """Voxelize selected meshes and export as DICOM CT series."""
     bl_idname = "object.voxelize_operator"
     bl_label = "Voxelize Selected Objects"
     bl_options = {'REGISTER', 'UNDO'}
 
     # Internal attributes for UIDs
-    study_instance_uid: bpy.props.StringProperty()
-    frame_of_reference_uid: bpy.props.StringProperty()
+    study_instance_uid: StringProperty()
+    frame_of_reference_uid: StringProperty()
 
     def execute(self, context):
-        from pydicom.uid import generate_uid
+        """Execute the voxelization operation."""
+        start_time = time.time()
         settings = context.scene.voxelizer_settings
         
         # Get selected meshes
@@ -203,197 +225,168 @@ class VoxelizeOperator(Operator):
         if not selected_meshes:
             self.report({'ERROR'}, "No mesh objects selected")
             return {'CANCELLED'}
+        
+        # Create output directory using user-specified path
+        output_dir = bpy.path.abspath(settings.output_directory)
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Generate UIDs for the study
+        self.study_instance_uid = generate_uid()
+        self.frame_of_reference_uid = generate_uid()
+        
+        # Process 4D CT if enabled, otherwise process single frame
+        if settings.enable_4d_export:
+            result = self.process_4d_ct(context, selected_meshes, output_dir)
+        else:
+            result = self.process_single_frame(context, selected_meshes, output_dir)
+            
+        if result == {'FINISHED'}:
+            elapsed_time = time.time() - start_time
+            self.report({'INFO'}, f"Voxelization complete in {elapsed_time:.2f} seconds. Output saved to {output_dir}")
+            
+        return result
+        
+    def process_single_frame(self, context, selected_meshes, output_dir):
+        """Process a single frame for CT export."""
+        settings = context.scene.voxelizer_settings
+        scene = context.scene
+        frame = scene.frame_current
+        
+        # Create phase info for single frame
+        phase_info = {
+            'series_description': "Static CT Scan",
+            'series_instance_uid': generate_uid(),
+            'series_number': "1",
+            'temporal_position_index': "1",
+        }
+        
+        # Voxelize meshes using adaptive sampling
+        voxel_grid = self.adaptive_sampling_voxelization(
+            selected_meshes,
+            settings.voxel_size,
+            min_samples=2,
+            max_samples=settings.sampling_density
+        )
+        
+        # Apply artifact simulations if enabled
+        voxel_grid = self.apply_artifacts(voxel_grid, settings)
+        
+        # Export to DICOM
+        return self.export_to_dicom(
+            voxel_grid=voxel_grid,
+            voxel_size=settings.voxel_size,
+            output_dir=output_dir,
+            phase_info=phase_info,
+            total_phases=1,
+            patient_name=settings.patient_name,
+            patient_id=settings.patient_id,
+            patient_sex=settings.patient_sex
+        )
     
-        # Voxelization parameters
-        voxel_size = settings.voxel_size
-        patient_name = settings.patient_name
-        patient_id = settings.patient_id
-        output_dir = bpy.path.abspath("//DICOM_Output")
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-    
-        # UIDs
-        study_instance_uid = generate_uid()
-        frame_of_reference_uid = generate_uid()
-    
-        # Get the enable_4d_export setting
-        enable_4d_export = settings.enable_4d_export
-        start_frame = settings.start_frame
-        end_frame = settings.end_frame
+    def process_4d_ct(self, context, selected_meshes, output_dir):
+        """Process multiple frames for 4D CT export."""
+        settings = context.scene.voxelizer_settings
         scene = context.scene
         current_frame = scene.frame_current  # Store current frame to restore later
         
-        if enable_4d_export:
-            # Total number of frames (phases)
-            if start_frame > end_frame:
-                self.report({'ERROR'}, "Start Frame must be less than or equal to End Frame")
-                return {'CANCELLED'}
-            total_frames = end_frame - start_frame + 1
-    
-            for frame_index, frame in enumerate(range(start_frame, end_frame + 1), start=1):
-                scene.frame_set(frame)  # Set the scene to the current frame
-    
-                # Generate dynamic phase data
-                percentage = (frame_index / total_frames) * 100
-                series_description = f"Phase {frame_index} - {percentage:.1f}% of breathing cycle"
-    
-                # Generate unique Series Instance UID per phase
-                series_instance_uid = generate_uid()
-    
-                # Series number as an integer unique per phase
-                series_number = frame_index
-    
-                # Temporal position index equal to the frame number
-                temporal_position_index = frame
-    
-                # Compile phase information
-                phase_info = {
-                    'series_description': series_description,
-                    'series_instance_uid': series_instance_uid,
-                    'series_number': str(series_number),
-                    'temporal_position_index': str(temporal_position_index),
-                }
-    
-                # Voxelize meshes for this phase
-                if settings.voxelization_method == 'FAST':
-                    voxel_grid = self.voxelize_meshes(
-                        selected_meshes,
-                        voxel_size,
-                        num_rays_per_voxel=settings.num_rays_per_voxel
-                    )
-                elif settings.voxelization_method == 'ACCURATE':
-                    voxel_grid = self.voxelize_meshes_accurate(
-                        selected_meshes,
-                        voxel_size,
-                        samples_per_voxel=settings.samples_per_voxel
-                    )
-    
-                # Apply partial volume effect if enabled
-                if settings.enable_pve:
-                    voxel_grid = self.apply_partial_volume_effect(voxel_grid, sigma=settings.pve_sigma)
-                # Simulate radial streak artifacts
-                if settings.enable_metal_artifacts:
-                    self.simulate_radial_streaks(
-                        voxel_grid,
-                        metal_threshold=settings.metal_threshold,
-                        streak_intensity=settings.streak_intensity,
-                        num_angles=settings.num_angles
-                    )
-                if settings.enable_ring_artifacts:
-                    self.simulate_ring_artifacts(
-                        voxel_grid,
-                        intensity=settings.ring_intensity,
-                        frequency=settings.ring_frequency
-                    )
-                if settings.enable_beam_hardening:
-                    self.simulate_beam_hardening(
-                        voxel_grid
-                    )
+        # Validate frame range
+        if settings.start_frame > settings.end_frame:
+            self.report({'ERROR'}, "Start Frame must be less than or equal to End Frame")
+            return {'CANCELLED'}
+            
+        total_frames = settings.end_frame - settings.start_frame + 1
         
-                # Export DICOM slices for this phase
-                self.export_to_dicom(
+        try:
+            for frame_index, frame in enumerate(range(settings.start_frame, settings.end_frame + 1), start=1):
+                # Set the scene to the current frame
+                scene.frame_set(frame)
+                
+                # Calculate percentage through the motion cycle
+                percentage = (frame_index / total_frames) * 100
+                
+                # Create phase info
+                phase_info = {
+                    'series_description': f"Phase {frame_index} - {percentage:.1f}% of breathing cycle",
+                    'series_instance_uid': generate_uid(),
+                    'series_number': str(frame_index),
+                    'temporal_position_index': str(frame),
+                }
+                
+                # Voxelize meshes for this phase
+                voxel_grid = self.adaptive_sampling_voxelization(
+                    selected_meshes,
+                    settings.voxel_size,
+                    min_samples=2,
+                    max_samples=settings.sampling_density
+                )
+                
+                # Apply artifact simulations if enabled
+                voxel_grid = self.apply_artifacts(voxel_grid, settings)
+                
+                # Export to DICOM
+                result = self.export_to_dicom(
                     voxel_grid=voxel_grid,
-                    voxel_size=voxel_size,
+                    voxel_size=settings.voxel_size,
                     output_dir=output_dir,
-                    study_instance_uid=study_instance_uid,
-                    frame_of_reference_uid=frame_of_reference_uid,
-                    noise_std_dev=settings.noise_std_dev if settings.enable_noise else 0,
                     phase_info=phase_info,
                     total_phases=total_frames,
-                    patient_name = settings.patient_name,
-                    patient_id = settings.patient_id
+                    patient_name=settings.patient_name,
+                    patient_id=settings.patient_id,
+                    patient_sex=settings.patient_sex
                 )
-    
+                
+                if result != {'FINISHED'}:
+                    return result
+                    
                 self.report({'INFO'}, f"Exported phase {frame_index}/{total_frames}")
-    
+                
+            return {'FINISHED'}
+                
+        finally:
             # Restore the original frame
             scene.frame_set(current_frame)
-        else:
-            # Single frame export
-            total_frames = 1  # Only one frame
-            frame = scene.frame_current
-            frame_index = 1
-            percentage = 100.0
-            series_description = f"Phase {frame_index} - {percentage:.1f}% of breathing cycle"
-            series_instance_uid = generate_uid()
-            series_number = frame_index
-            temporal_position_index = frame
     
-            phase_info = {
-                'series_description': series_description,
-                'series_instance_uid': series_instance_uid,
-                'series_number': str(series_number),
-                'temporal_position_index': str(temporal_position_index),
-            }
-    
-            # Voxelize meshes for this frame
-            if settings.voxelization_method == 'FAST':
-                voxel_grid = self.voxelize_meshes(
-                    selected_meshes,
-                    voxel_size,
-                    num_rays_per_voxel=settings.num_rays_per_voxel
-                )
-            elif settings.voxelization_method == 'ACCURATE':
-                voxel_grid = self.voxelize_meshes_accurate(
-                    selected_meshes,
-                    voxel_size,
-                    samples_per_voxel=settings.samples_per_voxel
-                )
-    
-            # Apply partial volume effect if enabled
-            if settings.enable_pve:
-                voxel_grid = self.apply_partial_volume_effect(voxel_grid, sigma=settings.pve_sigma)
-            # Simulate radial streak artifacts
-            if settings.enable_metal_artifacts:
-                self.simulate_radial_streaks(
-                    voxel_grid,
-                    metal_threshold=settings.metal_threshold,
-                    streak_intensity=settings.streak_intensity,
-                    num_angles=settings.num_angles
-                )
-            if settings.enable_ring_artifacts:
-                self.simulate_ring_artifacts(
-                    voxel_grid,
-                    intensity=settings.ring_intensity,
-                    frequency=settings.ring_frequency
-                )
-            if settings.enable_beam_hardening:
-                self.simulate_beam_hardening(
-                    voxel_grid
-                )
-    
-            # Export DICOM slices for this frame
-            self.export_to_dicom(
-                voxel_grid=voxel_grid,
-                voxel_size=voxel_size,
-                output_dir=output_dir,
-                study_instance_uid=study_instance_uid,
-                frame_of_reference_uid=frame_of_reference_uid,
-                noise_std_dev=settings.noise_std_dev if settings.enable_noise else 0,
-                phase_info=phase_info,
-                total_phases=total_frames,
-                patient_name = settings.patient_name,
-                patient_id = settings.patient_id
-
+    def apply_artifacts(self, voxel_grid, settings):
+        """Apply all enabled artifact simulations to the voxel grid."""
+        # Apply noise if enabled
+        if settings.enable_noise:
+            noise_std_dev = settings.noise_std_dev
+            self.report({'INFO'}, f"Adding noise with standard deviation {noise_std_dev}")
+            noise = np.random.normal(0, noise_std_dev, voxel_grid.shape)
+            voxel_grid += noise
+        
+        # Apply partial volume effect if enabled
+        if settings.enable_pve:
+            voxel_grid = self.apply_partial_volume_effect(voxel_grid, sigma=settings.pve_sigma)
+            
+        # Apply metal artifacts if enabled
+        if settings.enable_metal_artifacts:
+            self.simulate_radial_streaks(
+                voxel_grid,
+                metal_threshold=settings.metal_threshold,
+                streak_intensity=settings.streak_intensity,
+                num_angles=settings.num_angles
             )
-    
-            self.report({'INFO'}, f"Exported frame {frame_index}/{total_frames}")
-    
-        self.report({'INFO'}, f"Voxelization complete. Output saved to {output_dir}")
-        return {'FINISHED'}
+            
+        # Apply ring artifacts if enabled
+        if settings.enable_ring_artifacts:
+            self.simulate_ring_artifacts(
+                voxel_grid,
+                intensity=settings.ring_intensity,
+                frequency=settings.ring_frequency
+            )
+            
+        return voxel_grid
 
-
-    # Helper function to calculate combined bounding box
     def calculate_combined_bounding_box(self, meshes):
         """
-        Calculates the combined bounding box of all selected meshes.
+        Calculate the combined bounding box of all selected meshes.
         
-        Parameters:
-        - meshes: List of Blender mesh objects.
-        
+        Args:
+            meshes: List of Blender mesh objects.
+            
         Returns:
-        - bbox_min: mathutils.Vector representing the minimum corner of the bounding box.
-        - bbox_max: mathutils.Vector representing the maximum corner of the bounding box.
+            Tuple of (bbox_min, bbox_max) Vectors representing the bounding box.
         """
         if not meshes:
             return Vector((0, 0, 0)), Vector((0, 0, 0))
@@ -404,16 +397,18 @@ class VoxelizeOperator(Operator):
         bbox_min = first_mesh.matrix_world @ Vector(bbox_min)
         bbox_max = first_mesh.matrix_world @ Vector(bbox_max)
         
-        # Iterate through remaining meshes to find the overall bounding box
+        # Expand bounding box to include all meshes
         for mesh in meshes[1:]:
             mesh_min, mesh_max = mesh.bound_box[0], mesh.bound_box[6]
             mesh_min = mesh.matrix_world @ Vector(mesh_min)
             mesh_max = mesh.matrix_world @ Vector(mesh_max)
+            
             bbox_min = Vector((
                 min(bbox_min.x, mesh_min.x),
                 min(bbox_min.y, mesh_min.y),
                 min(bbox_min.z, mesh_min.z)
             ))
+            
             bbox_max = Vector((
                 max(bbox_max.x, mesh_max.x),
                 max(bbox_max.y, mesh_max.y),
@@ -422,335 +417,526 @@ class VoxelizeOperator(Operator):
         
         return bbox_min, bbox_max
 
-
-    def simulate_radial_streaks(self, voxel_grid, metal_threshold, streak_intensity, num_angles):
+    def voxelize_meshes(self, meshes, voxel_size, samples_per_dimension=5):
         """
-        Simulates bright radial streak artifacts around high-density regions in each axial slice,
-        ensuring that the streaks are confined within each slice.
-    
-        Parameters:
-        - voxel_grid: 3D numpy array of voxel data.
-        - metal_threshold: Density threshold to consider voxels as metal.
-        - streak_intensity: Maximum intensity change along the streaks (positive value).
-        - num_angles: Number of angles to generate streaks (e.g., 36 for every 10 degrees).
+        Voxelize the selected meshes using an optimized sampling approach.
+        
+        Args:
+            meshes: List of Blender mesh objects
+            voxel_size: Size of each voxel in world units
+            samples_per_dimension: Number of samples along each dimension per voxel
+            
+        Returns:
+            3D numpy array representing the voxel grid
         """
-        num_slices = voxel_grid.shape[2]
-        for z in range(num_slices):
-            # Extract the slice data for the current slice
-            slice_data = voxel_grid[:, :, z].copy()  # Use a copy to avoid modifying other slices
-    
-            # Identify high-density (metal) voxels in the current slice
-            metal_indices = np.argwhere(slice_data >= metal_threshold)
-            if metal_indices.size == 0:
-                continue  # No metal in this slice
-    
-            height, width = slice_data.shape
-            for metal_voxel in metal_indices:
-                x0, y0 = metal_voxel  # x0 is row index, y0 is column index
-                # Generate bright streaks only
-                for angle in np.linspace(0, 2 * np.pi, num=num_angles, endpoint=False):
-                    # Determine the end point of the line within the slice boundaries
-                    x1 = int(x0 + height * np.sin(angle))
-                    y1 = int(y0 + width * np.cos(angle))
-                    # Ensure end points are within the slice
-                    x1 = np.clip(x1, 0, height - 1)
-                    y1 = np.clip(y1, 0, width - 1)
-                    # Get the coordinates of the line within the slice
-                    rr, cc = line(x0, y0, x1, y1)
-                    # Clip coordinates to stay within the slice
-                    rr = np.clip(rr, 0, height - 1)
-                    cc = np.clip(cc, 0, width - 1)
-                    # Set streak intensity for this line (always positive for bright streaks)
-                    intensity = streak_intensity
-                    # Modify the voxel values along the line
-                    distances = np.sqrt((rr - x0) ** 2 + (cc - y0) ** 2)
-                    attenuation = np.exp(-distances / (0.1 * max(height, width)))
-                    slice_data[rr, cc] += intensity * attenuation
-            # Clip the slice data to valid HU range
-            slice_data = np.clip(slice_data, -1024, 3071)
-            # Replace the original slice in the voxel grid with the modified slice
-            voxel_grid[:, :, z] = slice_data
-
-
-
-    def simulate_ring_artifacts(self, voxel_grid, intensity, frequency):
-        num_slices = voxel_grid.shape[2]
-        center = (voxel_grid.shape[0] // 2, voxel_grid.shape[1] // 2)
-        y, x = np.ogrid[:voxel_grid.shape[0], :voxel_grid.shape[1]]
-        for z in range(num_slices):
-            slice_data = voxel_grid[:, :, z]
-            radius = np.hypot(x - center[1], y - center[0])
-            rings = np.sin(2 * np.pi * frequency * radius / voxel_grid.shape[0])
-            slice_data += intensity * rings
-            voxel_grid[:, :, z] = slice_data
-
-
-    def simulate_beam_hardening(self, voxel_grid, attenuation_coefficient=0.05):
-        """
-        Simulates beam hardening artifacts by applying a cupping effect to each axial slice.
-    
-        Parameters:
-        - voxel_grid: 3D numpy array representing the voxelized volume.
-        - attenuation_coefficient: Controls the strength of the beam hardening effect.
-        """
-        num_slices = voxel_grid.shape[2]
-        for z in range(num_slices):
-            # Extract the slice data
-            slice_data = np.copy(voxel_grid[:, :, z])
-    
-            # Get the dimensions of the slice
-            height, width = slice_data.shape
-    
-            # Calculate the center coordinates
-            center_x = width / 2
-            center_y = height / 2
-    
-            # Create a grid of x and y coordinates
-            x = np.arange(width)
-            y = np.arange(height)
-            xx, yy = np.meshgrid(x, y)
-    
-            # Calculate the distance from the center for each voxel
-            distances = np.sqrt((xx - center_x) ** 2 + (yy - center_y) ** 2)
-    
-            # Normalize distances to range from 0 to 1
-            max_distance = np.sqrt((center_x) ** 2 + (center_y) ** 2)
-            normalized_distances = distances / max_distance
-    
-            # Calculate the cupping effect
-            cupping = attenuation_coefficient * normalized_distances
-    
-            # Apply the cupping effect to the slice data
-            slice_data *= (1 - cupping)
-    
-            # Update the voxel grid with the modified slice data
-            voxel_grid[:, :, z] = slice_data
-
-
-    def add_noise(self, voxel_grid, noise_std_dev):
-        if noise_std_dev > 0:
-            noise = np.random.normal(0, noise_std_dev, voxel_grid.shape)
-            voxel_grid += noise
-
-    def apply_partial_volume_effect(self, voxel_grid, sigma):
-        from scipy.ndimage import gaussian_filter
-        return gaussian_filter(voxel_grid, sigma=sigma)
-
-
-    # Voxelization function
-    def voxelize_meshes(self, meshes, voxel_size, num_rays_per_voxel=5):
-        # Calculate the combined bounding box of all meshes
+        # Calculate the combined bounding box
         bbox_min, bbox_max = self.calculate_combined_bounding_box(meshes)
+        self.bbox_min = bbox_min  # Store for DICOM export
+        self.bbox_max = bbox_max
+        
+        # Calculate grid dimensions
         grid_size = bbox_max - bbox_min
         grid_dims = tuple(int(np.ceil(s / voxel_size)) for s in grid_size)
-    
-        # Initialize voxel grid with background density (e.g., -1000 for air)
-        background_density = -1000.0  # Adjust as needed
-        voxel_grid = np.full(grid_dims, background_density, dtype=np.float32)
-    
-        # For coordinate calculations in the DICOM export
-        self.bbox_min = bbox_min
-        self.bbox_max = bbox_max
-    
-        # Prepare BVH trees for all meshes
-        bvh_trees = []
-        densities = []
-        priorities = []  # Add this line to initialize the priorities list
+        
+        # Initialize voxel grid with air density
+        voxel_grid = np.full(grid_dims, AIR_DENSITY, dtype=np.float32)
+        
+        # Prepare BVH trees and object properties for all meshes
+        mesh_data = []
         for mesh in meshes:
-            density = getattr(mesh, 'density', 0.0)
-            priority = getattr(mesh, 'priority', 0)  # Collect the priority attribute
-            # Prepare BMesh
+            # Get density and priority attributes
+            density = getattr(mesh, 'density', DEFAULT_DENSITY)
+            priority = getattr(mesh, 'priority', 0)
+            
+            # Create BMesh and BVHTree
             bm = bmesh.new()
             bm.from_mesh(mesh.data)
             bm.transform(mesh.matrix_world)
             bmesh.ops.triangulate(bm, faces=bm.faces[:])
-            # Create BVHTree from BMesh
+            
+            # Create BVHTree
             bvhtree = bvh_tree_from_bmesh(bm)
-            bvh_trees.append(bvhtree)
-            densities.append(density)
-            priorities.append(priority)  # Append the priority to the list
-            bm.free()
-
-        # Voxelization loop
-        for idx in np.ndindex(grid_dims):
-            # Calculate the world coordinate of the voxel center
-            point = bbox_min + Vector((
-                (idx[0] + 0.5) * voxel_size,
-                (idx[1] + 0.5) * voxel_size,
-                (idx[2] + 0.5) * voxel_size
-            ))
+            
+            # Store mesh data
+            mesh_data.append({
+                'bvhtree': bvhtree,
+                'density': density,
+                'priority': priority,
+                'bmesh': bm  # Store for cleanup later
+            })
         
-            # Find meshes containing the point
-            containing_meshes = []
-            for bvhtree, density, priority in zip(bvh_trees, densities, priorities):
-                if self.is_point_inside_mesh(point, bvhtree, num_rays=num_rays_per_voxel):
-                    containing_meshes.append({'density': density, 'priority': priority})
+        # Generate sample points within each voxel
+        sample_offsets = np.linspace(0, voxel_size, samples_per_dimension, endpoint=False) 
+        sample_offsets += (voxel_size / (2 * samples_per_dimension))  # Center samples
         
-            if containing_meshes:
-                # Select the mesh with the highest priority
-                containing_meshes.sort(key=lambda x: x['priority'], reverse=True)
-                voxel_density = containing_meshes[0]['density']
-                voxel_grid[idx] = voxel_density
-            else:
-                # Use background density
-                voxel_grid[idx] = background_density
-
-
+        # Create 3D grid of sample points
+        sample_points = np.array(
+            np.meshgrid(sample_offsets, sample_offsets, sample_offsets, indexing='ij')
+        ).reshape(3, -1).T
+        
+        total_samples = len(sample_points)
+        
+        # Process voxels in chunks for better memory usage
+        chunk_size = 1000  # Adjust based on available memory
+        total_voxels = np.prod(grid_dims)
+        indices = np.array(list(np.ndindex(grid_dims)))
+        
+        # Report total voxels
+        self.report({'INFO'}, f"Processing {total_voxels} voxels with {total_samples} samples per voxel")
+        
+        # Process voxels in chunks
+        for chunk_start in range(0, total_voxels, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, total_voxels)
+            chunk_indices = indices[chunk_start:chunk_end]
+            
+            # Process this chunk of voxels
+            for idx in chunk_indices:
+                # Calculate voxel world position
+                voxel_min = bbox_min + Vector((
+                    idx[0] * voxel_size,
+                    idx[1] * voxel_size,
+                    idx[2] * voxel_size
+                ))
+                
+                # Convert to NumPy array for faster operations
+                voxel_min_np = np.array(voxel_min)
+                
+                # Calculate all sample points in world coordinates for this voxel
+                voxel_samples = voxel_min_np + sample_points
+                
+                # Initialize sample results
+                sample_results = []
+                
+                # For each sample point, check which meshes contain it
+                for sample in voxel_samples:
+                    sample_point = Vector(sample)
+                    point_meshes = []
+                    
+                    # Check if point is inside any mesh
+                    for mesh_idx, data in enumerate(mesh_data):
+                        if is_point_inside_mesh(sample_point, data['bvhtree']):
+                            point_meshes.append({
+                                'density': data['density'],
+                                'priority': data['priority']
+                            })
+                    
+                    if point_meshes:
+                        # Sort by priority (highest first) and use highest priority mesh
+                        point_meshes.sort(key=lambda x: x['priority'], reverse=True)
+                        sample_results.append(point_meshes[0]['density'])
+                    else:
+                        sample_results.append(AIR_DENSITY)
+                
+                # Calculate voxel density based on sample results
+                if sample_results:
+                    # Take the average of sample densities
+                    voxel_grid[tuple(idx)] = np.mean(sample_results)
+            
+            # Report progress
+            progress = chunk_end / total_voxels * 100
+            self.report({'INFO'}, f"Voxelization progress: {progress:.1f}%")
+        
+        # Clean up BMeshes
+        for data in mesh_data:
+            data['bmesh'].free()
+        
         return voxel_grid
 
-    def is_point_inside_mesh(self, point, bvhtree, num_rays=5):
+    def adaptive_sampling_voxelization(self, meshes, voxel_size, min_samples=2, max_samples=8):
         """
-        Determines if a point is inside a mesh using multiple ray casting directions.
+        Voxelize meshes using adaptive sampling - more samples near surfaces, fewer in uniform regions.
         
-        Parameters:
-        - point: mathutils.Vector representing the point to test.
-        - bvhtree: BVHTree object of the mesh.
-        - num_rays: int, number of rays to cast from the point.
-        
+        Args:
+            meshes: List of Blender mesh objects
+            voxel_size: Size of each voxel in world units
+            min_samples: Minimum samples per dimension in uniform regions
+            max_samples: Maximum samples per dimension near boundaries
+            
         Returns:
-        - True if the point is inside the mesh based on majority vote, False otherwise.
+            3D numpy array representing the voxel grid
         """
-        # Generate uniformly distributed ray directions
-        ray_directions = generate_uniform_directions(num_rays)
-        
-        inside_count = 0  # Counter for rays indicating the point is inside
-
-        for direction in ray_directions:
-            current_point = point.copy()
-            ray_direction = direction.normalized()
-            hit_count = 0
-
-            while True:
-                location, normal, index, distance = bvhtree.ray_cast(current_point, ray_direction)
-                
-                if location is None:
-                    break  # No more intersections
-
-                hit_count += 1
-
-                # Move the point slightly beyond the intersection to avoid hitting the same surface
-                current_point = location + ray_direction * 1e-5
-
-                if hit_count > 1000:
-                    # Prevent infinite loops in degenerate cases
-                    break
-
-            # If the number of intersections is odd, the ray indicates the point is inside
-            if hit_count % 2 == 1:
-                inside_count += 1
-
-        # Majority vote: more than half of the rays indicate inside
-        return inside_count > (num_rays / 2)
-
-
-    def voxelize_meshes_accurate(self, meshes, voxel_size, samples_per_voxel=5):
-        # Calculate the combined bounding box of all meshes
+        # Calculate the combined bounding box
         bbox_min, bbox_max = self.calculate_combined_bounding_box(meshes)
-
-        # Store bbox_min and bbox_max as instance attributes
-        self.bbox_min = bbox_min
+        self.bbox_min = bbox_min  # Store for DICOM export
         self.bbox_max = bbox_max
+        
+        # Calculate grid dimensions
         grid_size = bbox_max - bbox_min
         grid_dims = tuple(int(np.ceil(s / voxel_size)) for s in grid_size)
-    
-        # Initialize voxel grid with background density (e.g., -1000 for air)
-        background_density = -1000.0  # Air in HU
-        voxel_grid = np.full(grid_dims, background_density, dtype=np.float32)
-    
-        # Prepare BVH trees for all meshes
-        bvh_trees = []
-        densities = []
+        
+        # Initialize voxel grid with air density
+        voxel_grid = np.full(grid_dims, AIR_DENSITY, dtype=np.float32)
+        
+        # Initialize boundary mask
+        boundary_mask = np.zeros(grid_dims, dtype=bool)
+        
+        # Prepare BVH trees and object properties for all meshes
+        mesh_data = []
         for mesh in meshes:
-            # Get density
-            density = getattr(mesh, 'density', 0.0)
-            # Prepare BMesh
+            # Get density and priority attributes
+            density = getattr(mesh, 'density', DEFAULT_DENSITY)
+            priority = getattr(mesh, 'priority', 0)
+            
+            # Create BMesh and BVHTree
             bm = bmesh.new()
             bm.from_mesh(mesh.data)
             bm.transform(mesh.matrix_world)
             bmesh.ops.triangulate(bm, faces=bm.faces[:])
-            # Create BVHTree from BMesh
+            
+            # Create BVHTree
             bvhtree = bvh_tree_from_bmesh(bm)
-            bvh_trees.append(bvhtree)
-            densities.append(density)
-            bm.free()
-    
-        # Generate sample points within each voxel
-        sample_offsets = np.linspace(0, voxel_size, samples_per_voxel, endpoint=False) + (voxel_size / (2 * samples_per_voxel))
-        sample_points = np.array(np.meshgrid(sample_offsets, sample_offsets, sample_offsets, indexing='ij')).reshape(3, -1).T
-    
-        total_samples = len(sample_points)
-    
-        # Voxelization loop
-        for idx in np.ndindex(grid_dims):
-            # Voxel minimum position
+            
+            # Store mesh data
+            mesh_data.append({
+                'bvhtree': bvhtree,
+                'density': density,
+                'priority': priority,
+                'bmesh': bm  # Store for cleanup later
+            })
+        
+        # First pass: Perform low-resolution sampling to identify boundary regions
+        self.report({'INFO'}, "First pass: Identifying boundary regions...")
+        
+        # Generate low-resolution sample points
+        low_res_sample_offsets = np.array([0.5]) * voxel_size  # Just center point
+        first_pass_samples = np.array(
+            np.meshgrid(low_res_sample_offsets, low_res_sample_offsets, low_res_sample_offsets, indexing='ij')
+        ).reshape(3, -1).T
+        
+        # Check sample neighbor offsets for boundary detection
+        neighbor_offsets = [
+            np.array([1, 0, 0]) * voxel_size,
+            np.array([-1, 0, 0]) * voxel_size,
+            np.array([0, 1, 0]) * voxel_size,
+            np.array([0, -1, 0]) * voxel_size,
+            np.array([0, 0, 1]) * voxel_size,
+            np.array([0, 0, -1]) * voxel_size
+        ]
+        
+        # Process voxels for boundary detection
+        total_voxels = np.prod(grid_dims)
+        indices = np.array(list(np.ndindex(grid_dims)))
+        chunk_size = 1000  # Adjust based on available memory
+        
+        for chunk_start in range(0, total_voxels, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, total_voxels)
+            chunk_indices = indices[chunk_start:chunk_end]
+            
+            for idx in chunk_indices:
+                # Calculate voxel world position
+                voxel_min = bbox_min + Vector((
+                    idx[0] * voxel_size,
+                    idx[1] * voxel_size,
+                    idx[2] * voxel_size
+                ))
+                
+                # Convert to NumPy array for faster operations
+                voxel_min_np = np.array(voxel_min)
+                center_point = voxel_min_np + first_pass_samples[0]
+                center_vector = Vector(center_point)
+                
+                # Check if center point is inside any mesh
+                center_inside = False
+                center_density = AIR_DENSITY
+                
+                point_meshes = []
+                for data in mesh_data:
+                    if is_point_inside_mesh(center_vector, data['bvhtree'], num_rays=3):
+                        point_meshes.append({
+                            'density': data['density'],
+                            'priority': data['priority']
+                        })
+                
+                if point_meshes:
+                    center_inside = True
+                    point_meshes.sort(key=lambda x: x['priority'], reverse=True)
+                    center_density = point_meshes[0]['density']
+                
+                # Check neighbors to detect boundaries
+                is_boundary = False
+                
+                for offset in neighbor_offsets:
+                    neighbor_point = center_point + offset
+                    neighbor_vector = Vector(neighbor_point)
+                    
+                    # Check if point is inside grid bounds
+                    neighbor_idx = tuple(np.floor((neighbor_point - bbox_min) / voxel_size).astype(int))
+                    if (neighbor_idx[0] < 0 or neighbor_idx[0] >= grid_dims[0] or
+                        neighbor_idx[1] < 0 or neighbor_idx[1] >= grid_dims[1] or
+                        neighbor_idx[2] < 0 or neighbor_idx[2] >= grid_dims[2]):
+                        continue
+                    
+                    # Check if neighbor point is inside any mesh
+                    neighbor_inside = False
+                    neighbor_density = AIR_DENSITY
+                    
+                    point_meshes = []
+                    for data in mesh_data:
+                        if is_point_inside_mesh(neighbor_vector, data['bvhtree'], num_rays=3):
+                            point_meshes.append({
+                                'density': data['density'],
+                                'priority': data['priority']
+                            })
+                    
+                    if point_meshes:
+                        neighbor_inside = True
+                        point_meshes.sort(key=lambda x: x['priority'], reverse=True)
+                        neighbor_density = point_meshes[0]['density']
+                    
+                    # If center and neighbor have different inside/outside status or different materials
+                    if (center_inside != neighbor_inside or 
+                        abs(center_density - neighbor_density) > 10):  # Threshold for material difference
+                        is_boundary = True
+                        break
+                
+                # Mark as boundary if needed
+                if is_boundary:
+                    boundary_mask[tuple(idx)] = True
+                    
+                # Set initial voxel value based on center point
+                voxel_grid[tuple(idx)] = center_density
+            
+            # Report progress
+            progress = chunk_end / total_voxels * 100
+            self.report({'INFO'}, f"First pass progress: {progress:.1f}%")
+        
+        # Second pass: Apply adaptive sampling only to boundary regions
+        self.report({'INFO'}, "Second pass: Applying adaptive sampling...")
+        
+        # Get boundary voxel indices
+        boundary_indices = np.argwhere(boundary_mask)
+        total_boundary_voxels = len(boundary_indices)
+        
+        self.report({'INFO'}, f"Found {total_boundary_voxels} boundary voxels out of {total_voxels} total voxels")
+        
+        if total_boundary_voxels == 0:
+            self.report({'INFO'}, "No boundary voxels found, skipping second pass")
+            # Clean up BMeshes
+            for data in mesh_data:
+                data['bmesh'].free()
+            return voxel_grid
+        
+        # Generate high-resolution sample offsets for boundary regions
+        max_sample_offsets = np.linspace(0, voxel_size, max_samples, endpoint=False)
+        max_sample_offsets += voxel_size / (2 * max_samples)  # Center samples
+        
+        max_sample_points = np.array(
+            np.meshgrid(max_sample_offsets, max_sample_offsets, max_sample_offsets, indexing='ij')
+        ).reshape(3, -1).T
+        
+        # Process boundary voxels with high-resolution sampling
+        for i, idx in enumerate(boundary_indices):
+            idx = tuple(idx)
+            
+            # Calculate voxel world position
             voxel_min = bbox_min + Vector((
                 idx[0] * voxel_size,
                 idx[1] * voxel_size,
                 idx[2] * voxel_size
             ))
-            # Convert voxel_min to NumPy array
+            
+            # Convert to NumPy array for faster operations
             voxel_min_np = np.array(voxel_min)
-            # Calculate sample points in world coordinates
-            voxel_samples = voxel_min_np + sample_points
-    
-            occupancy = 0.0
-            voxel_density = background_density
-    
-            # For each sample point within the voxel
+            
+            # Calculate all sample points in world coordinates for this voxel
+            voxel_samples = voxel_min_np + max_sample_points
+            
+            # Initialize sample results
+            sample_results = []
+            
+            # For each sample point, check which meshes contain it
             for sample in voxel_samples:
-                sample_point = Vector(sample)  # Convert sample to Blender Vector
-                point_inside = False
-                # Check if the point is inside any of the meshes
-                for bvhtree, density in zip(bvh_trees, densities):
-                    if self.is_point_inside_mesh(sample_point, bvhtree):
-                        point_inside = True
-                        voxel_density = density  # Use the density of the first mesh that contains the point
-                        break  # Stop checking other meshes
-                if point_inside:
-                    occupancy += 1.0
-    
-            # Calculate occupancy fraction
-            occupancy_fraction = occupancy / total_samples
-            if occupancy_fraction > 0:
-                # Assign density based on occupancy fraction
-                voxel_grid[idx] = occupancy_fraction * voxel_density + (1 - occupancy_fraction) * background_density
-    
+                sample_point = Vector(sample)
+                point_meshes = []
+                
+                # Check if point is inside any mesh
+                for data in mesh_data:
+                    if is_point_inside_mesh(sample_point, data['bvhtree']):
+                        point_meshes.append({
+                            'density': data['density'],
+                            'priority': data['priority']
+                        })
+                
+                if point_meshes:
+                    # Sort by priority (highest first) and use highest priority mesh
+                    point_meshes.sort(key=lambda x: x['priority'], reverse=True)
+                    sample_results.append(point_meshes[0]['density'])
+                else:
+                    sample_results.append(AIR_DENSITY)
+            
+            # Calculate voxel density based on sample results
+            if sample_results:
+                # Take the average of sample densities
+                voxel_grid[idx] = np.mean(sample_results)
+            
+            # Report progress periodically
+            if (i + 1) % 100 == 0 or i == total_boundary_voxels - 1:
+                progress = (i + 1) / total_boundary_voxels * 100
+                self.report({'INFO'}, f"Second pass progress: {progress:.1f}%")
+        
+        # Clean up BMeshes
+        for data in mesh_data:
+            data['bmesh'].free()
+        
         return voxel_grid
 
+    def simulate_radial_streaks(self, voxel_grid, metal_threshold, streak_intensity, num_angles):
+        """
+        Simulate metal artifacts as radial streaks.
+        
+        Args:
+            voxel_grid: 3D numpy array of voxel data
+            metal_threshold: Density threshold to consider voxels as metal
+            streak_intensity: Intensity of the streaks
+            num_angles: Number of angles for streak rays
+        """
+        # Process each slice separately
+        for z in range(voxel_grid.shape[2]):
+            # Get slice data
+            slice_data = voxel_grid[:, :, z].copy()
+            
+            # Find metal points
+            metal_indices = np.argwhere(slice_data >= metal_threshold)
+            if metal_indices.size == 0:
+                continue
+            
+            # Get slice dimensions
+            height, width = slice_data.shape
+            
+            # Process each metal point
+            for metal_voxel in metal_indices:
+                x0, y0 = metal_voxel
+                
+                # Create streaks in all directions
+                for angle in np.linspace(0, 2 * np.pi, num=num_angles, endpoint=False):
+                    # Calculate end point
+                    x1 = int(x0 + height * np.sin(angle))
+                    y1 = int(y0 + width * np.cos(angle))
+                    
+                    # Ensure points are within bounds
+                    x1 = np.clip(x1, 0, height - 1)
+                    y1 = np.clip(y1, 0, width - 1)
+                    
+                    # Draw line from metal to edge
+                    rr, cc = line(x0, y0, x1, y1)
+                    
+                    # Clip coordinates
+                    rr = np.clip(rr, 0, height - 1)
+                    cc = np.clip(cc, 0, width - 1)
+                    
+                    # Calculate distance-based attenuation
+                    distances = np.sqrt((rr - x0) ** 2 + (cc - y0) ** 2)
+                    attenuation = np.exp(-distances / (0.1 * max(height, width)))
+                    
+                    # Apply streak intensity with attenuation
+                    slice_data[rr, cc] += streak_intensity * attenuation
+            
+            # Clip values to valid HU range
+            slice_data = np.clip(slice_data, MIN_HU_VALUE, MAX_HU_VALUE)
+            
+            # Update slice in voxel grid
+            voxel_grid[:, :, z] = slice_data
+
+    def simulate_ring_artifacts(self, voxel_grid, intensity, frequency):
+        """
+        Simulate ring artifacts in CT images.
+        
+        Args:
+            voxel_grid: 3D numpy array of voxel data
+            intensity: Intensity of the rings
+            frequency: Frequency of the rings
+        """
+        # Calculate center of each slice
+        center = (voxel_grid.shape[0] // 2, voxel_grid.shape[1] // 2)
+        
+        # Create coordinate grid
+        y, x = np.ogrid[:voxel_grid.shape[0], :voxel_grid.shape[1]]
+        
+        # Process each slice
+        for z in range(voxel_grid.shape[2]):
+            # Get slice data
+            slice_data = voxel_grid[:, :, z]
+            
+            # Calculate radial distance from center
+            radius = np.hypot(x - center[1], y - center[0])
+            
+            # Create ring pattern
+            rings = np.sin(2 * np.pi * frequency * radius / voxel_grid.shape[0])
+            
+            # Apply rings to slice
+            slice_data += intensity * rings
+            
+            # Update slice in voxel grid
+            voxel_grid[:, :, z] = slice_data
+
+    def apply_partial_volume_effect(self, voxel_grid, sigma):
+        """
+        Apply Gaussian smoothing to simulate partial volume effects.
+        
+        Args:
+            voxel_grid: 3D numpy array of voxel data
+            sigma: Standard deviation for Gaussian kernel
+            
+        Returns:
+            Smoothed voxel grid
+        """
+        from scipy.ndimage import gaussian_filter
+        return gaussian_filter(voxel_grid, sigma=sigma)
 
     def export_to_dicom(
         self,
         voxel_grid,
         voxel_size,
         output_dir,
-        study_instance_uid,
-        frame_of_reference_uid,
-        noise_std_dev=0,
-        phase_info=None,
+        phase_info,
         total_phases=1,
-        patient_name = "Dr. Smith",
-        patient_id = "001234567"
-        ):
+        patient_name="Anonymous",
+        patient_id="12345678",
+        patient_sex="M"
+    ):
+        """
+        Export the voxel grid as a series of DICOM slices.
+        
+        Args:
+            voxel_grid: 3D numpy array of voxel data
+            voxel_size: Size of each voxel in world units
+            output_dir: Directory to save DICOM files
+            phase_info: Dictionary with phase information
+            total_phases: Total number of phases in 4D sequence
+            patient_name: Name of the patient
+            patient_id: Patient ID
+            patient_sex: Patient sex (M/F/O)
+            
+        Returns:
+            Status dictionary
+        """
+        # Get number of slices
         num_slices = voxel_grid.shape[2]
+        
+        # Clip values to valid HU range
+        voxel_grid = np.clip(voxel_grid, MIN_HU_VALUE, MAX_HU_VALUE)
+        
+        # Export each slice
         for i in range(num_slices):
             slice_data = voxel_grid[:, :, i]
+            
             result = self.save_dicom_slice(
-                slice_data,
-                voxel_size,
+                slice_data=slice_data,
+                voxel_size=voxel_size,
                 slice_index=i,
                 output_dir=output_dir,
-                study_instance_uid=study_instance_uid,
-                frame_of_reference_uid=frame_of_reference_uid,
-                noise_std_dev=noise_std_dev,
                 phase_info=phase_info,
                 total_phases=total_phases,
                 num_slices=num_slices,
-                patient_id = patient_id,
-                patient_name = patient_name
+                patient_name=patient_name,
+                patient_id=patient_id,
+                patient_sex=patient_sex
             )
+            
             if result != {'FINISHED'}:
-                return result  # Handle cancellation if save_dicom_slice failed
-
+                return result
+                
+        return {'FINISHED'}
 
     def save_dicom_slice(
         self,
@@ -758,208 +944,237 @@ class VoxelizeOperator(Operator):
         voxel_size,
         slice_index,
         output_dir,
-        study_instance_uid,
-        frame_of_reference_uid,
-        noise_std_dev=0,
-        phase_info=None,
+        phase_info,
         total_phases=1,
         num_slices=1,
-        patient_id = "001234567",
-        patient_name = "Dr. Smith"
-        ):    
-        import pydicom
-        from pydicom.dataset import Dataset, FileDataset
-        from datetime import datetime
-        from pydicom.uid import generate_uid
-    
+        patient_name="Anonymous",
+        patient_id="12345678",
+        patient_sex="M"
+    ):
+        """
+        Save a single slice as a DICOM file.
+        
+        Args:
+            slice_data: 2D numpy array of slice data
+            voxel_size: Size of each voxel in world units
+            slice_index: Index of the slice
+            output_dir: Directory to save DICOM files
+            phase_info: Dictionary with phase information
+            total_phases: Total number of phases in 4D sequence
+            num_slices: Total number of slices
+            patient_name: Name of the patient
+            patient_id: Patient ID
+            patient_sex: Patient sex (M/F/O)
+            
+        Returns:
+            Status dictionary
+        """
         # Get current date and time
         current_datetime = datetime.now()
         date_str = current_datetime.strftime('%Y%m%d')
-        time_str = current_datetime.strftime('%H%M%S.%f')  # Include fractional seconds
-    
+        time_str = current_datetime.strftime('%H%M%S.%f')
+        
         # Create file meta information
         file_meta = Dataset()
         file_meta.MediaStorageSOPClassUID = pydicom.uid.CTImageStorage
         file_meta.MediaStorageSOPInstanceUID = generate_uid()
         file_meta.ImplementationClassUID = pydicom.uid.PYDICOM_IMPLEMENTATION_UID
         file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
-    
+        
         # Create the FileDataset instance
         ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
-    
+        
         # Set DICOM tags
         ds.ImageType = ['ORIGINAL', 'PRIMARY', 'AXIAL']
         ds.SOPClassUID = file_meta.MediaStorageSOPClassUID
         ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
-    
-        # Patient and Study Information
+        
+        # Patient information
         ds.PatientName = patient_name
         ds.PatientID = patient_id
         ds.PatientBirthDate = ''
-        ds.PatientSex = 'M'
-    
-        ds.StudyInstanceUID = study_instance_uid  # Remains the same for all phases
-        ds.FrameOfReferenceUID = frame_of_reference_uid
-        ds.StudyID = '20201'
-        ds.AccessionNumber = '20201'
+        ds.PatientSex = patient_sex
+        
+        # Study information
+        ds.StudyInstanceUID = self.study_instance_uid
+        ds.FrameOfReferenceUID = self.frame_of_reference_uid
+        ds.StudyID = '1'
+        ds.AccessionNumber = '1'
         ds.StudyDate = date_str
-        ds.StudyTime = '121656'
-        ds.ReferringPhysicianName = 'Dr. Test'
-    
-        # Series Information
+        ds.StudyTime = time_str
+        ds.ReferringPhysicianName = ''
+        
+        # Series information
         ds.SeriesInstanceUID = phase_info.get('series_instance_uid', generate_uid())
-        ds.SeriesNumber = int(phase_info.get('series_number', '1'))  # Ensure it's an int
-        ds.SeriesDescription = phase_info.get('series_description', '4DCT Phase')
+        ds.SeriesNumber = int(phase_info.get('series_number', '1'))
+        ds.SeriesDescription = phase_info.get('series_description', 'CT Series')
         ds.SeriesDate = date_str
         ds.SeriesTime = time_str
-    
-        # Equipment Information
+        
+        # Equipment information
         ds.Modality = 'CT'
-        ds.Manufacturer = 'TOSHIBA'
-        ds.InstitutionName = 'Hospital'
-        ds.InstitutionAddress = 'Test Street'
-        ds.StationName = 'Level 1 CT Scanner'
-        ds.InstitutionalDepartmentName = 'Radiation Oncology'
-        ds.ManufacturerModelName = 'Aquilion/LB'
-        ds.DeviceSerialNumber = 'A7DNAHDGALS'
-        ds.SoftwareVersions = 'V6.30ER012'
-    
-        # Image Acquisition Information
-        ds.KVP = 120  # Numeric
-        ds.SliceThickness = float(voxel_size)  # Numeric
-        ds.DataCollectionDiameter = 700.0  # Numeric (float)
-        ds.ReconstructionDiameter = 700.0  # Numeric (float)
-        ds.GantryDetectorTilt = 0.0  # Numeric (float)
-        ds.TableHeight = 159.0  # Numeric (float)
-        ds.RotationDirection = 'CW'  # String (CS)
-        ds.ExposureTime = 500  # Numeric (int)
-        ds.XRayTubeCurrent = 45  # Numeric (int)
-        ds.Exposure = 13  # Numeric (int)
-        ds.FilterType = 'LARGE'  # String (SH)
-        ds.GeneratorPower = 5  # Numeric (int)
-        ds.FocalSpots = [1.6, 1.4]  # List of floats
-        ds.ConvolutionKernel = 'FC19'  # String (SH)
-        ds.PatientPosition = 'HFS'  # String (CS)
-        ds.AcquisitionType = 'SPIRAL'  # String (CS)
-        ds.RevolutionTime = 0.5  # Numeric (float)
-        ds.SingleCollimationWidth = 2.0  # Numeric (float)
-        ds.TotalCollimationWidth = 32.0  # Numeric (float)
-        ds.TableFeedPerRotation = -2.6  # Numeric (float)
-        ds.SpiralPitchFactor = 0.081  # Numeric (float)
-        ds.FluoroscopyFlag = 'NO'  # String (CS)
-        ds.CTDIvol = 26.5  # Numeric (float)
-    
-        # Performed Procedure Step Information
-        ds.PerformedProcedureStepStartDate = date_str
-        ds.PerformedProcedureStepStartTime = '121656'
-        ds.PerformedProcedureStepID = '18241'
-    
-        # Image Information
-        ds.InstanceNumber = slice_index + 1  # Numeric
-        ds.AcquisitionNumber = 1  # Numeric
+        ds.Manufacturer = 'DICOMator'
+        ds.InstitutionName = 'Virtual Hospital'
+        ds.StationName = 'Blender'
+        
+        # Image information
+        ds.InstanceNumber = slice_index + 1
+        ds.AcquisitionNumber = 1
         ds.ContentDate = date_str
         ds.ContentTime = time_str
         ds.AcquisitionDate = date_str
-        ds.AcquisitionTime = '123249.35'
-    
-        # Image Position and Orientation
-        if not hasattr(self, 'bbox_min') or self.bbox_min is None:
-            self.report({'ERROR'}, "Bounding box minimum (bbox_min) not defined.")
-            return {'CANCELLED'}
-    
+        ds.AcquisitionTime = time_str
+        
+        # Image position and orientation
         ds.ImagePositionPatient = [
             float(self.bbox_min.x),
             float(self.bbox_min.y),
             float(self.bbox_min.z + (slice_index * voxel_size))
         ]
-        ds.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]  # List of floats
-        ds.SliceLocation = float(self.bbox_min.z + (slice_index * voxel_size))  # Numeric (float)
-        ds.PositionReferenceIndicator = 'XY'
-        ds.PatientOrientation = ['L', 'P']
-    
-        # Stack and Temporal Information
-        ds.StackID = '1_3800_00001'
-        ds.InStackPositionNumber = slice_index + 1  # Numeric
-        ds.TemporalPositionIndex = int(phase_info.get('temporal_position_index', '1'))  # Numeric
-        ds.NumberOfTemporalPositions = int(total_phases)  # Numeric
-    
-        # Pixel Data Characteristics
-        ds.SamplesPerPixel = 1  # Numeric
+        ds.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        ds.SliceLocation = float(self.bbox_min.z + (slice_index * voxel_size))
+        
+        # Temporal information for 4D
+        if total_phases > 1:
+            ds.TemporalPositionIndex = int(phase_info.get('temporal_position_index', '1'))
+            ds.NumberOfTemporalPositions = total_phases
+        
+        # Pixel data characteristics
+        ds.SamplesPerPixel = 1
         ds.PhotometricInterpretation = 'MONOCHROME2'
         ds.Rows, ds.Columns = slice_data.shape
-        ds.PixelSpacing = [float(voxel_size), float(voxel_size)]  # List of floats
-        ds.BitsAllocated = 16  # Numeric
-        ds.BitsStored = 16  # Numeric
-        ds.HighBit = 15  # Numeric
-        ds.PixelRepresentation = 1  # Numeric
-        ds.RescaleIntercept = 0.0  # Numeric
-        ds.RescaleSlope = 1.0  # Numeric
-        ds.WindowCenter = 40  # Numeric
-        ds.WindowWidth = 400  # Numeric
-    
-        # Set Pixel Data
-        if noise_std_dev > 0:
-            noise = np.random.normal(0, noise_std_dev, slice_data.shape)
-            slice_data += noise
-    
-        slice_data = np.clip(slice_data, -1024, 3071)
+        ds.PixelSpacing = [float(voxel_size), float(voxel_size)]
+        ds.BitsAllocated = 16
+        ds.BitsStored = 16
+        ds.HighBit = 15
+        ds.PixelRepresentation = 1  # Signed
+        ds.RescaleIntercept = 0.0
+        ds.RescaleSlope = 1.0
+        ds.WindowCenter = 40
+        ds.WindowWidth = 400
+        
+        # Convert to int16 for DICOM
         pixel_array = slice_data.astype(np.int16)
         ds.PixelData = pixel_array.tobytes()
-    
-        # Filename includes phase index and slice index
+        
+        # Create filename
         filename = os.path.join(output_dir, f"CT_Phase_{phase_info.get('series_number')}_Slice_{slice_index+1:04d}.dcm")
-    
+        
         # Save the DICOM file
         ds.is_little_endian = True
         ds.is_implicit_VR = False
-        ds.save_as(filename)
+        
+        try:
+            ds.save_as(filename)
+            self.report({'INFO'}, f"Saved slice {slice_index+1}/{num_slices}")
+            return {'FINISHED'}
+        except Exception as e:
+            self.report({'ERROR'}, f"Error saving DICOM file: {str(e)}")
+            return {'CANCELLED'}
+
+
+# Helper Functions
+
+def is_point_inside_mesh(point, bvhtree, num_rays=5):
+    """
+    Determines if a point is inside a mesh using ray casting.
     
-        self.report({'INFO'}, f"Saved DICOM slice {slice_index+1} to {filename}")
-        return {'FINISHED'}
-
-
+    Args:
+        point: Vector, position to test
+        bvhtree: BVHTree of the mesh
+        num_rays: Number of rays to cast (more = more accurate)
+        
+    Returns:
+        bool: True if the point is inside the mesh
+    """
+    # Generate uniformly distributed ray directions
+    ray_directions = generate_uniform_directions(num_rays)
+    
+    inside_count = 0
+    
+    for direction in ray_directions:
+        ray_origin = point.copy()
+        ray_direction = direction.normalized()
+        hit_count = 0
+        
+        # Cast ray and count intersections
+        while True:
+            hit = bvhtree.ray_cast(ray_origin, ray_direction)
+            
+            if hit[0] is None:  # No intersection
+                break
+                
+            hit_count += 1
+            
+            # Move slightly past the intersection
+            ray_origin = hit[0] + ray_direction * 1e-5
+            
+            # Avoid infinite loops
+            if hit_count > 100:
+                break
+                
+        # If odd number of hits, point is inside
+        if hit_count % 2 == 1:
+            inside_count += 1
+    
+    # Use majority vote
+    return inside_count > (num_rays / 2)
 
 
 def generate_uniform_directions(num_directions):
     """
-    Generates uniformly distributed directions over a sphere using the Fibonacci lattice.
+    Generate uniformly distributed directions on a sphere.
     
-    Parameters:
-    - num_directions: int, number of directions to generate.
-    
+    Args:
+        num_directions: Number of directions to generate
+        
     Returns:
-    - directions: list of mathutils.Vector, uniformly distributed directions.
+        List of Vector objects representing directions
     """
     directions = []
-    phi = math.pi * (3. - math.sqrt(5.))  # Golden angle in radians
-
+    phi = math.pi * (3.0 - math.sqrt(5.0))  # Golden angle
+    
     for i in range(num_directions):
-        y = 1 - (i / float(num_directions - 1)) * 2  # y goes from 1 to -1
-        radius = math.sqrt(1 - y * y)  # radius at y
-
-        theta = phi * i  # golden angle increment
-
+        y = 1.0 - (i / float(num_directions - 1)) * 2.0  # y goes from 1 to -1
+        radius = math.sqrt(1.0 - y * y)  # Radius at y
+        
+        theta = phi * i  # Golden angle increment
+        
         x = math.cos(theta) * radius
         z = math.sin(theta) * radius
-
+        
         directions.append(Vector((x, y, z)))
-
+        
     return directions
 
 
-
-# Helper function to create BVHTree from BMesh
 def bvh_tree_from_bmesh(bm):
+    """
+    Create a BVHTree from a BMesh.
+    
+    Args:
+        bm: BMesh object
+        
+    Returns:
+        BVHTree object
+    """
     import mathutils
+    
+    # Ensure lookup tables
     bm.verts.ensure_lookup_table()
     bm.faces.ensure_lookup_table()
+    
+    # Get vertices and polygons
     vertices = [v.co.copy() for v in bm.verts]
     polygons = [[v.index for v in f.verts] for f in bm.faces]
-    bvhtree = mathutils.bvhtree.BVHTree.FromPolygons(vertices, polygons)
-    return bvhtree
+    
+    # Create BVHTree
+    return mathutils.bvhtree.BVHTree.FromPolygons(vertices, polygons)
+
 
 # Operator to set default density
 class SetDefaultDensityOperator(bpy.types.Operator):
+    """Initialize selected mesh objects with a default density value."""
     bl_idname = "object.set_default_density_operator"
     bl_label = "Set Default Density"
     bl_description = "Initialize selected mesh objects with a default density"
@@ -982,8 +1197,10 @@ class SetDefaultDensityOperator(bpy.types.Operator):
         self.report({'INFO'}, f"Set density of {len(selected_meshes)} object(s) to {self.default_density}")
         return {'FINISHED'}
 
+
 # Operator to set default priority
 class SetDefaultPriorityOperator(bpy.types.Operator):
+    """Initialize selected mesh objects with a default priority value."""
     bl_idname = "object.set_default_priority_operator"
     bl_label = "Set Default Priority"
     bl_description = "Initialize selected mesh objects with a default priority"
@@ -1006,85 +1223,101 @@ class SetDefaultPriorityOperator(bpy.types.Operator):
         self.report({'INFO'}, f"Set priority of {len(selected_meshes)} object(s) to {self.default_priority}")
         return {'FINISHED'}
 
+
 # Panel Class
 class VoxelizerPanel(bpy.types.Panel):
-    bl_label = "Voxelizer Extension"
-    bl_idname = "VIEW3D_PT_voxelizer"
+    """Panel for DICOMator settings and operations."""
+    bl_label = "DICOMator"
+    bl_idname = "VIEW3D_PT_dicomator"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Voxelizer'
+    bl_category = 'DICOMator'
 
     def draw(self, context):
         layout = self.layout
         obj = context.object
         scene = context.scene
-        settings = scene.voxelizer_settings  # Access the settings
+        settings = scene.voxelizer_settings
 
-        # Display the 'density' and 'priority' properties when a mesh object is selected
+        # Object properties section (visible when a mesh is selected)
         if obj and obj.type == 'MESH':
-            layout.label(text="Object Properties")
-            layout.prop(obj, 'density')
-            layout.prop(obj, 'priority')
-            layout.operator("object.set_default_density_operator", text="Set Default Density")
-            layout.operator("object.set_default_priority_operator", text="Set Default Priority")
-            layout.separator()
+            box = layout.box()
+            box.label(text="Object Properties")
+            box.prop(obj, 'density')
+            box.prop(obj, 'priority')
+            
+            # Operators for setting defaults
+            row = box.row(align=True)
+            row.operator("object.set_default_density_operator", text="Set Default Density")
+            row.operator("object.set_default_priority_operator", text="Set Default Priority")
 
         # Voxelization settings
-        layout.label(text="Voxelization Settings")
-        layout.prop(settings, 'voxel_size')
-        layout.prop(settings, 'enable_4d_export')
-
+        box = layout.box()
+        box.label(text="Voxelization Settings")
+        box.prop(settings, 'voxel_size')
+        box.prop(settings, 'sampling_density')
+        
+        # 4D export settings
+        box.prop(settings, 'enable_4d_export')
         if settings.enable_4d_export:
-            layout.prop(settings, 'start_frame')
-            layout.prop(settings, 'end_frame')
+            row = box.row(align=True)
+            row.prop(settings, 'start_frame')
+            row.prop(settings, 'end_frame')
 
-        layout.separator()
-        layout.label(text="Artifact Simulation")
-
-        # Noise Simulation
-        layout.prop(settings, 'enable_noise')
+        # Artifact simulation
+        box = layout.box()
+        box.label(text="Artifact Simulation")
+        
+        # Noise settings
+        row = box.row()
+        row.prop(settings, 'enable_noise')
         if settings.enable_noise:
-            layout.prop(settings, 'noise_std_dev')
-
-        # Metal Artifact Simulation
-        layout.prop(settings, 'enable_metal_artifacts')
+            row.prop(settings, 'noise_std_dev')
+        
+        # Metal artifact settings
+        row = box.row()
+        row.prop(settings, 'enable_metal_artifacts')
         if settings.enable_metal_artifacts:
-            layout.prop(settings, 'metal_threshold')
-            layout.prop(settings, 'streak_intensity')
-            layout.prop(settings, 'num_angles')
-
-        # Partial Volume Effect Simulation
-        layout.prop(settings, 'enable_pve')
+            col = box.column(align=True)
+            col.prop(settings, 'metal_threshold')
+            col.prop(settings, 'streak_intensity')
+            col.prop(settings, 'num_angles')
+        
+        # Partial volume effect settings
+        row = box.row()
+        row.prop(settings, 'enable_pve')
         if settings.enable_pve:
-            layout.prop(settings, 'pve_sigma')
-
-        # Ring Artifact Simulation
-        layout.prop(settings, 'enable_ring_artifacts')
+            row.prop(settings, 'pve_sigma')
+        
+        # Ring artifact settings
+        row = box.row()
+        row.prop(settings, 'enable_ring_artifacts')
         if settings.enable_ring_artifacts:
-            layout.prop(settings, 'ring_intensity')
-            layout.prop(settings, 'ring_frequency')
+            col = box.column(align=True)
+            col.prop(settings, 'ring_intensity')
+            col.prop(settings, 'ring_frequency')
 
+        # Patient information
         box = layout.box()
         box.label(text="Patient Information")
         box.prop(settings, "patient_name")
         box.prop(settings, "patient_id")
         box.prop(settings, "patient_sex")
+
+        # Output directory selection (add before the voxelize button)
+        box = layout.box()
+        box.label(text="Export Settings")
+        box.prop(settings, "output_directory")
+
+        # Voxelize button
+        layout.separator()
+        layout.operator("object.voxelize_operator", text="Voxelize Selected Objects")
         
-        #layout.prop(settings, 'enable_beam_hardening')
-        #if settings.enable_beam_hardening:
-        #    layout.prop(settings, 'metal_threshold_bh')
+        # Show warning if no objects selected
+        if not context.selected_objects:
+            layout.label(text="No objects selected", icon='ERROR')
+            layout.label(text="Select mesh objects to voxelize")
 
-        # Voxelization Method
-        layout.separator()
-        layout.label(text="Voxelization Method")
-        layout.prop(settings, 'voxelization_method', expand=True)
-        if settings.voxelization_method == 'ACCURATE':
-            layout.prop(settings, 'samples_per_voxel')
-        elif settings.voxelization_method == 'FAST':
-            layout.prop(settings, 'num_rays_per_voxel')
-
-        layout.separator()
-        layout.operator("object.voxelize_operator")
 
 # Registration
 classes = (
@@ -1098,22 +1331,28 @@ classes = (
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+        
     bpy.types.Object.density = FloatProperty(
-        name="Density",
-        description="Density value for the object",
-        default=1.0,
-        min=-1000,
+        name="Density (HU)",
+        description="Density value in Hounsfield Units",
+        default=0.0,
+        min=-1024.0,
+        max=3071.0,
     )
+    
     bpy.types.Object.priority = IntProperty(
         name="Priority",
-        description="Priority for density assignment in overlapping regions",
+        description="Priority for density assignment in overlapping regions (higher values take precedence)",
         default=0,
+        min=0,
     )
+    
     bpy.types.Scene.voxelizer_settings = PointerProperty(type=VoxelizerSettings)
 
 def unregister():
-    for cls in classes:
+    for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
+        
     del bpy.types.Object.density
     del bpy.types.Object.priority
     del bpy.types.Scene.voxelizer_settings
