@@ -1,4 +1,3 @@
-
 ## DICOMator: Blender Addon for Synthetic CT Data Generation
 
 **Overview**
@@ -7,7 +6,8 @@ The DICOMator is a Blender addon designed to convert selected mesh objects into 
 
 **Features**
 
-* **Voxelization of Meshes:** Convert meshes into 3D volumes with customizable voxel sizes.
+* **Adaptive Voxelization:** Convert meshes into 3D volumes with intelligent boundary detection and adaptive sampling.
+* **Real-time Progress Tracking:** Watch the voxelization process with status updates and a progress indicator.
 * **DICOM Export:** Export voxelized data as a series of DICOM CT images compatible with medical imaging software.
 * **4D CT Series Generation:** Create 4D CT datasets simulating motion (e.g., breathing) across multiple frames.
 * **Artifact Simulation:**
@@ -15,24 +15,16 @@ The DICOMator is a Blender addon designed to convert selected mesh objects into 
     * **Metal Artifacts:** Simulate radial streaks around high-density objects.
     * **Partial Volume Effects:** Apply smoothing to mimic artifacts caused by overlapping structures.
     * **Ring Artifacts:** Introduce ring artifacts commonly seen in CT imaging.
-    * **Beam Hardening:** Simulate beam hardening effects (currently disabled).
 * **Custom Densities and Priorities:** Assign specific Hounsfield Unit (HU) values and overlapping priorities to mesh objects.
-* **Voxelization Methods:**
-    * **Fast (Ray Casting):** Quick voxelization using ray casting (less accurate).
-    * **Accurate (Sampling):** Precise voxelization using volume sampling (slower).
 
 **Installation**
 
-1. **Download the Addon:** Save the provided script as a `.py` file (e.g., `dicomator.py`).
-2. **Install Dependencies:**
-    * `pydicom` (automatic installation attempted)
-    * `scikit-image` (manual installation required)
-        * Open Blender's Python Console or your system's terminal.
-        * Run: `python -m pip install scikit-image`
-3. **Install the Addon in Blender:**
+1. **Download the Extension:** Download the DICOMator extension package.
+2. **Install the Extension in Blender:**
     * Go to Edit > Preferences > Add-ons.
-    * Click "Install..." and select `dicomator.py`.
+    * Click "Install..." and select the downloaded zip file.
     * Enable the DICOMator checkbox.
+3. **Dependencies:** All required dependencies are included in the package as wheels and will be installed automatically.
 4. **Save User Preferences (Optional):** Click "Save Preferences" to keep the addon enabled for future sessions.
 
 **Usage**
@@ -53,18 +45,21 @@ The DICOMator is a Blender addon designed to convert selected mesh objects into 
 
 * Open the DICOMator panel and adjust settings:
     * **Voxel Size (mm):** Size of each voxel (smaller = higher resolution, longer processing).
+    * **Sampling Density:** Controls the maximum number of samples per dimension at object boundaries (higher = more accurate but slower).
     * **4D CT Export:** Enable to export over multiple frames.
         * Set Start and End Frames.
     * **Artifact Simulation:** Configure noise, metal artifacts, partial volume effects, and ring artifacts.
-    * **Voxelization Method:** Choose Fast (Ray Casting) or Accurate (Sampling).
-        * Adjust Number of Rays/Samples per Voxel for accuracy.
 
 ![metal_streaks](https://github.com/user-attachments/assets/714b3bbc-3e8e-442d-bd39-ab766e1b1cfa)
 
 **Running the Voxelization**
 
 1. Click "Voxelize Selected Objects" after configuration.
-2. The addon processes meshes and exports the DICOM series to a "DICOM_Output" folder in your Blender file directory.
+2. A progress indicator will appear in Blender's status bar showing the current operation and completion percentage.
+3. The addon processes meshes using an efficient adaptive sampling approach:
+   * First pass: Detects boundary regions using a fast, low-resolution scan
+   * Second pass: Applies high-resolution sampling only where needed (at object boundaries)
+4. When complete, DICOM series is exported to the specified output directory (default: "DICOM_Output" folder).
 
 **Output**
 
@@ -81,19 +76,24 @@ The DICOMator is a Blender addon designed to convert selected mesh objects into 
 
 **Notes and Tips**
 
-* High-resolution settings and accurate voxelization methods require more processing time and memory.
-* Use larger voxel sizes and fewer samples/rays for initial testing.
-* Ensure `pydicom` and `scikit-image` are installed correctly. Reinstall if needed.
-* The addon uses default DICOM metadata. Modify code for patient/study information customization.
-* Beam hardening simulation is currently disabled (uncomment relevant code sections for activation).
-* Check Blender's console and info bar for any errors.
+* **Adaptive Sampling:** The addon intelligently detects object boundaries and applies more samples only where needed, significantly improving performance.
+* **Performance Optimization:** For faster results:
+  * Increase the voxel size (lower resolution)
+  * Reduce the sampling density (fewer samples at boundaries)
+  * Use simple mesh objects with clean geometry
+* **Memory Usage:** Large scenes with small voxel sizes may require significant RAM. Consider using larger voxel sizes for initial tests.
+* **Progress Tracking:** Watch the status bar for real-time progress information. You can press ESC to cancel a long-running operation.
+* **Output Directory:** Customizable through the panel. Ensure you have write permissions to the selected directory.
 
 **Troubleshooting**
 
 * **Addon Not Appearing:** Ensure installation and enabled status in preferences. Check console for installation errors.
-* **Missing Dependencies:** Reinstall `pydicom` and `scikit-image` using Blender's Python interpreter. Verify correct Python environment.
-* **Export Issues:** Verify write permissions for the "DICOM_Output" directory. Check console for file saving errors.
+* **Slow Performance:** Increase voxel size or reduce sampling density. Consider simplifying complex meshes.
+* **No Visible Artifacts:** Make sure artifact settings have high enough values to be visible. For metal artifacts, ensure your objects have density values above the metal threshold.
+* **Noise Not Visible:** Try increasing the noise standard deviation value.
+* **Export Issues:** Verify write permissions for the output directory. Check console for file saving errors.
+* **Processing Cancellation:** Press ESC to cancel a long-running voxelization process.
 
 **Contributing**
 
-* Feedback and improvements are welcome!
+* Feedback and improvements are welcome at the GitHub repository: https://github.com/drmichaeldouglass/DICOMator

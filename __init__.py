@@ -209,43 +209,218 @@ class VoxelizeOperator(Operator):
     """Voxelize selected meshes and export as DICOM CT series."""
     bl_idname = "object.voxelize_operator"
     bl_label = "Voxelize Selected Objects"
-    bl_options = {'REGISTER', 'UNDO'}
-
+    bl_options = {'REGISTER', 'UNDO', 'BLOCKING'}  # Add BLOCKING option
+    
     # Internal attributes for UIDs
     study_instance_uid: StringProperty()
     frame_of_reference_uid: StringProperty()
-
+    
+    # Progress tracking properties
+    progress: FloatProperty(default=0.0, min=0.0, max=100.0)
+    progress_message: StringProperty(default="Initializing...")
+    _timer = None
+    _processing_done = False
+    _voxel_grid = None
+    _context = None
+    _selected_meshes = None
+    _output_dir = None
+    _phase_info = None
+    _current_frame_idx = 0
+    _total_frames = 1
+    _processing_step = 'INIT'  # INIT, VOXELIZING, ARTIFACTS, EXPORTING, DONE
+    
     def execute(self, context):
-        """Execute the voxelization operation."""
-        start_time = time.time()
-        settings = context.scene.voxelizer_settings
+        """Initialize the modal operation."""
+        self.progress = 0.0
+        self.progress_message = "Starting voxelization..."
+        self._processing_done = False
+        self._context = context
+        self._processing_step = 'INIT'
         
         # Get selected meshes
-        selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
-        if not selected_meshes:
+        self._selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+        if not self._selected_meshes:
             self.report({'ERROR'}, "No mesh objects selected")
             return {'CANCELLED'}
         
-        # Create output directory using user-specified path
+        # Create output directory
+        settings = context.scene.voxelizer_settings
         output_dir = bpy.path.abspath(settings.output_directory)
         os.makedirs(output_dir, exist_ok=True)
+        self._output_dir = output_dir
         
-        # Generate UIDs for the study
+        # Generate UIDs
         self.study_instance_uid = generate_uid()
         self.frame_of_reference_uid = generate_uid()
         
-        # Process 4D CT if enabled, otherwise process single frame
+        # Initialize 4D settings
+        self._current_frame_idx = 0
         if settings.enable_4d_export:
-            result = self.process_4d_ct(context, selected_meshes, output_dir)
+            if settings.start_frame > settings.end_frame:
+                self.report({'ERROR'}, "Start Frame must be less than or equal to End Frame")
+                return {'CANCELLED'}
+            self._total_frames = settings.end_frame - settings.start_frame + 1
         else:
-            result = self.process_single_frame(context, selected_meshes, output_dir)
-            
-        if result == {'FINISHED'}:
-            elapsed_time = time.time() - start_time
-            self.report({'INFO'}, f"Voxelization complete in {elapsed_time:.2f} seconds. Output saved to {output_dir}")
-            
-        return result
+            self._total_frames = 1
         
+        # Start the timer
+        wm = context.window_manager
+        self._timer = wm.event_timer_add(0.1, window=context.window)
+        wm.modal_handler_add(self)
+        
+        # Show a progress bar in the status bar
+        context.workspace.status_text_set("DICOMator: Initializing...")
+        
+        return {'RUNNING_MODAL'}
+    
+    def modal(self, context, event):
+        """Handle modal updates and processing steps."""
+        if event.type == 'ESC':
+            self.cancel(context)
+            return {'CANCELLED'}
+            
+        if event.type == 'TIMER':
+            # Process the current step
+            if self._processing_step == 'INIT':
+                # Initialize phase
+                self.progress = 0.0
+                settings = context.scene.voxelizer_settings
+                
+                if settings.enable_4d_export:
+                    # Set up the current frame in 4D sequence
+                    frame = settings.start_frame + self._current_frame_idx
+                    scene = context.scene
+                    scene.frame_set(frame)
+                    
+                    # Calculate percentage through motion cycle
+                    percentage = (self._current_frame_idx + 1) / self._total_frames * 100
+                    
+                    # Set up phase info for this frame
+                    self._phase_info = {
+                        'series_description': f"Phase {self._current_frame_idx + 1} - {percentage:.1f}% of breathing cycle",
+                        'series_instance_uid': generate_uid(),
+                        'series_number': str(self._current_frame_idx + 1),
+                        'temporal_position_index': str(frame),
+                    }
+                else:
+                    # Single frame export
+                    self._phase_info = {
+                        'series_description': "Static CT Scan",
+                        'series_instance_uid': generate_uid(),
+                        'series_number': "1",
+                        'temporal_position_index': "1",
+                    }
+                
+                self.progress_message = "Starting voxelization..."
+                self._processing_step = 'VOXELIZING'
+            
+            elif self._processing_step == 'VOXELIZING':
+                # Voxelizing phase
+                settings = context.scene.voxelizer_settings
+                self.progress_message = "Voxelizing objects..."
+                
+                # Process voxelization
+                self._voxel_grid = self.adaptive_sampling_voxelization(
+                    self._selected_meshes,
+                    settings.voxel_size,
+                    min_samples=2,
+                    max_samples=settings.sampling_density
+                )
+                
+                self.progress = 30.0  # Voxelization is 30% of total progress
+                self._processing_step = 'ARTIFACTS'
+            
+            elif self._processing_step == 'ARTIFACTS':
+                # Apply artifacts
+                settings = context.scene.voxelizer_settings
+                self.progress_message = "Applying artifacts and effects..."
+                
+                # Apply artifact simulations
+                self._voxel_grid = self.apply_artifacts(self._voxel_grid, settings)
+                
+                self.progress = 40.0  # Artifacts application is 10% of total progress
+                self._processing_step = 'EXPORTING'
+            
+            elif self._processing_step == 'EXPORTING':
+                # Export to DICOM
+                settings = context.scene.voxelizer_settings
+                self.progress_message = f"Exporting DICOM files for phase {self._current_frame_idx + 1}/{self._total_frames}..."
+                
+                # Export to DICOM
+                result = self.export_to_dicom(
+                    voxel_grid=self._voxel_grid,
+                    voxel_size=settings.voxel_size,
+                    output_dir=self._output_dir,
+                    phase_info=self._phase_info,
+                    total_phases=self._total_frames,
+                    patient_name=settings.patient_name,
+                    patient_id=settings.patient_id,
+                    patient_sex=settings.patient_sex,
+                    progress_callback=self.update_export_progress
+                )
+                
+                if result != {'FINISHED'}:
+                    self.cancel(context)
+                    return {'CANCELLED'}
+                
+                # Progress calculation - exporting is 60% of total progress
+                # 40% baseline + progress for frames completed
+                frame_progress = 60.0 * (self._current_frame_idx + 1) / self._total_frames
+                self.progress = 40.0 + frame_progress
+                
+                # Move to next frame or finish
+                self._current_frame_idx += 1
+                if self._current_frame_idx < self._total_frames:
+                    self._processing_step = 'INIT'  # Start next frame
+                else:
+                    self._processing_step = 'DONE'
+            
+            elif self._processing_step == 'DONE':
+                # Finished all processing
+                self.progress = 100.0
+                self.progress_message = "Voxelization complete!"
+                
+                # Restore original frame if necessary
+                if context.scene.voxelizer_settings.enable_4d_export:
+                    context.scene.frame_set(context.scene.frame_current)
+                
+                self._processing_done = True
+                self.finish(context)
+                return {'FINISHED'}
+            
+            # Update the status text with progress
+            context.workspace.status_text_set(f"DICOMator: {self.progress_message} ({self.progress:.1f}%)")
+            
+            # Force a UI redraw to show progress
+            for area in context.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+        
+        return {'RUNNING_MODAL'}
+    
+    def update_export_progress(self, slice_index, total_slices):
+        """Update progress during DICOM export."""
+        slice_progress = slice_index / total_slices
+        self.progress = 40.0 + 60.0 * (self._current_frame_idx + slice_progress) / self._total_frames
+    
+    def finish(self, context):
+        """Clean up and finish the operator."""
+        if self._timer:
+            wm = context.window_manager
+            wm.event_timer_remove(self._timer)
+        
+        context.workspace.status_text_set(None)  # Clear the status text
+        self.report({'INFO'}, f"Voxelization complete. Output saved to {self._output_dir}")
+    
+    def cancel(self, context):
+        """Cancel the operation and clean up."""
+        if self._timer:
+            wm = context.window_manager
+            wm.event_timer_remove(self._timer)
+        
+        context.workspace.status_text_set(None)  # Clear the status text
+        self.report({'INFO'}, "Voxelization cancelled")
+    
     def process_single_frame(self, context, selected_meshes, output_dir):
         """Process a single frame for CT export."""
         settings = context.scene.voxelizer_settings
@@ -892,7 +1067,8 @@ class VoxelizeOperator(Operator):
         total_phases=1,
         patient_name="Anonymous",
         patient_id="12345678",
-        patient_sex="M"
+        patient_sex="M",
+        progress_callback=None
     ):
         """
         Export the voxel grid as a series of DICOM slices.
@@ -906,6 +1082,7 @@ class VoxelizeOperator(Operator):
             patient_name: Name of the patient
             patient_id: Patient ID
             patient_sex: Patient sex (M/F/O)
+            progress_callback: Optional callback function(slice_index, total_slices)
             
         Returns:
             Status dictionary
@@ -935,6 +1112,10 @@ class VoxelizeOperator(Operator):
             
             if result != {'FINISHED'}:
                 return result
+            
+            # Call progress callback if provided
+            if progress_callback:
+                progress_callback(i + 1, num_slices)
                 
         return {'FINISHED'}
 
