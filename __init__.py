@@ -1353,6 +1353,315 @@ def bvh_tree_from_bmesh(bm):
     return mathutils.bvhtree.BVHTree.FromPolygons(vertices, polygons)
 
 
+def ray_traversal_voxelization(meshes, bbox_min, bbox_max, voxel_size):
+    # Initialize grid
+    grid_size = bbox_max - bbox_min
+    grid_dims = tuple(int(np.ceil(s / voxel_size)) for s in grid_size)
+    voxel_grid = np.full(grid_dims, AIR_DENSITY, dtype=np.float32)
+    unprocessed_voxels = set(np.ndindex(grid_dims))
+    
+    # Prepare meshes (BVH trees, etc.)
+    mesh_data = prepare_meshes(meshes)
+    
+    # Generate rays (origins and directions)
+    rays = generate_rays(bbox_min, bbox_max)
+    
+    # Process rays
+    for origin, direction in rays:
+        # Process all mesh intersections along this ray
+        intersections = []
+        for mesh_idx, data in enumerate(mesh_data):
+            hits = get_all_intersections(origin, direction, data['bvhtree'])
+            for hit_point, hit_normal in hits:
+                is_entry = direction.dot(hit_normal) < 0
+                intersections.append({
+                    'point': hit_point,
+                    'is_entry': is_entry,
+                    'mesh_idx': mesh_idx,
+                    'distance': (hit_point - origin).length
+                })
+        
+        # Sort intersections by distance
+        intersections.sort(key=lambda x: x['distance'])
+        
+        # Track which meshes we're inside
+        inside_meshes = {}
+        current_point = origin
+        
+        # Walk along the ray
+        for intersection in intersections:
+            # Find voxels between current_point and intersection point
+            voxels_to_process = voxels_between(current_point, intersection['point'], 
+                                              bbox_min, voxel_size, unprocessed_voxels)
+            
+            # Process these voxels based on which meshes we're inside
+            for voxel_idx in voxels_to_process:
+                if inside_meshes:  # If we're inside at least one mesh
+                    highest_priority = max(inside_meshes.values(), key=lambda x: x['priority'])
+                    voxel_grid[voxel_idx] = highest_priority['density']
+                    unprocessed_voxels.remove(voxel_idx)
+            
+            # Update which meshes we're inside
+            mesh_idx = intersection['mesh_idx']
+            if intersection['is_entry']:
+                inside_meshes[mesh_idx] = mesh_data[mesh_idx]
+            elif mesh_idx in inside_meshes:
+                del inside_meshes[mesh_idx]
+            
+            current_point = intersection['point']
+            
+        # Continue with ray until we exit the bounding box
+        if inside_meshes:
+            exit_point = ray_bbox_intersection(current_point, direction, bbox_min, bbox_max)
+            voxels_to_process = voxels_between(current_point, exit_point, 
+                                              bbox_min, voxel_size, unprocessed_voxels)
+            
+            # Process these voxels
+            for voxel_idx in voxels_to_process:
+                highest_priority = max(inside_meshes.values(), key=lambda x: x['priority'])
+                voxel_grid[voxel_idx] = highest_priority['density']
+                unprocessed_voxels.remove(voxel_idx)
+        
+        # If no unprocessed voxels remain, we're done
+        if not unprocessed_voxels:
+            break
+    
+    return voxel_grid
+
+
+def prepare_meshes(meshes):
+    """
+    Prepare mesh data for ray traversal voxelization.
+    
+    Args:
+        meshes: List of Blender mesh objects
+        
+    Returns:
+        List of dictionaries with prepared mesh data
+    """
+    mesh_data = []
+    for mesh in meshes:
+        # Get density and priority attributes
+        density = getattr(mesh, 'density', DEFAULT_DENSITY)
+        priority = getattr(mesh, 'priority', 0)
+        
+        # Create BMesh and BVHTree
+        bm = bmesh.new()
+        bm.from_mesh(mesh.data)
+        bm.transform(mesh.matrix_world)
+        bmesh.ops.triangulate(bm, faces=bm.faces[:])
+        
+        # Create BVHTree
+        bvhtree = bvh_tree_from_bmesh(bm)
+        
+        # Store mesh data
+        mesh_data.append({
+            'bvhtree': bvhtree,
+            'density': density,
+            'priority': priority,
+            'bmesh': bm
+        })
+    
+    return mesh_data
+
+
+def generate_rays(bbox_min, bbox_max):
+    """
+    Generate rays for ray traversal voxelization.
+    
+    Args:
+        bbox_min: Vector representing minimum corner of bounding box
+        bbox_max: Vector representing maximum corner of bounding box
+        
+    Returns:
+        List of (origin, direction) tuples for ray casting
+    """
+    rays = []
+    
+    # Calculate size of bounding box
+    bbox_size = bbox_max - bbox_min
+    max_dimension = max(bbox_size.x, bbox_size.y, bbox_size.z)
+    
+    # Determine number of rays based on bounding box size
+    # More rays for larger objects to ensure adequate coverage
+    num_rays_per_side = max(10, int(max_dimension / 5))
+    
+    # Generate rays from multiple sides of the bounding box
+    # X axis rays
+    for y in np.linspace(bbox_min.y, bbox_max.y, num_rays_per_side):
+        for z in np.linspace(bbox_min.z, bbox_max.z, num_rays_per_side):
+            # Ray from -X side
+            origin = Vector((bbox_min.x - 1, y, z))
+            direction = Vector((1, 0, 0))
+            rays.append((origin, direction))
+            
+            # Ray from +X side
+            origin = Vector((bbox_max.x + 1, y, z))
+            direction = Vector((-1, 0, 0))
+            rays.append((origin, direction))
+    
+    # Y axis rays
+    for x in np.linspace(bbox_min.x, bbox_max.x, num_rays_per_side):
+        for z in np.linspace(bbox_min.z, bbox_max.z, num_rays_per_side):
+            # Ray from -Y side
+            origin = Vector((x, bbox_min.y - 1, z))
+            direction = Vector((0, 1, 0))
+            rays.append((origin, direction))
+            
+            # Ray from +Y side
+            origin = Vector((x, bbox_max.y + 1, z))
+            direction = Vector((0, -1, 0))
+            rays.append((origin, direction))
+    
+    # Z axis rays
+    for x in np.linspace(bbox_min.x, bbox_max.x, num_rays_per_side):
+        for y in np.linspace(bbox_min.y, bbox_max.y, num_rays_per_side):
+            # Ray from -Z side
+            origin = Vector((x, y, bbox_min.z - 1))
+            direction = Vector((0, 0, 1))
+            rays.append((origin, direction))
+            
+            # Ray from +Z side
+            origin = Vector((x, y, bbox_max.z + 1))
+            direction = Vector((0, 0, -1))
+            rays.append((origin, direction))
+    
+    return rays
+
+
+def get_all_intersections(origin, direction, bvhtree):
+    """
+    Get all intersections of a ray with a mesh.
+    
+    Args:
+        origin: Vector, ray origin point
+        direction: Vector, ray direction
+        bvhtree: BVHTree object for the mesh
+        
+    Returns:
+        List of (hit_point, hit_normal) tuples
+    """
+    intersections = []
+    current_origin = origin.copy()
+    
+    # Maximum number of intersections to prevent infinite loops
+    max_hits = 100
+    hit_count = 0
+    
+    while hit_count < max_hits:
+        # Cast ray from current origin
+        hit = bvhtree.ray_cast(current_origin, direction)
+        
+        if hit[0] is None:  # No intersection
+            break
+            
+        hit_point, hit_normal, _, _ = hit
+        
+        # Add intersection to list
+        intersections.append((hit_point.copy(), hit_normal.copy()))
+        
+        # Move slightly past the intersection for next ray
+        current_origin = hit_point + direction * 1e-5
+        hit_count += 1
+    
+    return intersections
+
+
+def voxels_between(start_point, end_point, bbox_min, voxel_size, unprocessed_voxels):
+    """
+    Get all voxels along a ray segment between two points.
+    
+    Args:
+        start_point: Vector, start point of segment
+        end_point: Vector, end point of segment
+        bbox_min: Vector, minimum corner of bounding box
+        voxel_size: Size of each voxel
+        unprocessed_voxels: Set of unprocessed voxel indices
+        
+    Returns:
+        List of voxel indices that intersect the segment
+    """
+    # Use 3D Digital Differential Analyzer (DDA) algorithm
+    direction = end_point - start_point
+    distance = direction.length
+    
+    if distance == 0:
+        # Start and end points are the same
+        idx = tuple(np.floor((start_point - bbox_min) / voxel_size).astype(int))
+        if idx in unprocessed_voxels:
+            return [idx]
+        return []
+    
+    direction.normalize()
+    
+    # Determine step count based on length
+    step_count = int(distance / (voxel_size * 0.5)) + 1
+    step_size = distance / step_count
+    
+    voxels = []
+    for i in range(step_count + 1):
+        point = start_point + direction * (i * step_size)
+        idx = tuple(np.floor((point - bbox_min) / voxel_size).astype(int))
+        
+        # Check if this voxel is in bounds and unprocessed
+        if idx in unprocessed_voxels and idx not in voxels:
+            voxels.append(idx)
+    
+    return voxels
+
+
+def ray_bbox_intersection(origin, direction, bbox_min, bbox_max):
+    """
+    Find the point where a ray exits a bounding box.
+    
+    Args:
+        origin: Vector, ray origin point
+        direction: Vector, ray direction
+        bbox_min: Vector, minimum corner of bounding box
+        bbox_max: Vector, maximum corner of bounding box
+        
+    Returns:
+        Vector, exit point or None if ray doesn't intersect
+    """
+    # Initialize with default values
+    t_min = float('-inf')
+    t_max = float('inf')
+    
+    # Check for division by zero
+    for i in range(3):
+        origin_val = origin[i]
+        direction_val = direction[i]
+        bbox_min_val = bbox_min[i]
+        bbox_max_val = bbox_max[i]
+        
+        if abs(direction_val) < 1e-10:  # Nearly zero
+            # Ray is parallel to this axis, check if within bounds
+            if origin_val < bbox_min_val or origin_val > bbox_max_val:
+                return None  # Ray doesn't intersect box
+        else:
+            # Calculate intersection parameters
+            t1 = (bbox_min_val - origin_val) / direction_val
+            t2 = (bbox_max_val - origin_val) / direction_val
+            
+            # Ensure t1 <= t2
+            if t1 > t2:
+                t1, t2 = t2, t1
+                
+            # Update bounds
+            t_min = max(t_min, t1)
+            t_max = min(t_max, t2)
+            
+            if t_min > t_max:
+                return None  # Ray doesn't intersect box
+    
+    # If origin is inside the box, use t_max (exit point)
+    # Otherwise use t_min (entry point)
+    if t_min > 0:
+        return origin + direction * t_min
+    else:
+        return origin + direction * t_max
+
+
 # Operator to set default density
 class SetDefaultDensityOperator(bpy.types.Operator):
     """Initialize selected mesh objects with a default density value."""
