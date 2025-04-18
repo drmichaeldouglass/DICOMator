@@ -1,5 +1,5 @@
 schema_version = "1.0.0"
-id = "DICOMator"
+id = "dicomator"  # use lowercase unique id
 version = "0.2.0"
 name = "DICOMator"
 tagline = "Converts mesh objects into DICOM CT files"
@@ -8,16 +8,16 @@ type = "add-on"
 website = "https://github.com/drmichaeldouglass/DICOMator"
 blender_version_min = "4.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
+tags = ["3D View", "Medical", "CT", "DICOM"]
+copyright = ["2024 Michael Douglass"]
+platforms = ["windows-x64"]
 wheels = [
-    "./wheels/imageio-2.36.0-py3-none-any.whl",
-    "./wheels/lazy_loader-0.4-py3-none-any.whl",
-    "./wheels/networkx-3.4.2-py3-none-any.whl",
-    "./wheels/numpy-2.1.2-cp311-cp311-win_amd64.whl",
-    "./wheels/packaging-24.1-py3-none-any.whl",
-    "./wheels/pillow-11.0.0-cp311-cp311-win_amd64.whl",
-    "./wheels/pydicom-2.3.1-py3-none-any.whl",
     "./wheels/scikit_image-0.24.0-cp311-cp311-win_amd64.whl",
-    "./wheels/scipy-1.14.1-cp311-cp311-win_amd64.whl",
-    "./wheels/tifffile-2024.9.20-py3-none-any.whl"
+    "./wheels/pydicom-2.3.1-py3-none-any.whl",
+    "./wheels/scipy-1.14.1-cp311-cp311-win_amd64.whl"
 ]
+
+# Required permissions for file operations
+[permissions]
+files = "Save DICOM files to disk"
 
