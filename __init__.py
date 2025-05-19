@@ -41,7 +41,60 @@ except ImportError:
 try:
     from skimage.draw import line
 except ImportError:
-    print("scikit-image is required but not found. Using bundled wheel.")
+    print("scikit-image is required but not found. Implementing basic line algorithm.")
+    
+    # Fallback implementation of line function (Bresenham's line algorithm)
+    def line(x0, y0, x1, y1):
+        """
+        Return coordinates of a line from (x0, y0) to (x1, y1).
+        
+        Parameters
+        ----------
+        x0, y0 : int
+            Starting position.
+        x1, y1 : int
+            End position.
+        
+        Returns
+        -------
+        rr, cc : (N,) ndarray of int
+            Indices of pixels that the line passes through.
+        """
+        import numpy as np
+        
+        steep = abs(y1 - y0) > abs(x1 - x0)
+        if steep:
+            x0, y0 = y0, x0
+            x1, y1 = y1, x1
+        
+        if x0 > x1:
+            x0, x1 = x1, x0
+            y0, y1 = y1, y0
+            
+        dx = x1 - x0
+        dy = abs(y1 - y0)
+        error = dx / 2
+        
+        y = y0
+        y_step = 1 if y0 < y1 else -1
+        
+        x_coords = []
+        y_coords = []
+        
+        for x in range(x0, x1 + 1):
+            if steep:
+                x_coords.append(y)
+                y_coords.append(x)
+            else:
+                x_coords.append(x)
+                y_coords.append(y)
+                
+            error -= dy
+            if error < 0:
+                y += y_step
+                error += dx
+                
+        return np.array(y_coords), np.array(x_coords)
 
 # Try to import pydicom - required for DICOM export
 try:
@@ -421,22 +474,6 @@ class VoxelizeOperator(Operator):
         context.workspace.status_text_set(None)  # Clear the status text
         self.report({'INFO'}, "Voxelization cancelled")
     
-    def _get_point_status(self, point_vector, mesh_data, num_rays):
-        """Helper to determine if a point is inside any mesh and its density."""
-        point_meshes = []
-        for data in mesh_data:
-            if is_point_inside_mesh(point_vector, data['bvhtree'], num_rays=num_rays):
-                point_meshes.append({
-                    'density': data['density'],
-                    'priority': data['priority']
-                })
-        
-        if point_meshes:
-            point_meshes.sort(key=lambda x: x['priority'], reverse=True)
-            return True, point_meshes[0]['density']  # is_inside, density
-        else:
-            return False, AIR_DENSITY  # is_inside, density
-
     def process_single_frame(self, context, selected_meshes, output_dir):
         """Process a single frame for CT export."""
         settings = context.scene.voxelizer_settings
@@ -668,7 +705,7 @@ class VoxelizeOperator(Operator):
         total_samples = len(sample_points)
         
         # Process voxels in chunks for better memory usage
-        chunk_size = 1000  # Adjust based on available memory
+        chunk_size = 50000  # Adjust based on available memory
         total_voxels = np.prod(grid_dims)
         indices = np.array(list(np.ndindex(grid_dims)))
         
@@ -751,7 +788,9 @@ class VoxelizeOperator(Operator):
         self.bbox_min = bbox_min  # Store for DICOM export
         self.bbox_max = bbox_max
         
-        bbox_min_np = np.array(bbox_min) # NumPy version for faster math
+        print(f"\n============ Starting voxelization of {len(meshes)} mesh objects ============")
+        for i, mesh in enumerate(meshes):
+            print(f"Structure {i+1}/{len(meshes)}: {mesh.name}")
         
         # Calculate grid dimensions
         grid_size = bbox_max - bbox_min
@@ -759,124 +798,166 @@ class VoxelizeOperator(Operator):
         
         # Initialize voxel grid with air density
         voxel_grid = np.full(grid_dims, AIR_DENSITY, dtype=np.float32)
+        
         # Initialize boundary mask
         boundary_mask = np.zeros(grid_dims, dtype=bool)
         
-        # Temporary grid to store (is_inside, density) for each voxel's center point
-        voxel_info_dtype = [('is_inside', bool), ('density', np.float32)]
-        voxel_info_grid = np.empty(grid_dims, dtype=voxel_info_dtype)
-        voxel_info_grid['is_inside'] = False # Default: not inside
-        voxel_info_grid['density'] = AIR_DENSITY # Default: air density
-        
         # Prepare BVH trees and object properties for all meshes
         mesh_data = []
-        for mesh in meshes:
+        for i, mesh in enumerate(meshes):
+            print(f"\n--- Processing structure {i+1}/{len(meshes)}: '{mesh.name}' ---")
+        
             # Get density and priority attributes
             density = getattr(mesh, 'density', DEFAULT_DENSITY)
             priority = getattr(mesh, 'priority', 0)
-            
+        
+            print(f"    Structure '{mesh.name}': Density = {density} HU, Priority = {priority}")
+            print(f"    Preparing BVH tree for '{mesh.name}'...")
+        
             # Create BMesh and BVHTree
             bm = bmesh.new()
             bm.from_mesh(mesh.data)
             bm.transform(mesh.matrix_world)
             bmesh.ops.triangulate(bm, faces=bm.faces[:])
-            
+        
             # Create BVHTree
             bvhtree = bvh_tree_from_bmesh(bm)
-            
+        
             # Store mesh data
             mesh_data.append({
                 'bvhtree': bvhtree,
                 'density': density,
                 'priority': priority,
-                'bmesh': bm  # Store for cleanup later
+                'bmesh': bm,  # Store for cleanup later
+                'name': mesh.name  # Store name for progress reporting
             })
         
-        # First pass:
-        self.report({'INFO'}, "First pass: Evaluating voxel centers...")
+            print(f"    BVH tree ready for '{mesh.name}' with {len(bm.faces)} faces")
+    
+        # First pass: Perform low-resolution sampling to identify boundary regions
+        print("\n--- First pass: Identifying boundary regions ---")
         
+        # Generate low-resolution sample points
+        low_res_sample_offsets = np.array([0.5]) * voxel_size  # Just center point
+        first_pass_samples = np.array(
+            np.meshgrid(low_res_sample_offsets, low_res_sample_offsets, low_res_sample_offsets, indexing='ij')
+        ).reshape(3, -1).T
+        
+        # Check sample neighbor offsets for boundary detection
+        neighbor_offsets = [
+            np.array([1, 0, 0]) * voxel_size,
+            np.array([-1, 0, 0]) * voxel_size,
+            np.array([0, 1, 0]) * voxel_size,
+            np.array([0, -1, 0]) * voxel_size,
+            np.array([0, 0, 1]) * voxel_size,
+            np.array([0, 0, -1]) * voxel_size
+        ]
+        
+        # Process voxels for boundary detection
         total_voxels = np.prod(grid_dims)
-        indices = np.array(list(np.ndindex(grid_dims))) # Array of index tuples
-        chunk_size = 10000  # Increased chunk size for potentially faster processing with fewer overheads
-
-        # Precompute center offset for voxels (center of the voxel)
-        voxel_center_offset_np = np.array([0.5, 0.5, 0.5]) * voxel_size
-
-        # Sub-pass 1.1: Evaluate all voxel centers
+        indices = np.array(list(np.ndindex(grid_dims)))
+        chunk_size = 50000  # Adjust based on available memory
+        
+        print(f"    Grid dimensions: {grid_dims}")
+        print(f"    Total voxels: {total_voxels:,}")
+        print(f"    Processing in chunks of {chunk_size:,} voxels")
+        
         for chunk_start in range(0, total_voxels, chunk_size):
             chunk_end = min(chunk_start + chunk_size, total_voxels)
-            current_chunk_indices = indices[chunk_start:chunk_end]
-
-            for idx_arr in current_chunk_indices: # idx_arr is a numpy array [x,y,z]
-                idx_tuple = tuple(idx_arr) # Use tuple for indexing numpy arrays
+            chunk_indices = indices[chunk_start:chunk_end]
+            
+            for idx in chunk_indices:
+                # Calculate voxel world position
+                voxel_min = bbox_min + Vector((
+                    idx[0] * voxel_size,
+                    idx[1] * voxel_size,
+                    idx[2] * voxel_size
+                ))
                 
-                # Calculate voxel center world position
-                voxel_origin_np = bbox_min_np + idx_arr * voxel_size
-                center_point_np = voxel_origin_np + voxel_center_offset_np
-                center_vector = Vector(center_point_np.tolist()) # Convert to Blender Vector
-
-                is_inside, density = self._get_point_status(center_vector, mesh_data, num_rays=3)
+                # Convert to NumPy array for faster operations
+                voxel_min_np = np.array(voxel_min)
+                center_point = voxel_min_np + first_pass_samples[0]
+                center_vector = Vector(center_point)
                 
-                voxel_grid[idx_tuple] = density
-                voxel_info_grid[idx_tuple] = (is_inside, density)
-
-            progress = chunk_end / total_voxels * 100
-            self.report({'INFO'}, f"First pass (center eval) progress: {progress:.1f}%")
-
-        self.report({'INFO'}, "First pass: Detecting boundary regions...")
-
-        # Define neighbor index offsets (for 6-connectivity)
-        neighbor_index_offsets = np.array([
-            [1,0,0], [-1,0,0], [0,1,0], [0,-1,0], [0,0,1], [0,0,-1]
-        ], dtype=int)
-
-        # Sub-pass 1.2: Detect boundaries using pre-calculated voxel_info_grid
-        for chunk_start in range(0, total_voxels, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, total_voxels)
-            current_chunk_indices = indices[chunk_start:chunk_end]
-
-            for idx_arr in current_chunk_indices:
-                idx_tuple = tuple(idx_arr)
-                center_is_inside = voxel_info_grid[idx_tuple]['is_inside']
-                center_density = voxel_info_grid[idx_tuple]['density']
+                # Check if center point is inside any mesh
+                center_inside = False
+                center_density = AIR_DENSITY
+                center_mesh_name = None
                 
+                point_meshes = []
+                for data in mesh_data:
+                    if is_point_inside_mesh(center_vector, data['bvhtree'], num_rays=2):
+                        point_meshes.append({
+                            'density': data['density'],
+                            'priority': data['priority'],
+                            'name': data['name']
+                        })
+                
+                if point_meshes:
+                    center_inside = True
+                    point_meshes.sort(key=lambda x: x['priority'], reverse=True)
+                    center_density = point_meshes[0]['density']
+                    center_mesh_name = point_meshes[0]['name']
+                
+                # Check neighbors to detect boundaries
                 is_boundary = False
-                for offset_arr in neighbor_index_offsets:
-                    neighbor_idx_arr = idx_arr + offset_arr
-                    neighbor_idx_tuple = tuple(neighbor_idx_arr)
-
-                    # Check if neighbor is within grid bounds
-                    if all(0 <= c < dim for c, dim in zip(neighbor_idx_arr, grid_dims)):
-                        neighbor_is_inside = voxel_info_grid[neighbor_idx_tuple]['is_inside']
-                        neighbor_density = voxel_info_grid[neighbor_idx_tuple]['density']
-                    else:
-                        # Neighbor is outside the grid, treat as air
-                        neighbor_is_inside = False
-                        neighbor_density = AIR_DENSITY
+                
+                for offset in neighbor_offsets:
+                    neighbor_point = center_point + offset
+                    neighbor_vector = Vector(neighbor_point)
                     
-                    # Boundary condition: different inside/outside status or significant density change
-                    if (center_is_inside != neighbor_is_inside or 
+                    # Check if point is inside grid bounds
+                    neighbor_idx = tuple(np.floor((neighbor_point - bbox_min) / voxel_size).astype(int))
+                    if (neighbor_idx[0] < 0 or neighbor_idx[0] >= grid_dims[0] or
+                        neighbor_idx[1] < 0 or neighbor_idx[1] >= grid_dims[1] or
+                        neighbor_idx[2] < 0 or neighbor_idx[2] >= grid_dims[2]):
+                        continue
+                    
+                    # Check if neighbor point is inside any mesh
+                    neighbor_inside = False
+                    neighbor_density = AIR_DENSITY
+                    
+                    point_meshes = []
+                    for data in mesh_data:
+                        if is_point_inside_mesh(neighbor_vector, data['bvhtree'], num_rays=2):
+                            point_meshes.append({
+                                'density': data['density'],
+                                'priority': data['priority']
+                            })
+                    
+                    if point_meshes:
+                        neighbor_inside = True
+                        point_meshes.sort(key=lambda x: x['priority'], reverse=True)
+                        neighbor_density = point_meshes[0]['density']
+                    
+                    # If center and neighbor have different inside/outside status or different materials
+                    if (center_inside != neighbor_inside or 
                         abs(center_density - neighbor_density) > 10):  # Threshold for material difference
                         is_boundary = True
-                        break  # Found a boundary, no need to check other neighbors
+                        break
                 
+                # Mark as boundary if needed
                 if is_boundary:
-                    boundary_mask[idx_tuple] = True
-            
-            progress = chunk_end / total_voxels * 100
-            self.report({'INFO'}, f"First pass (boundary detection) progress: {progress:.1f}%")
+                    boundary_mask[tuple(idx)] = True
+                    
+                # Set initial voxel value based on center point
+                voxel_grid[tuple(idx)] = center_density
         
+        # Report progress
+        progress = chunk_end / total_voxels * 100
+        print(f"    First pass progress: {progress:.1f}% complete")
+    
         # Second pass: Apply adaptive sampling only to boundary regions
-        self.report({'INFO'}, "Second pass: Applying adaptive sampling to boundary voxels...")
+        print("\n--- Second pass: Applying adaptive sampling to boundary regions ---")
         
         # Get boundary voxel indices
         boundary_indices = np.argwhere(boundary_mask)
         total_boundary_voxels = len(boundary_indices)
         
-        self.report({'INFO'}, f"Found {total_boundary_voxels} boundary voxels out of {total_voxels} total voxels")
+        print(f"    Found {total_boundary_voxels:,} boundary voxels out of {total_voxels:,} total voxels ({total_boundary_voxels/total_voxels*100:.1f}%)")
         
         if total_boundary_voxels == 0:
-            self.report({'INFO'}, "No boundary voxels found, skipping second pass")
+            print("    No boundary voxels found, skipping second pass")
             # Clean up BMeshes
             for data in mesh_data:
                 data['bmesh'].free()
@@ -890,7 +971,11 @@ class VoxelizeOperator(Operator):
             np.meshgrid(max_sample_offsets, max_sample_offsets, max_sample_offsets, indexing='ij')
         ).reshape(3, -1).T
         
+        print(f"    Sampling boundary voxels with {len(max_sample_points)} sample points per voxel")
+        
         # Process boundary voxels with high-resolution sampling
+        voxel_counts_by_mesh = {}  # Track which structures voxels belong to
+        
         for i, idx in enumerate(boundary_indices):
             idx = tuple(idx)
             
@@ -909,30 +994,55 @@ class VoxelizeOperator(Operator):
             
             # Initialize sample results
             sample_results = []
+            active_mesh_name = None
             
             # For each sample point, check which meshes contain it
             for sample in voxel_samples:
-                sample_point = Vector(sample.tolist()) # Ensure sample is list for Vector constructor
+                sample_point = Vector(sample)
+                point_meshes = []
                 
-                # Use the _get_point_status helper here as well for consistency
-                # Though the original logic for point_meshes is fine, this standardizes
-                is_inside_sample, density_sample = self._get_point_status(sample_point, mesh_data, num_rays=5) # Default num_rays for higher accuracy
-                sample_results.append(density_sample)
+                # Check if point is inside any mesh
+                for data in mesh_data:
+                    if is_point_inside_mesh(sample_point, data['bvhtree']):
+                        point_meshes.append({
+                            'density': data['density'],
+                            'priority': data['priority'],
+                            'name': data['name']
+                        })
+                
+                if point_meshes:
+                    # Sort by priority (highest first) and use highest priority mesh
+                    point_meshes.sort(key=lambda x: x['priority'], reverse=True)
+                    sample_results.append(point_meshes[0]['density'])
+                    active_mesh_name = point_meshes[0]['name']
+                else:
+                    sample_results.append(AIR_DENSITY)
+                    active_mesh_name = None
             
             # Calculate voxel density based on sample results
             if sample_results:
                 # Take the average of sample densities
                 voxel_grid[idx] = np.mean(sample_results)
+                
+                # Track voxel count by mesh
+                if active_mesh_name:
+                    voxel_counts_by_mesh[active_mesh_name] = voxel_counts_by_mesh.get(active_mesh_name, 0) + 1
             
             # Report progress periodically
-            if (i + 1) % 100 == 0 or i == total_boundary_voxels - 1:
+            if (i + 1) % 5000 == 0 or i == total_boundary_voxels - 1:
                 progress = (i + 1) / total_boundary_voxels * 100
-                self.report({'INFO'}, f"Second pass progress: {progress:.1f}%")
+                print(f"    Second pass progress: {progress:.1f}% complete ({i+1:,}/{total_boundary_voxels:,} boundary voxels)")
+        
+        # Print voxel statistics by structure
+        print("\n--- Voxelization statistics ---")
+        for mesh_name, count in voxel_counts_by_mesh.items():
+            print(f"    Structure '{mesh_name}': {count:,} voxels ({count/total_voxels*100:.2f}% of total)")
         
         # Clean up BMeshes
         for data in mesh_data:
             data['bmesh'].free()
         
+        print("============ Voxelization complete ============\n")
         return voxel_grid
 
     def simulate_radial_streaks(self, voxel_grid, metal_threshold, streak_intensity, num_angles):
@@ -1236,7 +1346,7 @@ class VoxelizeOperator(Operator):
 
 # Helper Functions
 
-def is_point_inside_mesh(point, bvhtree, num_rays=5):
+def is_point_inside_mesh(point, bvhtree, num_rays=3):
     """
     Determines if a point is inside a mesh using ray casting.
     
