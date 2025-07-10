@@ -206,19 +206,21 @@ def export_voxel_grid_to_dicom(
                 ds.AcquisitionTime = common_metadata['time_str']
                 
                 # Image position and orientation
+                # Convert coordinates from Blender units (meters) to millimeters
+                mm_voxel_size = voxel_size * 1000.0
                 ds.ImagePositionPatient = [
-                    float(bbox_min.x),
-                    float(bbox_min.y),
-                    float(bbox_min.z + (i * voxel_size))
+                    float(bbox_min.x * 1000.0),
+                    float(bbox_min.y * 1000.0),
+                    float((bbox_min.z + (i * voxel_size)) * 1000.0)
                 ]
                 ds.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-                ds.SliceLocation = float(bbox_min.z + (i * voxel_size))
+                ds.SliceLocation = float((bbox_min.z + (i * voxel_size)) * 1000.0)
                 
                 # Pixel data characteristics
                 ds.SamplesPerPixel = 1
                 ds.PhotometricInterpretation = 'MONOCHROME2'
                 ds.Rows, ds.Columns = slice_data.shape
-                ds.PixelSpacing = [float(voxel_size), float(voxel_size)]
+                ds.PixelSpacing = [float(mm_voxel_size), float(mm_voxel_size)]
                 ds.BitsAllocated = 16
                 ds.BitsStored = 16
                 ds.HighBit = 15
