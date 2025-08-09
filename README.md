@@ -1,108 +1,97 @@
-## DICOMator: Blender Addon for Synthetic CT Data Generation
+# DICOMator
 
-**Overview**
+**Blender add-on for synthetic CT dataset generation**
 
-The DICOMator is a Blender addon designed to convert selected mesh objects into realistic, synthetic CT (Computed Tomography) datasets. It includes various CT artifact simulations, making it ideal for creating training, testing, or simulation data for medical imaging applications.
+## Overview
 
-**Repository Structure**
+DICOMator converts selected Blender mesh objects into realistic CT volumes. The add-on simulates common CT artifacts and exports the result as DICOM files, making it useful for generating data for training, testing, or simulation in medical-imaging research.
 
-The project is organized to work with Blender's extension platform and bundles its Python dependencies.
+## Features
 
-- `__init__.py` – main Blender add-on module.
-- `blender_manifest.toml` – manifest that allows Blender to recognise the add-on as an installable extension.
-- `wheels/` – pre-packaged wheels for required libraries such as SciPy, scikit-image and pydicom.
-- `download_wheels.py` – helper script to refresh or fetch wheels for other platforms.
+- Adaptive voxelization with boundary-aware sampling
+- Real-time progress indicator
+- Export to DICOM image series
+- 4D CT series for motion studies
+- Artifact simulation:
+  - Gaussian noise
+  - Metal-induced streaks
+  - Partial-volume blur
+  - Ring artifacts
+- Custom Hounsfield units and overlap priority per object
 
-**Features**
+## Repository Layout
 
-* **Adaptive Voxelization:** Convert meshes into 3D volumes with intelligent boundary detection and adaptive sampling.
-* **Real-time Progress Tracking:** Watch the voxelization process with status updates and a progress indicator.
-* **DICOM Export:** Export voxelized data as a series of DICOM CT images compatible with medical imaging software.
-* **4D CT Series Generation:** Create 4D CT datasets simulating motion (e.g., breathing) across multiple frames.
-* **Artifact Simulation:**
-    * **Gaussian Noise:** Add realistic noise to CT images.
-    * **Metal Artifacts:** Simulate radial streaks around high-density objects.
-    * **Partial Volume Effects:** Apply smoothing to mimic artifacts caused by overlapping structures.
-    * **Ring Artifacts:** Introduce ring artifacts commonly seen in CT imaging.
-* **Custom Densities and Priorities:** Assign specific Hounsfield Unit (HU) values and overlapping priorities to mesh objects.
+- `__init__.py` – main Blender add-on module
+- `blender_manifest.toml` – manifest so Blender recognises the add-on
+- `wheels/` – bundled dependency wheels (SciPy, scikit-image, pydicom, …)
+- `download_wheels.py` – helper script to refresh wheels for other platforms
 
-**Installation**
+## Installation
 
-1. **Download the Extension:** Download the DICOMator extension package.
-2. **Install the Extension in Blender:**
-    * Go to Edit > Preferences > Add-ons.
-    * Click "Install..." and select the downloaded zip file.
-    * Enable the DICOMator checkbox.
-3. **Dependencies:** Wheel files located in the `wheels/` directory are installed automatically when the add-on is enabled. Use `download_wheels.py` to refresh or fetch wheels for other platforms if needed.
-4. **Save User Preferences (Optional):** Click "Save Preferences" to keep the addon enabled for future sessions.
+1. Download the DICOMator `.zip` package.
+2. In Blender open **Edit → Preferences → Add-ons**.
+3. Click **Install…**, choose the downloaded zip, then enable **DICOMator**.
+4. Bundled wheels from `wheels/` are installed automatically when the add-on is enabled.  
+   Run `download_wheels.py` to update or fetch wheels for other platforms.
+5. Optionally click **Save Preferences** to keep the add-on enabled.
 
-**Usage**
+## Usage
 
-**Preparing Your Scene**
+### Preparing a scene
 
-1. **Select Mesh Objects:** Choose the meshes you want to convert in the 3D Viewport.
-2. **Assign Densities and Priorities (Optional):**
-    * Select a mesh object.
-    * Open the DICOMator panel (press N if hidden).
-    * Set Density (HU value) and Priority for overlapping regions.
-    * Use "Set Default Density" and "Set Default Priority" operators for multiple objects.
-
+1. Select the meshes you want to convert.
+2. (Optional) In the DICOMator panel set Density (HU) and Priority for overlaps.  
+   Operators **Set Default Density** and **Set Default Priority** apply values to multiple objects.
 
 ![GUI](https://github.com/user-attachments/assets/55b11a36-33bb-4c42-84bc-facb3e311efd)
 
-**Configuring Voxelization Settings**
+### Voxelization settings
 
-* Open the DICOMator panel and adjust settings:
-    * **Voxel Size (mm):** Size of each voxel (smaller = higher resolution, longer processing).
-    * **Sampling Density:** Controls the maximum number of samples per dimension at object boundaries (higher = more accurate but slower).
-    * **4D CT Export:** Enable to export over multiple frames.
-        * Set Start and End Frames.
-    * **Artifact Simulation:** Configure noise, metal artifacts, partial volume effects, and ring artifacts.
+In the panel you can configure:
+
+- **Voxel Size (mm)** – smaller values increase resolution and compute time
+- **Sampling Density** – maximum samples per dimension at object boundaries
+- **4D CT Export** – enable and set start/end frames to export across frames
+- **Artifact Simulation** – control noise, metal streaks, partial-volume blur and rings
 
 ![metal_streaks](https://github.com/user-attachments/assets/714b3bbc-3e8e-442d-bd39-ab766e1b1cfa)
 
-**Running the Voxelization**
+### Running
 
-1. Click "Voxelize Selected Objects" after configuration.
-2. A progress indicator will appear in Blender's status bar showing the current operation and completion percentage.
-3. The addon processes meshes using an efficient adaptive sampling approach:
-   * First pass: Detects boundary regions using a fast, low-resolution scan
-   * Second pass: Applies high-resolution sampling only where needed (at object boundaries)
-4. When complete, DICOM series is exported to the specified output directory (default: "DICOM_Output" folder).
+1. Click **Voxelize Selected Objects**.
+2. Progress appears in Blender's status bar.
+3. DICOM files are written to the selected output directory (default `DICOM_Output`).
 
-**Output**
+## Output
 
-* DICOM Series: Compatible with medical imaging software.
-* File Naming: Files are named based on phase and slice number (e.g., CT_Phase_1_Slice_0001.dcm).
+- DICOM series compatible with standard medical-imaging tools
+- Files named by phase and slice, e.g. `CT_Phase_1_Slice_0001.dcm`
 
 ![skull_multi](https://github.com/user-attachments/assets/b1c62567-4189-4a66-812f-005b57629184)
-
 ![skull_dose_lat](https://github.com/user-attachments/assets/eca22ede-4a6f-47ca-a82c-e53dccb0649d)
-
 ![Lung_geometry](https://github.com/user-attachments/assets/8eb7a3ce-fbaf-4d7d-b70d-33e7b808e0fd)
-
 ![Lung](https://github.com/user-attachments/assets/77e204bd-2a70-46bb-af8f-c3327ef7eb8f)
 
-**Notes and Tips**
+## Tips
 
-* **Adaptive Sampling:** The addon intelligently detects object boundaries and applies more samples only where needed, significantly improving performance.
-* **Performance Optimization:** For faster results:
-  * Increase the voxel size (lower resolution)
-  * Reduce the sampling density (fewer samples at boundaries)
-  * Use simple mesh objects with clean geometry
-* **Memory Usage:** Large scenes with small voxel sizes may require significant RAM. Consider using larger voxel sizes for initial tests.
-* **Progress Tracking:** Watch the status bar for real-time progress information. You can press ESC to cancel a long-running operation.
-* **Output Directory:** Customizable through the panel. Ensure you have write permissions to the selected directory.
+- Adaptive sampling focuses computation at object boundaries for efficiency.
+- For faster runs:
+  - Increase voxel size
+  - Decrease sampling density
+  - Use simplified meshes
+- Large scenes with small voxels can consume significant RAM.
+- Press `ESC` to cancel a long computation.
+- Ensure the output directory is writable.
 
-**Troubleshooting**
+## Troubleshooting
 
-* **Addon Not Appearing:** Ensure installation and enabled status in preferences. Check console for installation errors.
-* **Slow Performance:** Increase voxel size or reduce sampling density. Consider simplifying complex meshes.
-* **No Visible Artifacts:** Make sure artifact settings have high enough values to be visible. For metal artifacts, ensure your objects have density values above the metal threshold.
-* **Noise Not Visible:** Try increasing the noise standard deviation value.
-* **Export Issues:** Verify write permissions for the output directory. Check console for file saving errors.
-* **Processing Cancellation:** Press ESC to cancel a long-running voxelization process.
+- **Add-on missing** – verify installation and that the add-on is enabled.
+- **Slow performance** – increase voxel size or reduce sampling density; simplify meshes.
+- **Artifacts not visible** – raise settings, and for metal streaks ensure objects exceed the metal-density threshold.
+- **Noise not visible** – raise the noise standard deviation.
+- **Export failures** – check write permissions for the output directory.
 
-**Contributing**
+## Contributing
 
-* Feedback and improvements are welcome at the GitHub repository: https://github.com/drmichaeldouglass/DICOMator
+Feedback and improvements are welcome at [github.com/drmichaeldouglass/DICOMator](https://github.com/drmichaeldouglass/DICOMator).
+
