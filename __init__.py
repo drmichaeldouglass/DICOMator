@@ -44,13 +44,15 @@ except ImportError:
     print("Warning: pydicom not available. DICOM export functionality will be disabled.")
 
 # Constants
-AIR_DENSITY = -1000.0  # HU value for air
-DEFAULT_DENSITY = 0.0   # Default density for objects
-MAX_HU_VALUE = 3071     # Maximum HU value
-MIN_HU_VALUE = -1024    # Minimum HU value
+AIR_DENSITY = -1000.0  # HU value for air (DICOM standard reference for air)
+DEFAULT_DENSITY = 0.0   # Default HU for objects unless overridden per-object
+MAX_HU_VALUE = 3071     # Max HU for 12-bit CT representations
+MIN_HU_VALUE = -1024    # Min HU (typical CT lower bound)
 
 # Safely fetch numeric properties even when Blender returns _PropertyDeferred
 def _get_float_prop(props, name: str, default: float) -> float:
+    # Some Blender properties can be deferred; this wrapper robustly reads them
+    # and always returns a float fallback on failure.
     try:
         val = getattr(props, name)
         return float(val)
@@ -59,6 +61,7 @@ def _get_float_prop(props, name: str, default: float) -> float:
 
 # Safely fetch string properties even when Blender returns _PropertyDeferred
 def _get_str_prop(props, name: str, default: str) -> str:
+    # Robust string getter with safe default for deferred/unset properties.
     try:
         val = getattr(props, name)
         return str(val) if val is not None else str(default)
@@ -68,13 +71,11 @@ def _get_str_prop(props, name: str, default: str) -> str:
 def is_point_inside_mesh(point, obj):
     """
     Check if a point is inside a mesh using closest point method.
-    
-    Args:
-        point: Vector, point to test in world coordinates
-        obj: Blender mesh object
-        
-    Returns:
-        bool: True if point is inside mesh, False otherwise
+
+    Note:
+    - This checks the sign of the dot product between the vector from the test
+      point to the closest surface point and the surface normal at that point.
+    - For our usage, this helper is retained for future sampling-based methods.
     """
     # Convert point to object's local coordinate system
     local_point = obj.matrix_world.inverted() @ point
@@ -117,15 +118,15 @@ def export_voxel_grid_to_dicom(
     ):
         """
         Export the voxel grid (binary or HU) as a series of DICOM slices.
-        If direct_hu=True, 'voxel_grid' is expected to contain HU values (int16).
-        Otherwise, positive voxels are mapped to DEFAULT_DENSITY and 0 to AIR_DENSITY.
 
-        patient_position: DICOM PatientPosition (HFS, FFS, HFP, FFP, HFDR, HFDL, FFDR, FFDL)
-        study_instance_uid/frame_of_reference_uid/series_instance_uid: optional UIDs to reuse across phases
-        number_of_temporal_positions: total number of phases
-        temporal_position_index: old-version tag for per-phase index (typically the timeline frame)
-        temporal_position_identifier: optional enhanced temporal identifier (typically 1-based phase)
-        phase_index: used only for filename prefixing (1-based)
+        Key points:
+        - If direct_hu=True, we treat the array values as HU directly.
+        - Blender uses meters; DICOM uses millimeters. We convert voxel spacing
+          and origin accordingly.
+        - Rows/Columns: DICOM expects rows=Y, cols=X, so we transpose slices.
+        - Temporal tags: write NumberOfTemporalPositions (total phases),
+          TemporalPositionIndex (timeline frame number), and optionally a
+          TemporalPositionIdentifier (1-based phase index).
         """
         if not PYDICOM_AVAILABLE:
             return {'error': 'pydicom not available'}
@@ -147,7 +148,7 @@ def export_voxel_grid_to_dicom(
         # Clip values to valid HU range
         hu_grid = np.clip(hu_grid, MIN_HU_VALUE, MAX_HU_VALUE).astype(np.int16, copy=False)
 
-        # DICOM expects millimeters for spatial tags
+        # DICOM expects millimeters for spatial tags; convert spacing and origin.
         voxel_size_mm = float(voxel_size) * 1000.0
         bbox_min_mm = Vector((bbox_min.x * 1000.0, bbox_min.y * 1000.0, bbox_min.z * 1000.0))
         
@@ -170,6 +171,7 @@ def export_voxel_grid_to_dicom(
         }
         
         for i in range(num_slices):
+            # For each axial slice i (Z index), write one DICOM instance.
             # Note: hu_grid is shaped (width, height, depth). For DICOM, Rows = Y (height), Columns = X (width)
             slice_data = hu_grid[:, :, i]
             try:
@@ -184,7 +186,7 @@ def export_voxel_grid_to_dicom(
                 ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
                 
                 # Set DICOM tags
-                ds.ImageType = ['ORIGINAL', 'PRIMARY', 'AXIAL']  # separate series per phase
+                ds.ImageType = ['ORIGINAL', 'PRIMARY', 'AXIAL']  # One series per phase (non-multi-frame)
                 ds.SOPClassUID = file_meta.MediaStorageSOPClassUID
                 ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
 
@@ -212,6 +214,10 @@ def export_voxel_grid_to_dicom(
                 ds.SeriesTime = common_metadata['time_str']
                 
                 # Temporal (4D) tags (match old version; keep optional identifier for compatibility)
+                # - NumberOfTemporalPositions: total number of exported phases
+                # - TemporalPositionIndex: original timeline frame number
+                # - TemporalPositionIdentifier: 1-based phase index (phase ordering)
+                # Some viewers use one or the other; we include both for compatibility.
                 if number_of_temporal_positions is not None:
                     ds.NumberOfTemporalPositions = int(number_of_temporal_positions)
                 if temporal_position_index is not None:
@@ -234,7 +240,9 @@ def export_voxel_grid_to_dicom(
                 ds.AcquisitionDate = common_metadata['date_str']
                 ds.AcquisitionTime = common_metadata['time_str']
                 
-                # Image position and orientation
+                # Image position and orientation:
+                # - ImagePositionPatient is the world origin (mm) of the slice.
+                # - Orientation is axial identity; PatientPosition is set separately.
                 ds.ImagePositionPatient = [
                     float(bbox_min_mm.x),
                     float(bbox_min_mm.y),
@@ -245,8 +253,10 @@ def export_voxel_grid_to_dicom(
                 ds.SliceThickness = float(voxel_size_mm)
                 ds.SpacingBetweenSlices = float(voxel_size_mm)
                 
-                # Pixel data characteristics
-                # For DICOM: Rows = number of samples along Y, Columns = along X. Transpose to (rows, cols)
+                # Pixel data characteristics:
+                # - pixel_array is transposed to (rows, cols).
+                # - Signed int16 with standard window presets (40/400).
+                # - RescaleIntercept and RescaleSlope are set to standard values.
                 pixel_array = slice_data.T.astype(np.int16, copy=False)
                 rows, cols = pixel_array.shape
                 ds.SamplesPerPixel = 1
@@ -264,7 +274,8 @@ def export_voxel_grid_to_dicom(
                 ds.WindowWidth = 400
                 ds.PixelData = pixel_array.tobytes()
                 
-                # Create filename
+                # Create filename:
+                # - Prefix with phase index to avoid overwrites across phases.
                 if phase_index is not None:
                     filename = os.path.join(output_dir, f"Phase_{int(phase_index):03d}_CT_Slice_{i+1:04d}.dcm")
                 else:
@@ -286,6 +297,9 @@ def export_voxel_grid_to_dicom(
 
 # Helper to build BVH directly from object mesh (world-space), no depsgraph
 def _bvh_from_object(obj):
+    # Build a BVH using the object's base mesh data (object.data) transformed into
+    # world space via matrix_world. This mimics the old code path and does NOT
+    # evaluate modifiers/armatures. For deformed geometry, apply transforms first.
     me = obj.data
     verts_world = [obj.matrix_world @ v.co for v in me.vertices]
     polys = [list(p.vertices) for p in me.polygons]
@@ -293,25 +307,15 @@ def _bvh_from_object(obj):
 
 def voxelize_mesh(obj, voxel_size=1.0, padding=1):
     """
-    Voxelize a mesh object into a 3D numpy array using a BVH-based column fill.
+    Voxelize a single mesh by casting vertical (+Z) rays per (X,Y) column.
 
-    This algorithm casts a ray along +Z for each X,Y column, collects all
-    intersections, and fills ranges between alternating intersections.
-    It dramatically reduces per-voxel mesh queries compared to checking
-    each voxel center individually.
-    
-    Args:
-        obj: Blender mesh object to voxelize
-        voxel_size: Size of each voxel in Blender units (meters)
-        padding: Number of voxels to pad around the object
-        
-    Returns:
-        tuple: (voxel_array, origin, dimensions) where:
-            - voxel_array: 3D numpy array (width, height, depth), uint8 {0,1}
-            - origin: Vector representing world position of voxel (0,0,0)
-            - dimensions: tuple of (width, height, depth) in voxels
+    Overview:
+    - Compute a padded world-space AABB around the object.
+    - For each (x,y) voxel column, cast a ray and gather surface intersections.
+    - Fill voxels between alternating hits [z0,z1], [z2,z3], ... to form a solid.
+    - This avoids per-voxel point-in-mesh checks, improving performance.
     """
-    # Build BVH from object's base mesh in world space (no depsgraph)
+    # Build BVH from object's base mesh in world space (no depsgraph/modifiers).
     bvh = _bvh_from_object(obj)
 
     # Get object's bounding box in world coordinates
@@ -408,13 +412,20 @@ def voxelize_mesh(obj, voxel_size=1.0, padding=1):
 # New: voxelize multiple objects into a single HU grid
 def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback=None, bbox_override=None):
     """
-    Voxelize multiple mesh objects into a single HU grid (int16), using per-object HU values.
-    Uses object.data + matrix_world (no depsgraph). Overlaps take max HU.
+    Voxelize multiple mesh objects into a single HU grid (int16), using per-object HU.
+
+    Details:
+    - World-space AABB is computed across all objects. If bbox_override is given,
+      it is used verbatim to guarantee identical grid across phases.
+    - Each object's mesh is converted to a BVH in world space (no depsgraph).
+    - For overlapping fills, the maximum HU value wins (e.g., metal over tissue).
     """
+    # Validate input meshes
     if not objects:
         raise ValueError("No objects provided for voxelization")
 
-    # Global bounding box (world-space), no depsgraph
+    # Compute global bounds across objects (or use provided override).
+    # Padding is applied only when we compute bounds here (not when overriding).
     if bbox_override is not None:
         min_x, max_x, min_y, max_y, min_z, max_z = bbox_override
     else:
@@ -455,7 +466,8 @@ def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback
     max_dist = (max_z - min_z) + 4.0 * voxel_size
     eps = 1e-6
 
-    # Prepare BVHs and per-object HU (no depsgraph)
+    # Prepare per-object (BVH, HU, name) tuples.
+    # Note: HU is clamped to valid CT range.
     obj_data = []
     for obj in objects:
         bvh = _bvh_from_object(obj)
@@ -466,6 +478,8 @@ def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback
     total_cols = width * height
     col_count = 0
 
+    # Iterate columns and fill Z-intervals per object, taking maximum HU on overlaps.
+    # Progress callback can be hooked into Blender's progress bar.
     for ix in range(width):
         xw = float(xs[ix])
         for iy in range(height):
@@ -515,6 +529,7 @@ class MESH_OT_export_dicom(Operator):
                 context.active_object.mode == 'OBJECT')
     
     def execute(self, context):
+        # Guardrails: require pydicom and at least one mesh selected.
         if not PYDICOM_AVAILABLE:
             self.report({'ERROR'}, "pydicom library not available")
             return {'CANCELLED'}
@@ -657,7 +672,9 @@ class MESH_OT_export_dicom(Operator):
             context.window_manager.progress_begin(0, 1)
 
             if not export_4d:
-                # Single-frame (no depsgraph)
+                # Single-frame export:
+                # - Voxelize all selected meshes into one HU grid.
+                # - Export as a single DICOM series with current patient/series info.
                 self.report({'INFO'}, 
                     f"Voxelizing {len(selected_meshes)} mesh(es) with {voxel_size_mm}mm resolution. "
                     f"Estimated grid: {estimated_width}x{estimated_height}x{estimated_depth}")
@@ -712,14 +729,12 @@ class MESH_OT_export_dicom(Operator):
             saved_frame = context.scene.frame_current
             try:
                 for phase_index, frame in enumerate(frames, start=1):
-                    # Set frame, visibly advance timeline (no depsgraph)
+                    # Move timeline to the correct frame and force redraw for visible feedback.
                     context.scene.frame_set(frame, subframe=0.0)
                     context.scene.frame_current = frame
                     _force_ui_redraw()
 
-                    print(f"[DICOMator] Exporting phase {phase_index}/{num_phases} at frame {frame}")
-
-                    # Build HU grid for this phase
+                    # Build HU grid for this phase at fixed bbox; no depsgraph usage.
                     hu_array, origin, dimensions = voxelize_objects_to_hu(
                         selected_meshes,
                         voxel_size=voxel_size,
@@ -759,6 +774,7 @@ class MESH_OT_export_dicom(Operator):
                         self.report({'ERROR'}, f"Phase {phase_index}: {result['error']}")
                         return {'CANCELLED'}
             finally:
+                # Restore the user's original frame after export completes or on error.
                 context.scene.frame_set(saved_frame)
 
             context.window_manager.progress_end()
@@ -766,6 +782,7 @@ class MESH_OT_export_dicom(Operator):
             return {'FINISHED'}
 
         except Exception as e:
+            # Ensure progress is ended and show the error to the user.
             context.window_manager.progress_end()
             self.report({'ERROR'}, f"Export failed: {str(e)}")
             return {'CANCELLED'}
@@ -1106,6 +1123,8 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
 
 # Helper: force UI redraw so the timeline visibly advances during 4D export
 def _force_ui_redraw():
+    # Some long-running operators block UI refresh. This function nudges
+    # Blender to update the timeline and viewport so users can see progress.
     try:
         bpy.ops.wm.redraw_timer(type='DRAW_WIN', iterations=1)
     except Exception:
