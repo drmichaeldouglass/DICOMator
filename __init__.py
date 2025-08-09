@@ -103,11 +103,14 @@ def export_voxel_grid_to_dicom(
         series_description="CT Series from DICOMator",
         progress_callback=None,
         direct_hu=False,
+        patient_position="HFS",  # NEW: allow choosing patient position (orientation)
     ):
         """
         Export the voxel grid (binary or HU) as a series of DICOM slices.
         If direct_hu=True, 'voxel_grid' is expected to contain HU values (int16).
         Otherwise, positive voxels are mapped to DEFAULT_DENSITY and 0 to AIR_DENSITY.
+
+        patient_position: DICOM PatientPosition code (e.g., HFS, FFS, HFP, FFP, HFDR, HFDL, FFDR, FFDL)
         """
         if not PYDICOM_AVAILABLE:
             return {'error': 'pydicom not available'}
@@ -176,7 +179,7 @@ def export_voxel_grid_to_dicom(
                 ds.PatientID = common_metadata['patient_id']
                 ds.PatientBirthDate = ''
                 ds.PatientSex = common_metadata['patient_sex']
-                ds.PatientPosition = 'HFS'
+                ds.PatientPosition = str(patient_position)  # CHANGED: use selected patient position
                 
                 # Study information
                 ds.StudyInstanceUID = common_metadata['study_instance_uid']
@@ -208,13 +211,13 @@ def export_voxel_grid_to_dicom(
                 ds.AcquisitionDate = common_metadata['date_str']
                 ds.AcquisitionTime = common_metadata['time_str']
                 
-                # Image position and orientation (LPS/RAS depends on world; assuming Blender axes map 1:1 in mm here)
+                # Image position and orientation
                 ds.ImagePositionPatient = [
                     float(bbox_min_mm.x),
                     float(bbox_min_mm.y),
                     float(bbox_min_mm.z + (i * voxel_size_mm))
                 ]
-                ds.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+                ds.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]  # axial identity; patient position set above
                 ds.SliceLocation = float(bbox_min_mm.z + (i * voxel_size_mm))
                 ds.SliceThickness = float(voxel_size_mm)
                 ds.SpacingBetweenSlices = float(voxel_size_mm)
@@ -629,6 +632,7 @@ class MESH_OT_export_dicom(Operator):
                 series_description=props.series_description,
                 progress_callback=progress_callback,
                 direct_hu=True,
+                patient_position=props.patient_position,  # NEW: pass UI-selected patient position
             )
             
             # End progress indicator
@@ -670,6 +674,22 @@ class DICOMatorProperties(PropertyGroup):
         ],
         default='M'
     )
+    # NEW: DICOM PatientPosition (orientation)
+    patient_position: bpy.props.EnumProperty(
+        name="Patient Position",
+        description="DICOM Patient Position (image orientation context)",
+        items=[
+            ('HFS', 'Head First Supine', 'Head First Supine'),
+            ('FFS', 'Feet First Supine', 'Feet First Supine'),
+            ('HFP', 'Head First Prone', 'Head First Prone'),
+            ('FFP', 'Feet First Prone', 'Feet First Prone'),
+            ('HFDR', 'Head First Decubitus Right', 'Head First Decubitus Right'),
+            ('HFDL', 'Head First Decubitus Left', 'Head First Decubitus Left'),
+            ('FFDR', 'Feet First Decubitus Right', 'Feet First Decubitus Right'),
+            ('FFDL', 'Feet First Decubitus Left', 'Feet First Decubitus Left'),
+        ],
+        default='HFS'
+    )
     grid_resolution: bpy.props.FloatProperty(
         name="Grid Resolution (mm)",
         description="Size of each voxel in millimeters",
@@ -702,118 +722,207 @@ class VIEW3D_PT_dicomator_panel(Panel):
     
     def draw(self, context):
         layout = self.layout
+        # Keep parent minimal; show message if nothing selected
+        if not (context.active_object and context.active_object.type == 'MESH'):
+            layout.label(text="Select a mesh object to export", icon='INFO')
+        else:
+            layout.label(text="Expand sections below to configure export", icon='TRIA_DOWN')
+
+
+# NEW: Collapsible subpanels
+class VIEW3D_PT_dicomator_selection_info(Panel):
+    bl_label = "Selection Info"
+    bl_idname = "VIEW3D_PT_dicomator_selection_info"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "DICOMator"
+    bl_parent_id = "VIEW3D_PT_dicomator_panel"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
         props = context.scene.dicomator_props
-        
-        # Check if there's a selected mesh object
-        if context.active_object and context.active_object.type == 'MESH':
-            # Use all selected meshes for info/estimates
-            selected_meshes = [o for o in context.selected_objects if o.type == 'MESH']
-            obj = context.active_object
-            sel_count = len(selected_meshes)
-            if sel_count > 1:
-                layout.label(text=f"Selected: {sel_count} meshes (Active: {obj.name})", icon='MESH_DATA')
-            else:
-                layout.label(text=f"Selected: {obj.name}", icon='MESH_DATA')
-            
-            # Show combined object dimensions
-            bbox_corners = []
+        if not (context.active_object and context.active_object.type == 'MESH'):
+            layout.label(text="No mesh selected", icon='INFO')
+            return
+
+        # Selected meshes and active
+        selected_meshes = [o for o in context.selected_objects if o.type == 'MESH']
+        obj = context.active_object
+        sel_count = len(selected_meshes)
+        if sel_count > 1:
+            layout.label(text=f"Selected: {sel_count} meshes (Active: {obj.name})", icon='MESH_DATA')
+        else:
+            layout.label(text=f"Selected: {obj.name}", icon='MESH_DATA')
+
+        # Combined bounds
+        bbox_corners = []
+        for o in selected_meshes:
+            bbox_corners.extend([o.matrix_world @ Vector(corner) for corner in o.bound_box])
+        min_x = min(corner.x for corner in bbox_corners)
+        max_x = max(corner.x for corner in bbox_corners)
+        min_y = min(corner.y for corner in bbox_corners)
+        max_y = max(corner.y for corner in bbox_corners)
+        min_z = min(corner.z for corner in bbox_corners)
+        max_z = max(corner.z for corner in bbox_corners)
+
+        obj_width = max_x - min_x
+        obj_height = max_y - min_y
+        obj_depth = max_z - min_z
+
+        box = layout.box()
+        box.label(text="Selection Info", icon='INFO')
+        box.label(text=f"Size: {obj_width:.2f} x {obj_height:.2f} x {obj_depth:.2f} m")
+
+        # Voxel grid estimate
+        grid_res_mm = _get_float_prop(props, "grid_resolution", 2.0)
+        if grid_res_mm > 0.0:
+            voxel_size = grid_res_mm * 0.001
+            padding = 1
+            est_width = int(math.ceil((obj_width + 2 * padding * voxel_size) / voxel_size))
+            est_height = int(math.ceil((obj_height + 2 * padding * voxel_size) / voxel_size))
+            est_depth = int(math.ceil((obj_depth + 2 * padding * voxel_size) / voxel_size))
+            total_voxels = est_width * est_height * est_depth
+
+            box.label(text=f"Est. Grid: {est_width} x {est_height} x {est_depth}")
+            box.label(text=f"Total Voxels: {total_voxels:,}")
+
+            memory_mb = (total_voxels * 2) / (1024 * 1024)
+            box.label(text=f"Est. Memory: {memory_mb:.1f} MB")
+
+            if total_voxels > 50_000_000:
+                box.label(text="Large grid - may be slow", icon='ERROR')
+            elif total_voxels > 100_000_000:
+                box.label(text="Grid too large!", icon='CANCEL')
+
+
+class VIEW3D_PT_dicomator_per_object_hu(Panel):
+    bl_label = "Per-Object HU"
+    bl_idname = "VIEW3D_PT_dicomator_per_object_hu"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "DICOMator"
+    bl_parent_id = "VIEW3D_PT_dicomator_panel"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        if not (context.active_object and context.active_object.type == 'MESH'):
+            layout.label(text="No mesh selected", icon='INFO')
+            return
+        selected_meshes = [o for o in context.selected_objects if o.type == 'MESH']
+        box_hu = layout.box()
+        box_hu.label(text="Per-Object HU", icon='MOD_PHYSICS')
+        if selected_meshes:
             for o in selected_meshes:
-                bbox_corners.extend([o.matrix_world @ Vector(corner) for corner in o.bound_box])
-            min_x = min(corner.x for corner in bbox_corners)
-            max_x = max(corner.x for corner in bbox_corners)
-            min_y = min(corner.y for corner in bbox_corners)
-            max_y = max(corner.y for corner in bbox_corners)
-            min_z = min(corner.z for corner in bbox_corners)
-            max_z = max(corner.z for corner in bbox_corners)
-            
-            obj_width = max_x - min_x
-            obj_height = max_y - min_y
-            obj_depth = max_z - min_z
-            
-            box = layout.box()
-            box.label(text="Selection Info", icon='INFO')
-            box.label(text=f"Size: {obj_width:.2f} x {obj_height:.2f} x {obj_depth:.2f} m")
-            
-            # Calculate and show estimated voxel grid size
-            grid_res_mm = _get_float_prop(props, "grid_resolution", 2.0)
-            if grid_res_mm > 0.0:
-                voxel_size = grid_res_mm * 0.001  # mm to meters
-                padding = 1
-                est_width = int(math.ceil((obj_width + 2 * padding * voxel_size) / voxel_size))
-                est_height = int(math.ceil((obj_height + 2 * padding * voxel_size) / voxel_size))
-                est_depth = int(math.ceil((obj_depth + 2 * padding * voxel_size) / voxel_size))
-                total_voxels = est_width * est_height * est_depth
-                
-                box.label(text=f"Est. Grid: {est_width} x {est_height} x {est_depth}")
-                box.label(text=f"Total Voxels: {total_voxels:,}")
-                
-                # Memory estimate (int16 = 2 bytes per voxel)
-                memory_mb = (total_voxels * 2) / (1024 * 1024)
-                box.label(text=f"Est. Memory: {memory_mb:.1f} MB")
-                
-                # Warning for large grids
-                if total_voxels > 50_000_000:  # 50 million voxels
-                    box.label(text="⚠️ Large grid - may be slow", icon='ERROR')
-                elif total_voxels > 100_000_000:  # 100 million voxels
-                    box.label(text="❌ Grid too large!", icon='CANCEL')
-            
-            # Per-object HU settings
-            box_hu = layout.box()
-            box_hu.label(text="Per-Object HU", icon='MOD_PHYSICS')
-            if selected_meshes:
-                for o in selected_meshes:
-                    row = box_hu.row(align=True)
-                    row.prop(o, "dicomator_hu", text=f"{o.name} HU")
-            
-            # Patient Information Section
-            box = layout.box()
-            box.label(text="Patient Information", icon='USER')
-            box.prop(props, "patient_name")
-            box.prop(props, "patient_id")
-            box.prop(props, "patient_sex")
-            
-            # Export Settings Section
-            box = layout.box()
-            box.label(text="Export Settings", icon='SETTINGS')
-            box.prop(props, "grid_resolution")
-            box.prop(props, "export_directory")
-            
-            # Show resolved export path if it's a Blender relative path
-            export_dir_val = _get_str_prop(props, "export_directory", "")
-            if export_dir_val.startswith('//'):
-                relative_path = export_dir_val[2:].replace('/', os.sep).replace('\\', os.sep)
+                row = box_hu.row(align=True)
+                row.prop(o, "dicomator_hu", text=f"{o.name} HU")
+
+
+class VIEW3D_PT_dicomator_patient_info(Panel):
+    bl_label = "Patient Information"
+    bl_idname = "VIEW3D_PT_dicomator_patient_info"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "DICOMator"
+    bl_parent_id = "VIEW3D_PT_dicomator_panel"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.dicomator_props
+        box = layout.box()
+        box.label(text="Patient Information", icon='USER')
+        box.prop(props, "patient_name")
+        box.prop(props, "patient_id")
+        box.prop(props, "patient_sex")
+
+
+class VIEW3D_PT_dicomator_orientation(Panel):
+    bl_label = "Image Orientation"
+    bl_idname = "VIEW3D_PT_dicomator_orientation"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "DICOMator"
+    bl_parent_id = "VIEW3D_PT_dicomator_panel"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.dicomator_props
+        box_or = layout.box()
+        box_or.label(text="Image Orientation", icon='ORIENTATION_GIMBAL')
+        box_or.prop(props, "patient_position", text="Patient Position")
+
+
+class VIEW3D_PT_dicomator_export_settings(Panel):
+    bl_label = "Export Settings"
+    bl_idname = "VIEW3D_PT_dicomator_export_settings"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "DICOMator"
+    bl_parent_id = "VIEW3D_PT_dicomator_panel"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        props = context.scene.dicomator_props
+
+        box = layout.box()
+        box.label(text="Export Settings", icon='SETTINGS')
+        box.prop(props, "grid_resolution")
+        box.prop(props, "export_directory")
+
+        # Resolved export path for Blender-relative paths
+        export_dir_val = _get_str_prop(props, "export_directory", "")
+        if export_dir_val.startswith('//'):
+            relative_path = export_dir_val[2:].replace('/', os.sep).replace('\\', os.sep)
+            if bpy.data.filepath:
+                blend_dir = os.path.dirname(bpy.data.filepath)
+                resolved_path = os.path.join(blend_dir, relative_path)
+            else:
+                resolved_path = os.path.join(os.getcwd(), relative_path)
+            resolved_path = os.path.abspath(os.path.normpath(resolved_path))
+            box.label(text=f"Resolved: {resolved_path}", icon='FILE_FOLDER')
+
+        box.prop(props, "series_description")
+
+        # Export button and guardrails
+        if PYDICOM_AVAILABLE:
+            export_dir = _get_str_prop(props, "export_directory", "")
+            if export_dir.startswith('//'):
+                relative_path = export_dir[2:].replace('/', os.sep).replace('\\', os.sep)
                 if bpy.data.filepath:
                     blend_dir = os.path.dirname(bpy.data.filepath)
-                    resolved_path = os.path.join(blend_dir, relative_path)
+                    export_dir = os.path.join(blend_dir, relative_path)
                 else:
-                    resolved_path = os.path.join(os.getcwd(), relative_path)
-                resolved_path = os.path.abspath(os.path.normpath(resolved_path))
-                box.label(text=f"Resolved: {resolved_path}", icon='FILE_FOLDER')
-            
-            box.prop(props, "series_description")
-            
-            # Export Button
-            if PYDICOM_AVAILABLE:
-                # Resolve export directory path
-                export_dir = _get_str_prop(props, "export_directory", "")
-                if export_dir.startswith('//'):
-                    relative_path = export_dir[2:].replace('/', os.sep).replace('\\', os.sep)
-                    if bpy.data.filepath:
-                        blend_dir = os.path.dirname(bpy.data.filepath)
-                        export_dir = os.path.join(blend_dir, relative_path)
-                    else:
-                        export_dir = os.path.join(os.getcwd(), relative_path)
-                    export_dir = os.path.abspath(os.path.normpath(export_dir))
-                
-                if export_dir and export_dir.strip():
+                    export_dir = os.path.join(os.getcwd(), relative_path)
+                export_dir = os.path.abspath(os.path.normpath(export_dir))
+
+            if export_dir and export_dir.strip():
+                # If a mesh is selected, compute a coarse size check for button gating
+                if context.active_object and context.active_object.type == 'MESH':
+                    selected_meshes = [o for o in context.selected_objects if o.type == 'MESH']
+                    bbox_corners = []
+                    for o in selected_meshes:
+                        bbox_corners.extend([o.matrix_world @ Vector(corner) for corner in o.bound_box])
+                    min_x = min(corner.x for corner in bbox_corners)
+                    max_x = max(corner.x for corner in bbox_corners)
+                    min_y = min(corner.y for corner in bbox_corners)
+                    max_y = max(corner.y for corner in bbox_corners)
+                    min_z = min(corner.z for corner in bbox_corners)
+                    max_z = max(corner.z for corner in bbox_corners)
+                    obj_width = max_x - min_x
+                    obj_height = max_y - min_y
+                    obj_depth = max_z - min_z
+
                     grid_res_mm2 = _get_float_prop(props, "grid_resolution", 2.0)
-                    # Check if grid size is reasonable
                     if grid_res_mm2 > 0.0:
                         voxel_size = grid_res_mm2 * 0.001
                         est_total = int(math.ceil((obj_width + 2 * voxel_size) / voxel_size)) * \
                                    int(math.ceil((obj_height + 2 * voxel_size) / voxel_size)) * \
                                    int(math.ceil((obj_depth + 2 * voxel_size) / voxel_size))
-                        
+
                         if est_total > 100_000_000:
                             layout.label(text="Grid too large - increase resolution", icon='ERROR')
                         else:
@@ -821,13 +930,13 @@ class VIEW3D_PT_dicomator_panel(Panel):
                     else:
                         layout.operator("mesh.export_dicom", text="Export to DICOM", icon='EXPORT')
                 else:
-                    layout.label(text="Please select export directory", icon='INFO')
+                    layout.label(text="Select a mesh object to export", icon='INFO')
             else:
-                box = layout.box()
-                box.label(text="pydicom library required", icon='ERROR')
-                box.label(text="Install pydicom to enable DICOM export")
+                layout.label(text="Please select export directory", icon='INFO')
         else:
-            layout.label(text="Select a mesh object to export", icon='INFO')
+            box_err = layout.box()
+            box_err.label(text="pydicom library required", icon='ERROR')
+            box_err.label(text="Install pydicom to enable DICOM export")
 
 
 # Registration
@@ -835,6 +944,12 @@ classes = (
     DICOMatorProperties,
     MESH_OT_export_dicom,
     VIEW3D_PT_dicomator_panel,
+    # NEW: register subpanels
+    VIEW3D_PT_dicomator_selection_info,
+    VIEW3D_PT_dicomator_per_object_hu,
+    VIEW3D_PT_dicomator_patient_info,
+    VIEW3D_PT_dicomator_orientation,
+    VIEW3D_PT_dicomator_export_settings,
 )
 
 def register():
@@ -844,7 +959,7 @@ def register():
     # Register the property group with the scene
     bpy.types.Scene.dicomator_props = PointerProperty(type=DICOMatorProperties)
 
-    # Register per-object HU property
+    # Register per-object HU property (defaults to 0 HU as requested)
     bpy.types.Object.dicomator_hu = FloatProperty(
         name="HU",
         description="Assigned Hounsfield Units for this mesh",
