@@ -30,8 +30,7 @@ from bpy.props import (
     StringProperty,
     EnumProperty,
 )
-
-# Add these imports after the existing imports
+from mathutils.bvhtree import BVHTree
 import numpy as np
 
 # Add these DICOM-specific imports
@@ -50,7 +49,21 @@ DEFAULT_DENSITY = 0.0   # Default density for objects
 MAX_HU_VALUE = 3071     # Maximum HU value
 MIN_HU_VALUE = -1024    # Minimum HU value
 
+# Safely fetch numeric properties even when Blender returns _PropertyDeferred
+def _get_float_prop(props, name: str, default: float) -> float:
+    try:
+        val = getattr(props, name)
+        return float(val)
+    except Exception:
+        return float(default)
 
+# Safely fetch string properties even when Blender returns _PropertyDeferred
+def _get_str_prop(props, name: str, default: str) -> str:
+    try:
+        val = getattr(props, name)
+        return str(val) if val is not None else str(default)
+    except Exception:
+        return str(default)
 
 def is_point_inside_mesh(point, obj):
     """
@@ -88,30 +101,16 @@ def export_voxel_grid_to_dicom(
         patient_id="12345678",
         patient_sex="M",
         series_description="CT Series from DICOMator",
-        progress_callback=None
+        progress_callback=None,
+        direct_hu=False,
     ):
         """
-        Export the voxel grid as a series of DICOM slices.
-        
-        Args:
-            voxel_grid: 3D numpy array of voxel data (HU values)
-            voxel_size: Size of each voxel in world units
-            output_dir: Directory to save DICOM files
-            bbox_min: Vector representing minimum bounding box coordinates
-            patient_name: Name of the patient
-            patient_id: Patient ID
-            patient_sex: Patient sex (M/F/O)
-            series_description: Description for the DICOM series
-            progress_callback: Optional callback function(slice_index, total_slices)
-            
-        Returns:
-            Status dictionary
+        Export the voxel grid (binary or HU) as a series of DICOM slices.
+        If direct_hu=True, 'voxel_grid' is expected to contain HU values (int16).
+        Otherwise, positive voxels are mapped to DEFAULT_DENSITY and 0 to AIR_DENSITY.
         """
         if not PYDICOM_AVAILABLE:
             return {'error': 'pydicom not available'}
-        
-        import numpy as np
-        import pydicom
         # Ensure output directory exists
         os.makedirs(output_dir, exist_ok=True)
         
@@ -120,15 +119,19 @@ def export_voxel_grid_to_dicom(
         date_str = current_datetime.strftime('%Y%m%d')
         time_str = current_datetime.strftime('%H%M%S.%f')
         
-        # Get number of slices
+        # Dimensions and units
         num_slices = voxel_grid.shape[2]
-        
-        # Convert binary voxel data to HU values
-        # 1 = tissue (0 HU), 0 = air (-1000 HU)
-        hu_grid = np.where(voxel_grid > 0, DEFAULT_DENSITY, AIR_DENSITY)
-        
+        # Convert to HU grid
+        if direct_hu:
+            hu_grid = np.array(voxel_grid, dtype=np.int16, copy=False)
+        else:
+            hu_grid = np.where(voxel_grid > 0, DEFAULT_DENSITY, AIR_DENSITY).astype(np.int16, copy=False)
         # Clip values to valid HU range
-        hu_grid = np.clip(hu_grid, MIN_HU_VALUE, MAX_HU_VALUE)
+        hu_grid = np.clip(hu_grid, MIN_HU_VALUE, MAX_HU_VALUE).astype(np.int16, copy=False)
+
+        # DICOM expects millimeters for spatial tags
+        voxel_size_mm = float(voxel_size) * 1000.0
+        bbox_min_mm = Vector((bbox_min.x * 1000.0, bbox_min.y * 1000.0, bbox_min.z * 1000.0))
         
         # Generate UIDs for this study
         study_instance_uid = generate_uid()
@@ -149,10 +152,9 @@ def export_voxel_grid_to_dicom(
             'time_str': time_str,
         }
         
-        # Export each slice
         for i in range(num_slices):
+            # Note: hu_grid is shaped (width, height, depth). For DICOM, Rows = Y (height), Columns = X (width)
             slice_data = hu_grid[:, :, i]
-            
             try:
                 # Create file meta information
                 file_meta = Dataset()
@@ -174,6 +176,7 @@ def export_voxel_grid_to_dicom(
                 ds.PatientID = common_metadata['patient_id']
                 ds.PatientBirthDate = ''
                 ds.PatientSex = common_metadata['patient_sex']
+                ds.PatientPosition = 'HFS'
                 
                 # Study information
                 ds.StudyInstanceUID = common_metadata['study_instance_uid']
@@ -205,20 +208,26 @@ def export_voxel_grid_to_dicom(
                 ds.AcquisitionDate = common_metadata['date_str']
                 ds.AcquisitionTime = common_metadata['time_str']
                 
-                # Image position and orientation
+                # Image position and orientation (LPS/RAS depends on world; assuming Blender axes map 1:1 in mm here)
                 ds.ImagePositionPatient = [
-                    float(bbox_min.x),
-                    float(bbox_min.y),
-                    float(bbox_min.z + (i * voxel_size))
+                    float(bbox_min_mm.x),
+                    float(bbox_min_mm.y),
+                    float(bbox_min_mm.z + (i * voxel_size_mm))
                 ]
                 ds.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-                ds.SliceLocation = float(bbox_min.z + (i * voxel_size))
+                ds.SliceLocation = float(bbox_min_mm.z + (i * voxel_size_mm))
+                ds.SliceThickness = float(voxel_size_mm)
+                ds.SpacingBetweenSlices = float(voxel_size_mm)
                 
                 # Pixel data characteristics
+                # For DICOM: Rows = number of samples along Y, Columns = along X. Transpose to (rows, cols)
+                pixel_array = slice_data.T.astype(np.int16, copy=False)
+                rows, cols = pixel_array.shape
                 ds.SamplesPerPixel = 1
                 ds.PhotometricInterpretation = 'MONOCHROME2'
-                ds.Rows, ds.Columns = slice_data.shape
-                ds.PixelSpacing = [float(voxel_size), float(voxel_size)]
+                ds.Rows = int(rows)
+                ds.Columns = int(cols)
+                ds.PixelSpacing = [float(voxel_size_mm), float(voxel_size_mm)]  # [row spacing (mm), col spacing (mm)]
                 ds.BitsAllocated = 16
                 ds.BitsStored = 16
                 ds.HighBit = 15
@@ -227,9 +236,6 @@ def export_voxel_grid_to_dicom(
                 ds.RescaleSlope = 1.0
                 ds.WindowCenter = 40
                 ds.WindowWidth = 400
-                
-                # Convert to int16 for DICOM
-                pixel_array = slice_data.astype(np.int16)
                 ds.PixelData = pixel_array.tobytes()
                 
                 # Create filename
@@ -240,12 +246,9 @@ def export_voxel_grid_to_dicom(
                 ds.is_implicit_VR = False
                 ds.save_as(filename)
                 
-                print(f"Saved slice {i+1}/{num_slices}")
-                
-                # Call progress callback if provided
+                # Progress
                 if progress_callback:
                     progress_callback(i + 1, num_slices)
-                
             except Exception as e:
                 print(f"Error saving DICOM file for slice {i+1}: {str(e)}")
                 return {'error': f"Error saving DICOM file for slice {i+1}: {str(e)}"}
@@ -254,19 +257,29 @@ def export_voxel_grid_to_dicom(
 
 def voxelize_mesh(obj, voxel_size=1.0, padding=1):
     """
-    Voxelize a mesh object into a 3D numpy array.
+    Voxelize a mesh object into a 3D numpy array using a BVH-based column fill.
+
+    This algorithm casts a ray along +Z for each X,Y column, collects all
+    intersections, and fills ranges between alternating intersections.
+    It dramatically reduces per-voxel mesh queries compared to checking
+    each voxel center individually.
     
     Args:
         obj: Blender mesh object to voxelize
-        voxel_size: Size of each voxel in Blender units
+        voxel_size: Size of each voxel in Blender units (meters)
         padding: Number of voxels to pad around the object
         
     Returns:
         tuple: (voxel_array, origin, dimensions) where:
-            - voxel_array: 3D numpy array (1 = inside mesh, 0 = outside)
-            - origin: Vector representing the world position of voxel (0,0,0)
+            - voxel_array: 3D numpy array (width, height, depth), uint8 {0,1}
+            - origin: Vector representing world position of voxel (0,0,0)
             - dimensions: tuple of (width, height, depth) in voxels
     """
+    # Build evaluated mesh and BVH for fast intersection
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    obj_eval = obj.evaluated_get(depsgraph)
+    bvh = BVHTree.FromObject(obj_eval, depsgraph, epsilon=0.0)
+
     # Get object's bounding box in world coordinates
     bbox_corners = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
     
@@ -287,36 +300,184 @@ def voxelize_mesh(obj, voxel_size=1.0, padding=1):
     max_z += padding * voxel_size
     
     # Calculate voxel grid dimensions
-    width = int(math.ceil((max_x - min_x) / voxel_size))
-    height = int(math.ceil((max_y - min_y) / voxel_size))
-    depth = int(math.ceil((max_z - min_z) / voxel_size))
+    width = max(1, int(math.ceil((max_x - min_x) / voxel_size)))
+    height = max(1, int(math.ceil((max_y - min_y) / voxel_size)))
+    depth = max(1, int(math.ceil((max_z - min_z) / voxel_size)))
     
-    # Create voxel array
+    # Create voxel array (width, height, depth)
     voxel_array = np.zeros((width, height, depth), dtype=np.uint8)
     
     # Origin point (world coordinates of voxel [0,0,0])
     origin = Vector((min_x, min_y, min_z))
     
-    print(f"Voxelizing mesh '{obj.name}' into {width}x{height}x{depth} grid...")
+    print(f"Voxelizing mesh '{obj.name}' into {width}x{height}x{depth} grid (BVH ray casting)...")
     
-    # Fill voxel array
-    for x in range(width):
-        for y in range(height):
-            for z in range(depth):
-                # Calculate world position of voxel center
-                world_pos = Vector((
-                    min_x + (x + 0.5) * voxel_size,
-                    min_y + (y + 0.5) * voxel_size,
-                    min_z + (z + 0.5) * voxel_size
-                ))
-                
-                # Check if point is inside mesh
-                if is_point_inside_mesh(world_pos, obj):
-                    voxel_array[x, y, z] = 1
+    # Precompute world coordinates of voxel centers in X and Y
+    xs = min_x + (np.arange(width) + 0.5) * voxel_size
+    ys = min_y + (np.arange(height) + 0.5) * voxel_size
     
-    print(f"Voxelization complete. Filled voxels: {np.sum(voxel_array)}/{voxel_array.size}")
+    # Z center reference for index mapping
+    z0_center = min_z + 0.5 * voxel_size
+    inv_dz = 1.0 / voxel_size
+    
+    # Ray casting parameters
+    ray_dir = Vector((0.0, 0.0, 1.0))
+    max_dist = (max_z - min_z) + 4.0 * voxel_size
+    eps = 1e-6
+    
+    # Iterate over columns (X,Y) and fill Z ranges
+    total_cols = width * height
+    col_count = 0
+    
+    for ix in range(width):
+        xw = float(xs[ix])
+        for iy in range(height):
+            yw = float(ys[iy])
+            # Start ray just below the min Z to ensure first hit is the first surface
+            origin_ray = Vector((xw, yw, min_z - 2.0 * voxel_size))
+            hits_z = []
+            
+            # Collect all intersections along +Z
+            while True:
+                loc, normal, face_index, distance = bvh.ray_cast(origin_ray, ray_dir, max_dist)
+                if loc is None:
+                    break
+                hits_z.append(loc.z)
+                # Move origin slightly above the hit to find the next intersection
+                origin_ray = Vector((loc.x, loc.y, loc.z + eps))
+            
+            if hits_z:
+                hits_z.sort()
+                # Fill every alternating interval [z0, z1)
+                for j in range(0, len(hits_z) - 1, 2):
+                    z0 = hits_z[j]
+                    z1 = hits_z[j + 1]
+                    # Determine voxel indices whose centers lie in (z0, z1)
+                    start_idx = int(math.ceil((z0 - z0_center) * inv_dz))
+                    end_idx = int(math.floor((z1 - z0_center) * inv_dz))
+                    if end_idx >= start_idx:
+                        # Clamp to array bounds
+                        s = max(0, start_idx)
+                        e = min(depth - 1, end_idx)
+                        if e >= s:
+                            voxel_array[ix, iy, s:e + 1] = 1
+            
+            col_count += 1
+            if (col_count % 10000) == 0:
+                print(f"  processed columns: {col_count}/{total_cols} ({(col_count/total_cols)*100:.1f}%)")
+    
+    filled = int(voxel_array.sum())
+    print(f"Voxelization complete. Filled voxels: {filled}/{voxel_array.size}")
     
     return voxel_array, origin, (width, height, depth)
+
+# New: voxelize multiple objects into a single HU grid
+
+def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback=None):
+    """
+    Voxelize multiple mesh objects into a single HU grid (int16), using per-object HU values.
+    The union of all objects is used. Overlapping voxels take the maximum HU.
+
+    Returns: (hu_array, origin, (width, height, depth))
+    """
+    if not objects:
+        raise ValueError("No objects provided for voxelization")
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+
+    # Global bounding box across all objects
+    all_corners = []
+    for obj in objects:
+        all_corners.extend([obj.matrix_world @ Vector(corner) for corner in obj.bound_box])
+    min_x = min(corner.x for corner in all_corners)
+    max_x = max(corner.x for corner in all_corners)
+    min_y = min(corner.y for corner in all_corners)
+    max_y = max(corner.y for corner in all_corners)
+    min_z = min(corner.z for corner in all_corners)
+    max_z = max(corner.z for corner in all_corners)
+
+    # Add padding
+    min_x -= padding * voxel_size
+    max_x += padding * voxel_size
+    min_y -= padding * voxel_size
+    max_y += padding * voxel_size
+    min_z -= padding * voxel_size
+    max_z += padding * voxel_size
+
+    # Grid dimensions
+    width = max(1, int(math.ceil((max_x - min_x) / voxel_size)))
+    height = max(1, int(math.ceil((max_y - min_y) / voxel_size)))
+    depth = max(1, int(math.ceil((max_z - min_z) / voxel_size)))
+
+    origin = Vector((min_x, min_y, min_z))
+
+    print(f"Voxelizing {len(objects)} objects into {width}x{height}x{depth} HU grid...")
+
+    # HU array initialized to AIR
+    hu_array = np.full((width, height, depth), int(AIR_DENSITY), dtype=np.int16)
+
+    # Precompute X, Y world coordinates for voxel centers
+    xs = min_x + (np.arange(width) + 0.5) * voxel_size
+    ys = min_y + (np.arange(height) + 0.5) * voxel_size
+
+    z0_center = min_z + 0.5 * voxel_size
+    inv_dz = 1.0 / voxel_size
+
+    ray_dir = Vector((0.0, 0.0, 1.0))
+    max_dist = (max_z - min_z) + 4.0 * voxel_size
+    eps = 1e-6
+
+    # Prepare BVHs and per-object HU
+    obj_data = []
+    for obj in objects:
+        obj_eval = obj.evaluated_get(depsgraph)
+        bvh = BVHTree.FromObject(obj_eval, depsgraph, epsilon=0.0)
+        # Get HU from object property, default to DEFAULT_DENSITY
+        hu_val = float(getattr(obj, 'dicomator_hu', DEFAULT_DENSITY))
+        hu_val = max(MIN_HU_VALUE, min(MAX_HU_VALUE, hu_val))
+        obj_data.append((bvh, hu_val, obj.name))
+
+    total_cols = width * height
+    col_count = 0
+
+    for ix in range(width):
+        xw = float(xs[ix])
+        for iy in range(height):
+            yw = float(ys[iy])
+            # For each object, cast along +Z and fill intervals
+            for bvh, hu_val, _name in obj_data:
+                origin_ray = Vector((xw, yw, min_z - 2.0 * voxel_size))
+                hits_z = []
+                while True:
+                    loc, normal, face_index, distance = bvh.ray_cast(origin_ray, ray_dir, max_dist)
+                    if loc is None:
+                        break
+                    hits_z.append(loc.z)
+                    origin_ray = Vector((loc.x, loc.y, loc.z + eps))
+                if hits_z:
+                    hits_z.sort()
+                    for j in range(0, len(hits_z) - 1, 2):
+                        z0 = hits_z[j]
+                        z1 = hits_z[j + 1]
+                        start_idx = int(math.ceil((z0 - z0_center) * inv_dz))
+                        end_idx = int(math.floor((z1 - z0_center) * inv_dz))
+                        if end_idx >= start_idx:
+                            s = max(0, start_idx)
+                            e = min(depth - 1, end_idx)
+                            if e >= s:
+                                # Assign max HU in overlaps
+                                current = hu_array[ix, iy, s:e+1]
+                                if current.size:
+                                    hu_array[ix, iy, s:e+1] = np.maximum(current, np.int16(hu_val))
+            
+            col_count += 1
+            if progress_callback and (col_count % 5000) == 0:
+                progress_callback(col_count, total_cols)
+            if (col_count % 20000) == 0:
+                print(f"  processed columns: {col_count}/{total_cols} ({(col_count/total_cols)*100:.1f}%)")
+
+    print("Voxelization complete (multi-object HU grid).")
+    return hu_array, origin, (width, height, depth)
 
 
 
@@ -339,6 +500,13 @@ class MESH_OT_export_dicom(Operator):
             self.report({'ERROR'}, "pydicom library not available")
             return {'CANCELLED'}
         
+        # Collect all selected mesh objects
+        selected_meshes = [o for o in context.selected_objects if o.type == 'MESH']
+        if not selected_meshes:
+            self.report({'ERROR'}, "Please select at least one mesh object")
+            return {'CANCELLED'}
+        
+        # Use active object for mode validation but export all selected meshes
         obj = context.active_object
         if not obj or obj.type != 'MESH':
             self.report({'ERROR'}, "Please select a mesh object")
@@ -387,15 +555,13 @@ class MESH_OT_export_dicom(Operator):
         
         try:
             # Convert mm to Blender units (assuming Blender units are in meters)
-            # But first, let's check what units Blender is actually using
-            voxel_size_mm = props.grid_resolution
-            
-            # In Blender, the default unit is typically 1 Blender unit = 1 meter
-            # So we need to convert mm to meters: 1mm = 0.001m
+            voxel_size_mm = _get_float_prop(context.scene.dicomator_props, "grid_resolution", 2.0)
             voxel_size = voxel_size_mm * 0.001  # Convert mm to meters
             
-            # Get object dimensions for safety check
-            bbox_corners = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+            # Get global object dimensions for safety check across all selected meshes
+            bbox_corners = []
+            for o in selected_meshes:
+                bbox_corners.extend([o.matrix_world @ Vector(corner) for corner in o.bound_box])
             min_x = min(corner.x for corner in bbox_corners)
             max_x = max(corner.x for corner in bbox_corners)
             min_y = min(corner.y for corner in bbox_corners)
@@ -403,7 +569,7 @@ class MESH_OT_export_dicom(Operator):
             min_z = min(corner.z for corner in bbox_corners)
             max_z = max(corner.z for corner in bbox_corners)
             
-            # Calculate object dimensions
+            # Calculate selection dimensions
             obj_width = max_x - min_x
             obj_height = max_y - min_y
             obj_depth = max_z - min_z
@@ -427,31 +593,33 @@ class MESH_OT_export_dicom(Operator):
                 self.report({'ERROR'}, 
                     f"Voxel grid too large: {estimated_width}x{estimated_height}x{estimated_depth} "
                     f"({total_estimated_voxels:,} voxels). "
-                    f"Object size: {obj_width:.3f}x{obj_height:.3f}x{obj_depth:.3f}m. "
-                    f"Try increasing grid resolution (current: {voxel_size_mm}mm) or scaling down the object.")
+                    f"Selection size: {obj_width:.3f}x{obj_height:.3f}x{obj_depth:.3f}m. "
+                    f"Try increasing grid resolution (current: {voxel_size_mm}mm) or scaling down the objects.")
                 return {'CANCELLED'}
             
             # Progress callback function
             def progress_callback(current, total):
-                progress = current / total
+                progress = min(1.0, max(0.0, current / max(1, total)))
                 context.window_manager.progress_update(progress)
             
             # Start progress indicator
             context.window_manager.progress_begin(0, 1)
             
             self.report({'INFO'}, 
-                f"Voxelizing mesh '{obj.name}' with {voxel_size_mm}mm resolution. "
+                f"Voxelizing {len(selected_meshes)} mesh(es) with {voxel_size_mm}mm resolution. "
                 f"Estimated grid: {estimated_width}x{estimated_height}x{estimated_depth}")
             
-            voxel_array, origin, dimensions = voxelize_mesh(
-                obj, 
+            # Build HU grid for all selected meshes
+            hu_array, origin, dimensions = voxelize_objects_to_hu(
+                selected_meshes,
                 voxel_size=voxel_size,
-                padding=padding
+                padding=padding,
+                progress_callback=progress_callback,
             )
             
-            # Export to DICOM
+            # Export to DICOM (direct HU values)
             result = export_voxel_grid_to_dicom(
-                voxel_array,
+                hu_array,
                 voxel_size,
                 output_dir,
                 origin,
@@ -459,7 +627,8 @@ class MESH_OT_export_dicom(Operator):
                 patient_id=props.patient_id,
                 patient_sex=props.patient_sex,
                 series_description=props.series_description,
-                progress_callback=progress_callback
+                progress_callback=progress_callback,
+                direct_hu=True,
             )
             
             # End progress indicator
@@ -480,20 +649,18 @@ class MESH_OT_export_dicom(Operator):
 
 class DICOMatorProperties(PropertyGroup):
     """Properties for DICOMator add-on"""
-    
-    patient_name: StringProperty(
+    # Switch to annotation style so Blender 4.x registers RNA correctly
+    patient_name: bpy.props.StringProperty(
         name="Patient Name",
         description="Name of the patient",
         default="Anonymous"
     )
-    
-    patient_id: StringProperty(
+    patient_id: bpy.props.StringProperty(
         name="MRN",
         description="Medical Record Number (Patient ID)",
         default="12345678"
     )
-    
-    patient_sex: EnumProperty(
+    patient_sex: bpy.props.EnumProperty(
         name="Patient Sex",
         description="Patient sex",
         items=[
@@ -503,8 +670,7 @@ class DICOMatorProperties(PropertyGroup):
         ],
         default='M'
     )
-    
-    grid_resolution: FloatProperty(
+    grid_resolution: bpy.props.FloatProperty(
         name="Grid Resolution (mm)",
         description="Size of each voxel in millimeters",
         default=2.0,
@@ -513,15 +679,13 @@ class DICOMatorProperties(PropertyGroup):
         step=10,
         precision=2
     )
-    
-    export_directory: StringProperty(
+    export_directory: bpy.props.StringProperty(
         name="Export Directory",
         description="Directory to save DICOM files",
         subtype='DIR_PATH',
         default="C:\\Users\\Public\\DICOM_Export"
     )
-    
-    series_description: StringProperty(
+    series_description: bpy.props.StringProperty(
         name="Series Description",
         description="Description for the DICOM series",
         default="CT Series from DICOMator"
@@ -542,11 +706,19 @@ class VIEW3D_PT_dicomator_panel(Panel):
         
         # Check if there's a selected mesh object
         if context.active_object and context.active_object.type == 'MESH':
+            # Use all selected meshes for info/estimates
+            selected_meshes = [o for o in context.selected_objects if o.type == 'MESH']
             obj = context.active_object
-            layout.label(text=f"Selected: {obj.name}", icon='MESH_DATA')
+            sel_count = len(selected_meshes)
+            if sel_count > 1:
+                layout.label(text=f"Selected: {sel_count} meshes (Active: {obj.name})", icon='MESH_DATA')
+            else:
+                layout.label(text=f"Selected: {obj.name}", icon='MESH_DATA')
             
-            # Show object dimensions
-            bbox_corners = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+            # Show combined object dimensions
+            bbox_corners = []
+            for o in selected_meshes:
+                bbox_corners.extend([o.matrix_world @ Vector(corner) for corner in o.bound_box])
             min_x = min(corner.x for corner in bbox_corners)
             max_x = max(corner.x for corner in bbox_corners)
             min_y = min(corner.y for corner in bbox_corners)
@@ -559,12 +731,13 @@ class VIEW3D_PT_dicomator_panel(Panel):
             obj_depth = max_z - min_z
             
             box = layout.box()
-            box.label(text="Object Info", icon='INFO')
+            box.label(text="Selection Info", icon='INFO')
             box.label(text=f"Size: {obj_width:.2f} x {obj_height:.2f} x {obj_depth:.2f} m")
             
             # Calculate and show estimated voxel grid size
-            if props.grid_resolution > 0:
-                voxel_size = props.grid_resolution * 0.001  # mm to meters
+            grid_res_mm = _get_float_prop(props, "grid_resolution", 2.0)
+            if grid_res_mm > 0.0:
+                voxel_size = grid_res_mm * 0.001  # mm to meters
                 padding = 1
                 est_width = int(math.ceil((obj_width + 2 * padding * voxel_size) / voxel_size))
                 est_height = int(math.ceil((obj_height + 2 * padding * voxel_size) / voxel_size))
@@ -574,8 +747,8 @@ class VIEW3D_PT_dicomator_panel(Panel):
                 box.label(text=f"Est. Grid: {est_width} x {est_height} x {est_depth}")
                 box.label(text=f"Total Voxels: {total_voxels:,}")
                 
-                # Memory estimate (uint8 = 1 byte per voxel)
-                memory_mb = total_voxels / (1024 * 1024)
+                # Memory estimate (int16 = 2 bytes per voxel)
+                memory_mb = (total_voxels * 2) / (1024 * 1024)
                 box.label(text=f"Est. Memory: {memory_mb:.1f} MB")
                 
                 # Warning for large grids
@@ -583,6 +756,14 @@ class VIEW3D_PT_dicomator_panel(Panel):
                     box.label(text="⚠️ Large grid - may be slow", icon='ERROR')
                 elif total_voxels > 100_000_000:  # 100 million voxels
                     box.label(text="❌ Grid too large!", icon='CANCEL')
+            
+            # Per-object HU settings
+            box_hu = layout.box()
+            box_hu.label(text="Per-Object HU", icon='MOD_PHYSICS')
+            if selected_meshes:
+                for o in selected_meshes:
+                    row = box_hu.row(align=True)
+                    row.prop(o, "dicomator_hu", text=f"{o.name} HU")
             
             # Patient Information Section
             box = layout.box()
@@ -598,8 +779,9 @@ class VIEW3D_PT_dicomator_panel(Panel):
             box.prop(props, "export_directory")
             
             # Show resolved export path if it's a Blender relative path
-            if props.export_directory.startswith('//'):
-                relative_path = props.export_directory[2:].replace('/', os.sep).replace('\\', os.sep)
+            export_dir_val = _get_str_prop(props, "export_directory", "")
+            if export_dir_val.startswith('//'):
+                relative_path = export_dir_val[2:].replace('/', os.sep).replace('\\', os.sep)
                 if bpy.data.filepath:
                     blend_dir = os.path.dirname(bpy.data.filepath)
                     resolved_path = os.path.join(blend_dir, relative_path)
@@ -613,7 +795,7 @@ class VIEW3D_PT_dicomator_panel(Panel):
             # Export Button
             if PYDICOM_AVAILABLE:
                 # Resolve export directory path
-                export_dir = props.export_directory
+                export_dir = _get_str_prop(props, "export_directory", "")
                 if export_dir.startswith('//'):
                     relative_path = export_dir[2:].replace('/', os.sep).replace('\\', os.sep)
                     if bpy.data.filepath:
@@ -624,9 +806,10 @@ class VIEW3D_PT_dicomator_panel(Panel):
                     export_dir = os.path.abspath(os.path.normpath(export_dir))
                 
                 if export_dir and export_dir.strip():
+                    grid_res_mm2 = _get_float_prop(props, "grid_resolution", 2.0)
                     # Check if grid size is reasonable
-                    if props.grid_resolution > 0:
-                        voxel_size = props.grid_resolution * 0.001
+                    if grid_res_mm2 > 0.0:
+                        voxel_size = grid_res_mm2 * 0.001
                         est_total = int(math.ceil((obj_width + 2 * voxel_size) / voxel_size)) * \
                                    int(math.ceil((obj_height + 2 * voxel_size) / voxel_size)) * \
                                    int(math.ceil((obj_depth + 2 * voxel_size) / voxel_size))
@@ -661,9 +844,24 @@ def register():
     # Register the property group with the scene
     bpy.types.Scene.dicomator_props = PointerProperty(type=DICOMatorProperties)
 
+    # Register per-object HU property
+    bpy.types.Object.dicomator_hu = FloatProperty(
+        name="HU",
+        description="Assigned Hounsfield Units for this mesh",
+        default=0.0,
+        min=MIN_HU_VALUE,
+        max=MAX_HU_VALUE,
+        step=10,
+        precision=0,
+    )
+
 def unregister():
     # Unregister the property group
     del bpy.types.Scene.dicomator_props
+
+    # Unregister per-object HU property
+    if hasattr(bpy.types.Object, 'dicomator_hu'):
+        del bpy.types.Object.dicomator_hu
     
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
