@@ -4,6 +4,15 @@
 
 The DICOMator is a Blender addon designed to convert selected mesh objects into realistic, synthetic CT (Computed Tomography) datasets. It includes various CT artifact simulations, making it ideal for creating training, testing, or simulation data for medical imaging applications.
 
+**Repository Structure**
+
+The project is organized to work with Blender's extension platform and bundles its Python dependencies.
+
+- `__init__.py` – main Blender add-on module.
+- `blender_manifest.toml` – manifest that allows Blender to recognise the add-on as an installable extension.
+- `wheels/` – pre-packaged wheels for required libraries such as SciPy, scikit-image and pydicom.
+- `download_wheels.py` – helper script to refresh or fetch wheels for other platforms.
+
 **Features**
 
 * **Adaptive Voxelization:** Convert meshes into 3D volumes with intelligent boundary detection and adaptive sampling.
@@ -24,7 +33,7 @@ The DICOMator is a Blender addon designed to convert selected mesh objects into 
     * Go to Edit > Preferences > Add-ons.
     * Click "Install..." and select the downloaded zip file.
     * Enable the DICOMator checkbox.
-3. **Dependencies:** All required dependencies are included in the package as wheels and will be installed automatically.
+3. **Dependencies:** Wheel files located in the `wheels/` directory are installed automatically when the add-on is enabled. Use `download_wheels.py` to refresh or fetch wheels for other platforms if needed.
 4. **Save User Preferences (Optional):** Click "Save Preferences" to keep the addon enabled for future sessions.
 
 **Usage**
