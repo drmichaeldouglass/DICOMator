@@ -516,6 +516,18 @@ def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback
     print("Voxelization complete (multi-object HU grid).")
     return hu_array, origin, (width, height, depth)
 
+# Helper: add Gaussian noise (in HU) to a HU grid
+def add_gaussian_noise(hu_array: np.ndarray, std_hu: float) -> np.ndarray:
+    """
+    Add zero-mean Gaussian noise with standard deviation std_hu (HU) to the HU grid.
+    The result is clipped to the valid HU range and returned as int16.
+    """
+    if std_hu <= 0.0:
+        return hu_array.astype(np.int16, copy=False)
+    noisy = hu_array.astype(np.float32, copy=False) + np.random.normal(0.0, float(std_hu), hu_array.shape).astype(np.float32, copy=False)
+    noisy = np.clip(noisy, MIN_HU_VALUE, MAX_HU_VALUE)
+    return noisy.astype(np.int16, copy=False)
+
 class MESH_OT_export_dicom(Operator):
     """Export mesh to DICOM files"""
     bl_idname = "mesh.export_dicom"
@@ -686,8 +698,14 @@ class MESH_OT_export_dicom(Operator):
                     progress_callback=progress_callback,
                 )
 
+                # Optionally add Gaussian noise in HU before export
+                if getattr(props, "enable_noise", False) and _get_float_prop(props, "noise_std_dev_hu", 0.0) > 0.0:
+                    hu_array_to_export = add_gaussian_noise(hu_array, _get_float_prop(props, "noise_std_dev_hu", 0.0))
+                else:
+                    hu_array_to_export = hu_array
+
                 result = export_voxel_grid_to_dicom(
-                    hu_array,
+                    hu_array_to_export,
                     voxel_size,
                     output_dir,
                     origin,
@@ -743,13 +761,19 @@ class MESH_OT_export_dicom(Operator):
                         bbox_override=bbox_override,
                     )
 
+                    # Optionally add Gaussian noise per phase
+                    if getattr(props, "enable_noise", False) and _get_float_prop(props, "noise_std_dev_hu", 0.0) > 0.0:
+                        hu_array_to_export = add_gaussian_noise(hu_array, _get_float_prop(props, "noise_std_dev_hu", 0.0))
+                    else:
+                        hu_array_to_export = hu_array
+
                     percent = (phase_index / num_phases) * 100.0
                     phase_series_desc = f"{props.series_description} - Phase {phase_index} ({percent:.1f}%)"
                     series_uid = generate_uid()
                     series_number = phase_index
 
                     result = export_voxel_grid_to_dicom(
-                        hu_array,
+                        hu_array_to_export,
                         voxel_size,
                         output_dir,
                         origin,
@@ -765,9 +789,9 @@ class MESH_OT_export_dicom(Operator):
                         series_instance_uid=series_uid,
                         series_number=series_number,
                         number_of_temporal_positions=num_phases,
-                        temporal_position_index=frame,           # timeline frame (old behavior)
-                        temporal_position_identifier=phase_index, # 1-based phase
-                        phase_index=phase_index,                  # filename prefix
+                        temporal_position_index=frame,
+                        temporal_position_identifier=phase_index,
+                        phase_index=phase_index,
                     )
                     if 'error' in result:
                         context.window_manager.progress_end()
@@ -875,6 +899,21 @@ class DICOMatorProperties(PropertyGroup):
         name="Series Description",
         description="Description for the DICOM series",
         default="CT Series from DICOMator"
+    )
+    # Gaussian noise controls (in HU)
+    enable_noise: bpy.props.BoolProperty(
+        name="Add Gaussian Noise",
+        description="Add zero-mean Gaussian noise to exported HU images",
+        default=False
+    )
+    noise_std_dev_hu: bpy.props.FloatProperty(
+        name="Noise Std. Dev. (HU)",
+        description="Standard deviation of Gaussian noise in Hounsfield Units",
+        default=20.0,
+        min=0.0,
+        soft_max=500.0,
+        step=10,
+        precision=1
     )
 
 
@@ -1054,7 +1093,7 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
                 row.prop(props, "frame_end")
             col.prop(props, "frame_step")
 
-        # Resolved export path for Blender-relative paths
+        # Resolved export path and description
         export_dir_val = _get_str_prop(props, "export_directory", "")
         if export_dir_val.startswith('//'):
             relative_path = export_dir_val[2:].replace('/', os.sep).replace('\\', os.sep)
@@ -1067,6 +1106,15 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
             box.label(text=f"Resolved: {resolved_path}", icon='FILE_FOLDER')
 
         box.prop(props, "series_description")
+
+        # Gaussian noise UI
+        noise_box = box.box()
+        noise_box.label(text="Gaussian Noise", icon='RNDCURVE')
+        row = noise_box.row()
+        row.prop(props, "enable_noise")
+        if props.enable_noise:
+            row = noise_box.row(align=True)
+            row.prop(props, "noise_std_dev_hu", text="Std. Dev. (HU)")
 
         # Export button and guardrails
         if PYDICOM_AVAILABLE:
