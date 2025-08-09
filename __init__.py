@@ -103,14 +103,29 @@ def export_voxel_grid_to_dicom(
         series_description="CT Series from DICOMator",
         progress_callback=None,
         direct_hu=False,
-        patient_position="HFS",  # NEW: allow choosing patient position (orientation)
+        patient_position="HFS",
+        # NEW: 4D/temporal and UID controls
+        study_instance_uid=None,
+        frame_of_reference_uid=None,
+        series_instance_uid=None,
+        series_number=1,
+        temporal_position_identifier=None,
+        number_of_temporal_positions=None,
+        phase_index=None,
+        # NEW: old-version temporal tag (add alongside identifier)
+        temporal_position_index=None,
     ):
         """
         Export the voxel grid (binary or HU) as a series of DICOM slices.
         If direct_hu=True, 'voxel_grid' is expected to contain HU values (int16).
         Otherwise, positive voxels are mapped to DEFAULT_DENSITY and 0 to AIR_DENSITY.
 
-        patient_position: DICOM PatientPosition code (e.g., HFS, FFS, HFP, FFP, HFDR, HFDL, FFDR, FFDL)
+        patient_position: DICOM PatientPosition (HFS, FFS, HFP, FFP, HFDR, HFDL, FFDR, FFDL)
+        study_instance_uid/frame_of_reference_uid/series_instance_uid: optional UIDs to reuse across phases
+        number_of_temporal_positions: total number of phases
+        temporal_position_index: old-version tag for per-phase index (typically the timeline frame)
+        temporal_position_identifier: optional enhanced temporal identifier (typically 1-based phase)
+        phase_index: used only for filename prefixing (1-based)
         """
         if not PYDICOM_AVAILABLE:
             return {'error': 'pydicom not available'}
@@ -136,17 +151,16 @@ def export_voxel_grid_to_dicom(
         voxel_size_mm = float(voxel_size) * 1000.0
         bbox_min_mm = Vector((bbox_min.x * 1000.0, bbox_min.y * 1000.0, bbox_min.z * 1000.0))
         
-        # Generate UIDs for this study
-        study_instance_uid = generate_uid()
-        frame_of_reference_uid = generate_uid()
-        series_instance_uid = generate_uid()
+        # Generate UIDs (reuse if provided)
+        study_instance_uid = study_instance_uid or generate_uid()
+        frame_of_reference_uid = frame_of_reference_uid or generate_uid()
+        series_instance_uid = series_instance_uid or generate_uid()
         
-        # Common DICOM metadata that doesn't change per slice
         common_metadata = {
             'study_instance_uid': study_instance_uid,
             'frame_of_reference_uid': frame_of_reference_uid,
             'series_instance_uid': series_instance_uid,
-            'series_number': 1,
+            'series_number': series_number,
             'series_description': series_description,
             'patient_name': patient_name,
             'patient_id': patient_id,
@@ -170,16 +184,16 @@ def export_voxel_grid_to_dicom(
                 ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
                 
                 # Set DICOM tags
-                ds.ImageType = ['ORIGINAL', 'PRIMARY', 'AXIAL']
+                ds.ImageType = ['ORIGINAL', 'PRIMARY', 'AXIAL']  # separate series per phase
                 ds.SOPClassUID = file_meta.MediaStorageSOPClassUID
                 ds.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
-                
+
                 # Patient information
                 ds.PatientName = common_metadata['patient_name']
                 ds.PatientID = common_metadata['patient_id']
                 ds.PatientBirthDate = ''
                 ds.PatientSex = common_metadata['patient_sex']
-                ds.PatientPosition = str(patient_position)  # CHANGED: use selected patient position
+                ds.PatientPosition = str(patient_position)
                 
                 # Study information
                 ds.StudyInstanceUID = common_metadata['study_instance_uid']
@@ -197,6 +211,14 @@ def export_voxel_grid_to_dicom(
                 ds.SeriesDate = common_metadata['date_str']
                 ds.SeriesTime = common_metadata['time_str']
                 
+                # Temporal (4D) tags (match old version; keep optional identifier for compatibility)
+                if number_of_temporal_positions is not None:
+                    ds.NumberOfTemporalPositions = int(number_of_temporal_positions)
+                if temporal_position_index is not None:
+                    ds.TemporalPositionIndex = int(temporal_position_index)
+                if temporal_position_identifier is not None:
+                    ds.TemporalPositionIdentifier = int(temporal_position_identifier)
+                
                 # Equipment information
                 ds.Modality = 'CT'
                 ds.Manufacturer = 'DICOMator'
@@ -205,7 +227,8 @@ def export_voxel_grid_to_dicom(
                 
                 # Image information
                 ds.InstanceNumber = i + 1
-                ds.AcquisitionNumber = 1
+                # AcquisitionNumber: use phase_index if present, else 1
+                ds.AcquisitionNumber = int(phase_index or 1)
                 ds.ContentDate = common_metadata['date_str']
                 ds.ContentTime = common_metadata['time_str']
                 ds.AcquisitionDate = common_metadata['date_str']
@@ -242,7 +265,10 @@ def export_voxel_grid_to_dicom(
                 ds.PixelData = pixel_array.tobytes()
                 
                 # Create filename
-                filename = os.path.join(output_dir, f"CT_Slice_{i+1:04d}.dcm")
+                if phase_index is not None:
+                    filename = os.path.join(output_dir, f"Phase_{int(phase_index):03d}_CT_Slice_{i+1:04d}.dcm")
+                else:
+                    filename = os.path.join(output_dir, f"CT_Slice_{i+1:04d}.dcm")
                 
                 # Save the DICOM file
                 ds.is_little_endian = True
@@ -257,6 +283,13 @@ def export_voxel_grid_to_dicom(
                 return {'error': f"Error saving DICOM file for slice {i+1}: {str(e)}"}
                 
         return {'success': f"Successfully exported {num_slices} DICOM slices to {output_dir}"}
+
+# Helper to build BVH directly from object mesh (world-space), no depsgraph
+def _bvh_from_object(obj):
+    me = obj.data
+    verts_world = [obj.matrix_world @ v.co for v in me.vertices]
+    polys = [list(p.vertices) for p in me.polygons]
+    return BVHTree.FromPolygons(verts_world, polys)
 
 def voxelize_mesh(obj, voxel_size=1.0, padding=1):
     """
@@ -278,10 +311,8 @@ def voxelize_mesh(obj, voxel_size=1.0, padding=1):
             - origin: Vector representing world position of voxel (0,0,0)
             - dimensions: tuple of (width, height, depth) in voxels
     """
-    # Build evaluated mesh and BVH for fast intersection
-    depsgraph = bpy.context.evaluated_depsgraph_get()
-    obj_eval = obj.evaluated_get(depsgraph)
-    bvh = BVHTree.FromObject(obj_eval, depsgraph, epsilon=0.0)
+    # Build BVH from object's base mesh in world space (no depsgraph)
+    bvh = _bvh_from_object(obj)
 
     # Get object's bounding box in world coordinates
     bbox_corners = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
@@ -328,7 +359,7 @@ def voxelize_mesh(obj, voxel_size=1.0, padding=1):
     max_dist = (max_z - min_z) + 4.0 * voxel_size
     eps = 1e-6
     
-    # Iterate over columns (X,Y) and fill Z ranges
+    # Iterate over columns (X,Y) and fill Z ranges using BVH ray casts
     total_cols = width * height
     col_count = 0
     
@@ -375,43 +406,39 @@ def voxelize_mesh(obj, voxel_size=1.0, padding=1):
     return voxel_array, origin, (width, height, depth)
 
 # New: voxelize multiple objects into a single HU grid
-
-def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback=None):
+def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback=None, bbox_override=None):
     """
     Voxelize multiple mesh objects into a single HU grid (int16), using per-object HU values.
-    The union of all objects is used. Overlapping voxels take the maximum HU.
-
-    Returns: (hu_array, origin, (width, height, depth))
+    Uses object.data + matrix_world (no depsgraph). Overlaps take max HU.
     """
     if not objects:
         raise ValueError("No objects provided for voxelization")
 
-    depsgraph = bpy.context.evaluated_depsgraph_get()
+    # Global bounding box (world-space), no depsgraph
+    if bbox_override is not None:
+        min_x, max_x, min_y, max_y, min_z, max_z = bbox_override
+    else:
+        all_corners = []
+        for obj in objects:
+            all_corners.extend([obj.matrix_world @ Vector(corner) for corner in obj.bound_box])
+        min_x = min(corner.x for corner in all_corners)
+        max_x = max(corner.x for corner in all_corners)
+        min_y = min(corner.y for corner in all_corners)
+        max_y = max(corner.y for corner in all_corners)
+        min_z = min(corner.z for corner in all_corners)
+        max_z = max(corner.z for corner in all_corners)
+        # Add padding only when not overriding
+        min_x -= padding * voxel_size
+        max_x += padding * voxel_size
+        min_y -= padding * voxel_size
+        max_y += padding * voxel_size
+        min_z -= padding * voxel_size
+        max_z += padding * voxel_size
 
-    # Global bounding box across all objects
-    all_corners = []
-    for obj in objects:
-        all_corners.extend([obj.matrix_world @ Vector(corner) for corner in obj.bound_box])
-    min_x = min(corner.x for corner in all_corners)
-    max_x = max(corner.x for corner in all_corners)
-    min_y = min(corner.y for corner in all_corners)
-    max_y = max(corner.y for corner in all_corners)
-    min_z = min(corner.z for corner in all_corners)
-    max_z = max(corner.z for corner in all_corners)
-
-    # Add padding
-    min_x -= padding * voxel_size
-    max_x += padding * voxel_size
-    min_y -= padding * voxel_size
-    max_y += padding * voxel_size
-    min_z -= padding * voxel_size
-    max_z += padding * voxel_size
-
-    # Grid dimensions
+    # Grid dimensions and origin
     width = max(1, int(math.ceil((max_x - min_x) / voxel_size)))
     height = max(1, int(math.ceil((max_y - min_y) / voxel_size)))
     depth = max(1, int(math.ceil((max_z - min_z) / voxel_size)))
-
     origin = Vector((min_x, min_y, min_z))
 
     print(f"Voxelizing {len(objects)} objects into {width}x{height}x{depth} HU grid...")
@@ -419,23 +446,19 @@ def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback
     # HU array initialized to AIR
     hu_array = np.full((width, height, depth), int(AIR_DENSITY), dtype=np.int16)
 
-    # Precompute X, Y world coordinates for voxel centers
+    # Precompute voxel centers
     xs = min_x + (np.arange(width) + 0.5) * voxel_size
     ys = min_y + (np.arange(height) + 0.5) * voxel_size
-
     z0_center = min_z + 0.5 * voxel_size
     inv_dz = 1.0 / voxel_size
-
     ray_dir = Vector((0.0, 0.0, 1.0))
     max_dist = (max_z - min_z) + 4.0 * voxel_size
     eps = 1e-6
 
-    # Prepare BVHs and per-object HU
+    # Prepare BVHs and per-object HU (no depsgraph)
     obj_data = []
     for obj in objects:
-        obj_eval = obj.evaluated_get(depsgraph)
-        bvh = BVHTree.FromObject(obj_eval, depsgraph, epsilon=0.0)
-        # Get HU from object property, default to DEFAULT_DENSITY
+        bvh = _bvh_from_object(obj)
         hu_val = float(getattr(obj, 'dicomator_hu', DEFAULT_DENSITY))
         hu_val = max(MIN_HU_VALUE, min(MAX_HU_VALUE, hu_val))
         obj_data.append((bvh, hu_val, obj.name))
@@ -447,7 +470,6 @@ def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback
         xw = float(xs[ix])
         for iy in range(height):
             yw = float(ys[iy])
-            # For each object, cast along +Z and fill intervals
             for bvh, hu_val, _name in obj_data:
                 origin_ray = Vector((xw, yw, min_z - 2.0 * voxel_size))
                 hits_z = []
@@ -468,11 +490,9 @@ def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback
                             s = max(0, start_idx)
                             e = min(depth - 1, end_idx)
                             if e >= s:
-                                # Assign max HU in overlaps
                                 current = hu_array[ix, iy, s:e+1]
                                 if current.size:
                                     hu_array[ix, iy, s:e+1] = np.maximum(current, np.int16(hu_val))
-            
             col_count += 1
             if progress_callback and (col_count % 5000) == 0:
                 progress_callback(col_count, total_cols)
@@ -481,10 +501,6 @@ def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback
 
     print("Voxelization complete (multi-object HU grid).")
     return hu_array, origin, (width, height, depth)
-
-
-
-
 
 class MESH_OT_export_dicom(Operator):
     """Export mesh to DICOM files"""
@@ -560,91 +576,195 @@ class MESH_OT_export_dicom(Operator):
             # Convert mm to Blender units (assuming Blender units are in meters)
             voxel_size_mm = _get_float_prop(context.scene.dicomator_props, "grid_resolution", 2.0)
             voxel_size = voxel_size_mm * 0.001  # Convert mm to meters
-            
-            # Get global object dimensions for safety check across all selected meshes
-            bbox_corners = []
-            for o in selected_meshes:
-                bbox_corners.extend([o.matrix_world @ Vector(corner) for corner in o.bound_box])
-            min_x = min(corner.x for corner in bbox_corners)
-            max_x = max(corner.x for corner in bbox_corners)
-            min_y = min(corner.y for corner in bbox_corners)
-            max_y = max(corner.y for corner in bbox_corners)
-            min_z = min(corner.z for corner in bbox_corners)
-            max_z = max(corner.z for corner in bbox_corners)
-            
+
+            # Collect 4D frame parameters
+            props = context.scene.dicomator_props
+            export_4d = bool(props.export_4d)
+            if export_4d:
+                if props.use_timeline_range:
+                    start = int(context.scene.frame_start)
+                    end = int(context.scene.frame_end)
+                else:
+                    start = int(props.frame_start)
+                    end = int(props.frame_end)
+                step = max(1, int(props.frame_step))
+                if end < start:
+                    self.report({'ERROR'}, "End frame must be >= start frame")
+                    return {'CANCELLED'}
+
+            # Compute bounds (global across frames if 4D) without depsgraph
+            padding = 1
+            saved_frame = context.scene.frame_current
+            try:
+                bbox_corners = []
+                if export_4d:
+                    context.scene.frame_set(start, subframe=0.0)
+                    context.scene.frame_current = start
+                    _force_ui_redraw()
+                    # Sweep frames to collect global bbox
+                    for f in range(start, end + 1, step):
+                        context.scene.frame_set(f, subframe=0.0)
+                        context.scene.frame_current = f
+                        _force_ui_redraw()
+                        print(f"[DICOMator] Bounds pass at frame {f}")
+                        for o in selected_meshes:
+                            bbox_corners.extend([o.matrix_world @ Vector(corner) for corner in o.bound_box])
+                else:
+                    for o in selected_meshes:
+                        bbox_corners.extend([o.matrix_world @ Vector(corner) for corner in o.bound_box])
+
+                min_x = min(corner.x for corner in bbox_corners)
+                max_x = max(corner.x for corner in bbox_corners)
+                min_y = min(corner.y for corner in bbox_corners)
+                max_y = max(corner.y for corner in bbox_corners)
+                min_z = min(corner.z for corner in bbox_corners)
+                max_z = max(corner.z for corner in bbox_corners)
+            finally:
+                context.scene.frame_set(saved_frame)
+
             # Calculate selection dimensions
             obj_width = max_x - min_x
             obj_height = max_y - min_y
             obj_depth = max_z - min_z
-            
+
             # Estimate voxel grid size (with padding)
-            padding = 1
             estimated_width = int(math.ceil((obj_width + 2 * padding * voxel_size) / voxel_size))
             estimated_height = int(math.ceil((obj_height + 2 * padding * voxel_size) / voxel_size))
             estimated_depth = int(math.ceil((obj_depth + 2 * padding * voxel_size) / voxel_size))
-            
-            # Safety check: prevent extremely large arrays
-            max_voxels_per_dimension = 2000  # Reasonable limit
+
+            # Safety check: prevent extremely large arrays (single phase check)
+            max_voxels_per_dimension = 2000
             total_estimated_voxels = estimated_width * estimated_height * estimated_depth
-            max_total_voxels = 100_000_000  # 100 million voxels max (~100MB for uint8)
-            
+            max_total_voxels = 100_000_000  # ~200MB int16
+
             if (estimated_width > max_voxels_per_dimension or 
                 estimated_height > max_voxels_per_dimension or 
                 estimated_depth > max_voxels_per_dimension or
                 total_estimated_voxels > max_total_voxels):
-                
                 self.report({'ERROR'}, 
                     f"Voxel grid too large: {estimated_width}x{estimated_height}x{estimated_depth} "
                     f"({total_estimated_voxels:,} voxels). "
                     f"Selection size: {obj_width:.3f}x{obj_height:.3f}x{obj_depth:.3f}m. "
                     f"Try increasing grid resolution (current: {voxel_size_mm}mm) or scaling down the objects.")
                 return {'CANCELLED'}
-            
+
             # Progress callback function
             def progress_callback(current, total):
                 progress = min(1.0, max(0.0, current / max(1, total)))
                 context.window_manager.progress_update(progress)
-            
+
             # Start progress indicator
             context.window_manager.progress_begin(0, 1)
-            
+
+            if not export_4d:
+                # Single-frame (no depsgraph)
+                self.report({'INFO'}, 
+                    f"Voxelizing {len(selected_meshes)} mesh(es) with {voxel_size_mm}mm resolution. "
+                    f"Estimated grid: {estimated_width}x{estimated_height}x{estimated_depth}")
+
+                hu_array, origin, dimensions = voxelize_objects_to_hu(
+                    selected_meshes,
+                    voxel_size=voxel_size,
+                    padding=padding,
+                    progress_callback=progress_callback,
+                )
+
+                result = export_voxel_grid_to_dicom(
+                    hu_array,
+                    voxel_size,
+                    output_dir,
+                    origin,
+                    patient_name=props.patient_name,
+                    patient_id=props.patient_id,
+                    patient_sex=props.patient_sex,
+                    series_description=props.series_description,
+                    progress_callback=progress_callback,
+                    direct_hu=True,
+                    patient_position=props.patient_position,
+                )
+                context.window_manager.progress_end()
+                if 'error' in result:
+                    self.report({'ERROR'}, result['error'])
+                    return {'CANCELLED'}
+                else:
+                    self.report({'INFO'}, result['success'])
+                    return {'FINISHED'}
+
+            # 4D export path - explicit timeline loop (old methodology)
+            frames = list(range(start, end + 1, step))
+            num_phases = len(frames)
             self.report({'INFO'}, 
-                f"Voxelizing {len(selected_meshes)} mesh(es) with {voxel_size_mm}mm resolution. "
-                f"Estimated grid: {estimated_width}x{estimated_height}x{estimated_depth}")
-            
-            # Build HU grid for all selected meshes
-            hu_array, origin, dimensions = voxelize_objects_to_hu(
-                selected_meshes,
-                voxel_size=voxel_size,
-                padding=padding,
-                progress_callback=progress_callback,
-            )
-            
-            # Export to DICOM (direct HU values)
-            result = export_voxel_grid_to_dicom(
-                hu_array,
-                voxel_size,
-                output_dir,
-                origin,
-                patient_name=props.patient_name,
-                patient_id=props.patient_id,
-                patient_sex=props.patient_sex,
-                series_description=props.series_description,
-                progress_callback=progress_callback,
-                direct_hu=True,
-                patient_position=props.patient_position,  # NEW: pass UI-selected patient position
-            )
-            
-            # End progress indicator
+                f"Exporting {num_phases} phase(s) with {voxel_size_mm}mm resolution. "
+                f"Grid: {estimated_width}x{estimated_height}x{estimated_depth}")
+
+            # Stable bbox across phases (padding applied once)
+            min_x_p = min_x - padding * voxel_size
+            max_x_p = max_x + padding * voxel_size
+            min_y_p = min_y - padding * voxel_size
+            max_y_p = max_y + padding * voxel_size
+            min_z_p = min_z - padding * voxel_size
+            max_z_p = max_z + padding * voxel_size
+            bbox_override = (min_x_p, max_x_p, min_y_p, max_y_p, min_z_p, max_z_p)
+
+            study_uid = generate_uid()
+            frame_of_ref_uid = generate_uid()
+
+            saved_frame = context.scene.frame_current
+            try:
+                for phase_index, frame in enumerate(frames, start=1):
+                    # Set frame, visibly advance timeline (no depsgraph)
+                    context.scene.frame_set(frame, subframe=0.0)
+                    context.scene.frame_current = frame
+                    _force_ui_redraw()
+
+                    print(f"[DICOMator] Exporting phase {phase_index}/{num_phases} at frame {frame}")
+
+                    # Build HU grid for this phase
+                    hu_array, origin, dimensions = voxelize_objects_to_hu(
+                        selected_meshes,
+                        voxel_size=voxel_size,
+                        padding=0,
+                        progress_callback=progress_callback,
+                        bbox_override=bbox_override,
+                    )
+
+                    percent = (phase_index / num_phases) * 100.0
+                    phase_series_desc = f"{props.series_description} - Phase {phase_index} ({percent:.1f}%)"
+                    series_uid = generate_uid()
+                    series_number = phase_index
+
+                    result = export_voxel_grid_to_dicom(
+                        hu_array,
+                        voxel_size,
+                        output_dir,
+                        origin,
+                        patient_name=props.patient_name,
+                        patient_id=props.patient_id,
+                        patient_sex=props.patient_sex,
+                        series_description=phase_series_desc,
+                        progress_callback=progress_callback,
+                        direct_hu=True,
+                        patient_position=props.patient_position,
+                        study_instance_uid=study_uid,
+                        frame_of_reference_uid=frame_of_ref_uid,
+                        series_instance_uid=series_uid,
+                        series_number=series_number,
+                        number_of_temporal_positions=num_phases,
+                        temporal_position_index=frame,           # timeline frame (old behavior)
+                        temporal_position_identifier=phase_index, # 1-based phase
+                        phase_index=phase_index,                  # filename prefix
+                    )
+                    if 'error' in result:
+                        context.window_manager.progress_end()
+                        self.report({'ERROR'}, f"Phase {phase_index}: {result['error']}")
+                        return {'CANCELLED'}
+            finally:
+                context.scene.frame_set(saved_frame)
+
             context.window_manager.progress_end()
-            
-            if 'error' in result:
-                self.report({'ERROR'}, result['error'])
-                return {'CANCELLED'}
-            else:
-                self.report({'INFO'}, result['success'])
-                return {'FINISHED'}
-                
+            self.report({'INFO'}, f"Successfully exported {num_phases} phase(s) to {output_dir}")
+            return {'FINISHED'}
+
         except Exception as e:
             context.window_manager.progress_end()
             self.report({'ERROR'}, f"Export failed: {str(e)}")
@@ -689,6 +809,35 @@ class DICOMatorProperties(PropertyGroup):
             ('FFDL', 'Feet First Decubitus Left', 'Feet First Decubitus Left'),
         ],
         default='HFS'
+    )
+    # NEW: 4D export controls
+    export_4d: bpy.props.BoolProperty(
+        name="Export 4D (use animated frames)",
+        description="Export each selected animation frame as a 4D CT phase",
+        default=False
+    )
+    use_timeline_range: bpy.props.BoolProperty(
+        name="Use Timeline Range",
+        description="Use the scene's timeline start/end as the frame range",
+        default=True
+    )
+    frame_start: bpy.props.IntProperty(
+        name="Start Frame",
+        description="First frame to export (when not using timeline range)",
+        default=1,
+        min=1
+    )
+    frame_end: bpy.props.IntProperty(
+        name="End Frame",
+        description="Last frame to export (when not using timeline range)",
+        default=250,
+        min=1
+    )
+    frame_step: bpy.props.IntProperty(
+        name="Frame Step",
+        description="Step between frames to export",
+        default=1,
+        min=1
     )
     grid_resolution: bpy.props.FloatProperty(
         name="Grid Resolution (mm)",
@@ -873,6 +1022,21 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
         box.prop(props, "grid_resolution")
         box.prop(props, "export_directory")
 
+        # NEW: 4D controls
+        col = box.column(align=True)
+        col.prop(props, "export_4d")
+        if props.export_4d:
+            row = col.row(align=True)
+            row.prop(props, "use_timeline_range")
+            if props.use_timeline_range:
+                row = col.row(align=True)
+                row.label(text=f"Timeline: {context.scene.frame_start} → {context.scene.frame_end}", icon='TIME')
+            else:
+                row = col.row(align=True)
+                row.prop(props, "frame_start")
+                row.prop(props, "frame_end")
+            col.prop(props, "frame_step")
+
         # Resolved export path for Blender-relative paths
         export_dir_val = _get_str_prop(props, "export_directory", "")
         if export_dir_val.startswith('//'):
@@ -903,6 +1067,7 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
                 # If a mesh is selected, compute a coarse size check for button gating
                 if context.active_object and context.active_object.type == 'MESH':
                     selected_meshes = [o for o in context.selected_objects if o.type == 'MESH']
+                    # For gating, keep single-frame estimate as before (4D sizing is handled at export time)
                     bbox_corners = []
                     for o in selected_meshes:
                         bbox_corners.extend([o.matrix_world @ Vector(corner) for corner in o.bound_box])
@@ -939,6 +1104,63 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
             box_err.label(text="Install pydicom to enable DICOM export")
 
 
+# Helper: force UI redraw so the timeline visibly advances during 4D export
+def _force_ui_redraw():
+    try:
+        bpy.ops.wm.redraw_timer(type='DRAW_WIN', iterations=1)
+    except Exception:
+        wm = bpy.context.window_manager
+        if wm:
+            for window in wm.windows:
+                for area in window.screen.areas:
+                    area.tag_redraw()
+
+
+# Registration
+classes = (
+    DICOMatorProperties,
+    MESH_OT_export_dicom,
+    VIEW3D_PT_dicomator_panel,
+    # NEW: register subpanels
+    VIEW3D_PT_dicomator_selection_info,
+    VIEW3D_PT_dicomator_per_object_hu,
+    VIEW3D_PT_dicomator_patient_info,
+    VIEW3D_PT_dicomator_orientation,
+    VIEW3D_PT_dicomator_export_settings,
+)
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    
+    # Register the property group with the scene
+    bpy.types.Scene.dicomator_props = PointerProperty(type=DICOMatorProperties)
+
+    # Register per-object HU property (defaults to 0 HU as requested)
+    bpy.types.Object.dicomator_hu = FloatProperty(
+        name="HU",
+        description="Assigned Hounsfield Units for this mesh",
+        default=0.0,
+        min=MIN_HU_VALUE,
+        max=MAX_HU_VALUE,
+        step=10,
+        precision=0,
+    )
+
+def unregister():
+    # Unregister the property group
+    del bpy.types.Scene.dicomator_props
+
+    # Unregister per-object HU property
+    if hasattr(bpy.types.Object, 'dicomator_hu'):
+        del bpy.types.Object.dicomator_hu
+    
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+
+
+if __name__ == "__main__":
+    register()
 # Registration
 classes = (
     DICOMatorProperties,
