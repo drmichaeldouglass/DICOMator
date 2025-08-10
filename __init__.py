@@ -13,13 +13,10 @@ bl_info = {
 # Standard library imports
 import os
 import math
-import time
 from datetime import datetime
-from functools import partial
 
 # Blender imports
 import bpy
-import bmesh
 from mathutils import Vector
 from bpy.types import Operator, Panel, PropertyGroup
 from bpy.props import (
@@ -67,31 +64,6 @@ def _get_str_prop(props, name: str, default: str) -> str:
         return str(val) if val is not None else str(default)
     except Exception:
         return str(default)
-
-def is_point_inside_mesh(point, obj):
-    """
-    Check if a point is inside a mesh using closest point method.
-
-    Note:
-    - This checks the sign of the dot product between the vector from the test
-      point to the closest surface point and the surface normal at that point.
-    - For our usage, this helper is retained for future sampling-based methods.
-    """
-    # Convert point to object's local coordinate system
-    local_point = obj.matrix_world.inverted() @ point
-    
-    # Get closest point on mesh surface
-    _, closest, nor, _ = obj.closest_point_on_mesh(local_point)
-    
-    # Calculate direction from test point to closest surface point
-    direction = closest - local_point
-    
-    # If the direction aligns with the surface normal, point is outside
-    # If it opposes the normal, point is inside
-    if direction.dot(nor) > 0:
-        return False  # Point is outside
-    else:
-        return True   # Point is inside
 
 def export_voxel_grid_to_dicom(
         voxel_grid,
@@ -995,10 +967,11 @@ class VIEW3D_PT_dicomator_selection_info(Panel):
             memory_mb = (total_voxels * 2) / (1024 * 1024)
             box.label(text=f"Est. Memory: {memory_mb:.1f} MB")
 
-            if total_voxels > 50_000_000:
-                box.label(text="Large grid - may be slow", icon='ERROR')
-            elif total_voxels > 100_000_000:
+            # Fix: check larger threshold first so "Grid too large!" is reachable
+            if total_voxels > 100_000_000:
                 box.label(text="Grid too large!", icon='CANCEL')
+            elif total_voxels > 50_000_000:
+                box.label(text="Large grid - may be slow", icon='ERROR')
 
 
 class VIEW3D_PT_dicomator_per_object_hu(Panel):
@@ -1183,12 +1156,14 @@ def _force_ui_redraw():
                     area.tag_redraw()
 
 
-# Registration
+
+
+# --- Registration ---
+
 classes = (
     DICOMatorProperties,
     MESH_OT_export_dicom,
     VIEW3D_PT_dicomator_panel,
-    # NEW: register subpanels
     VIEW3D_PT_dicomator_selection_info,
     VIEW3D_PT_dicomator_per_object_hu,
     VIEW3D_PT_dicomator_patient_info,
@@ -1199,77 +1174,33 @@ classes = (
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
-    
-    # Register the property group with the scene
-    bpy.types.Scene.dicomator_props = PointerProperty(type=DICOMatorProperties)
 
-    # Register per-object HU property (defaults to 0 HU as requested)
-    bpy.types.Object.dicomator_hu = FloatProperty(
-        name="HU",
-        description="Assigned Hounsfield Units for this mesh",
-        default=0.0,
-        min=MIN_HU_VALUE,
-        max=MAX_HU_VALUE,
-        step=10,
-        precision=0,
-    )
+    # Only add properties if they don't already exist (safe for script reloads)
+    if not hasattr(bpy.types.Scene, "dicomator_props"):
+        bpy.types.Scene.dicomator_props = PointerProperty(type=DICOMatorProperties)
+
+    if not hasattr(bpy.types.Object, "dicomator_hu"):
+        bpy.types.Object.dicomator_hu = FloatProperty(
+            name="HU",
+            description="Assigned Hounsfield Units for this mesh",
+            default=0.0,
+            min=MIN_HU_VALUE,
+            max=MAX_HU_VALUE,
+            step=10,
+            precision=0,
+        )
 
 def unregister():
-    # Unregister the property group
-    del bpy.types.Scene.dicomator_props
+    # Remove custom properties if present
+    if hasattr(bpy.types.Scene, "dicomator_props"):
+        del bpy.types.Scene.dicomator_props
 
-    # Unregister per-object HU property
-    if hasattr(bpy.types.Object, 'dicomator_hu'):
+    if hasattr(bpy.types.Object, "dicomator_hu"):
         del bpy.types.Object.dicomator_hu
-    
+
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
 
-
 if __name__ == "__main__":
     register()
-# Registration
-classes = (
-    DICOMatorProperties,
-    MESH_OT_export_dicom,
-    VIEW3D_PT_dicomator_panel,
-    # NEW: register subpanels
-    VIEW3D_PT_dicomator_selection_info,
-    VIEW3D_PT_dicomator_per_object_hu,
-    VIEW3D_PT_dicomator_patient_info,
-    VIEW3D_PT_dicomator_orientation,
-    VIEW3D_PT_dicomator_export_settings,
-)
 
-def register():
-    for cls in classes:
-        bpy.utils.register_class(cls)
-    
-    # Register the property group with the scene
-    bpy.types.Scene.dicomator_props = PointerProperty(type=DICOMatorProperties)
-
-    # Register per-object HU property (defaults to 0 HU as requested)
-    bpy.types.Object.dicomator_hu = FloatProperty(
-        name="HU",
-        description="Assigned Hounsfield Units for this mesh",
-        default=0.0,
-        min=MIN_HU_VALUE,
-        max=MAX_HU_VALUE,
-        step=10,
-        precision=0,
-    )
-
-def unregister():
-    # Unregister the property group
-    del bpy.types.Scene.dicomator_props
-
-    # Unregister per-object HU property
-    if hasattr(bpy.types.Object, 'dicomator_hu'):
-        del bpy.types.Object.dicomator_hu
-    
-    for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
-
-
-if __name__ == "__main__":
-    register()
