@@ -390,7 +390,8 @@ def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback
     - World-space AABB is computed across all objects. If bbox_override is given,
       it is used verbatim to guarantee identical grid across phases.
     - Each object's mesh is converted to a BVH in world space (no depsgraph).
-    - For overlapping fills, the maximum HU value wins (e.g., metal over tissue).
+    - Overlapping fills: alphabetical priority (A→Z). Later names overwrite earlier ones.
+      Example: 'cabbage' overwrites 'Apple' in overlap.
     """
     # Validate input meshes
     if not objects:
@@ -438,14 +439,15 @@ def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback
     max_dist = (max_z - min_z) + 4.0 * voxel_size
     eps = 1e-6
 
-    # Prepare per-object (BVH, HU, name) tuples.
-    # Note: HU is clamped to valid CT range.
+    # Prepare per-object (BVH, HU, name) tuples with alphabetical priority.
+    # Sort by name (case-insensitive). Later entries have higher priority (overwrite on overlap).
     obj_data = []
-    for obj in objects:
+    sorted_objs = sorted(objects, key=lambda o: o.name.casefold())
+    for obj in sorted_objs:
         bvh = _bvh_from_object(obj)
         hu_val = float(getattr(obj, 'dicomator_hu', DEFAULT_DENSITY))
         hu_val = max(MIN_HU_VALUE, min(MAX_HU_VALUE, hu_val))
-        obj_data.append((bvh, hu_val, obj.name))
+        obj_data.append((bvh, np.int16(hu_val), obj.name))
 
     total_cols = width * height
     col_count = 0
@@ -476,9 +478,8 @@ def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback
                             s = max(0, start_idx)
                             e = min(depth - 1, end_idx)
                             if e >= s:
-                                current = hu_array[ix, iy, s:e+1]
-                                if current.size:
-                                    hu_array[ix, iy, s:e+1] = np.maximum(current, np.int16(hu_val))
+                                # Alphabetical overwrite priority: assign directly so later names win.
+                                hu_array[ix, iy, s:e+1] = hu_val
             col_count += 1
             if progress_callback and (col_count % 5000) == 0:
                 progress_callback(col_count, total_cols)
