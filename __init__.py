@@ -267,8 +267,29 @@ def export_voxel_grid_to_dicom(
                 
         return {'success': f"Successfully exported {num_slices} DICOM slices to {output_dir}"}
 
+# Helper to build BVH directly from object mesh, optionally through depsgraph (modifiers applied)
+def _bvh_from_object(obj, depsgraph=None, apply_modifiers=False):
+    """
+    Build a BVH in world space.
+    - When apply_modifiers=True and depsgraph is provided, use evaluated mesh (modifiers/shape keys/armature/lattice).
+    - Otherwise, use the object's base mesh (no modifiers).
+    """
+    if apply_modifiers and depsgraph is not None:
+        obj_eval = obj.evaluated_get(depsgraph)
+        me = obj_eval.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
+        try:
+            verts_world = [obj_eval.matrix_world @ v.co for v in me.vertices]
+            polys = [list(p.vertices) for p in me.polygons]
+        finally:
+            obj_eval.to_mesh_clear()
+    else:
+        me = obj.data
+        verts_world = [obj.matrix_world @ v.co for v in me.vertices]
+        polys = [list(p.vertices) for p in me.polygons]
+    return BVHTree.FromPolygons(verts_world, polys)
+
 # Helper to build BVH directly from object mesh (world-space), no depsgraph
-def _bvh_from_object(obj):
+def _bvh_from_object_old(obj):
     # Build a BVH using the object's base mesh data (object.data) transformed into
     # world space via matrix_world. This mimics the old code path and does NOT
     # evaluate modifiers/armatures. For deformed geometry, apply transforms first.
@@ -288,7 +309,7 @@ def voxelize_mesh(obj, voxel_size=1.0, padding=1):
     - This avoids per-voxel point-in-mesh checks, improving performance.
     """
     # Build BVH from object's base mesh in world space (no depsgraph/modifiers).
-    bvh = _bvh_from_object(obj)
+    bvh = _bvh_from_object_old(obj)
 
     # Get object's bounding box in world coordinates
     bbox_corners = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
@@ -335,7 +356,7 @@ def voxelize_mesh(obj, voxel_size=1.0, padding=1):
     max_dist = (max_z - min_z) + 4.0 * voxel_size
     eps = 1e-6
     
-    # Iterate over columns (X,Y) and fill Z ranges using BVH ray casts
+    # Iterate over columns (X,Y) and fill Z-ranges using BVH ray casts
     total_cols = width * height
     col_count = 0
     
@@ -382,35 +403,53 @@ def voxelize_mesh(obj, voxel_size=1.0, padding=1):
     return voxel_array, origin, (width, height, depth)
 
 # New: voxelize multiple objects into a single HU grid
-def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback=None, bbox_override=None):
+def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback=None, bbox_override=None,
+                           apply_modifiers=False, depsgraph=None):
     """
     Voxelize multiple mesh objects into a single HU grid (int16), using per-object HU.
 
-    Details:
-    - World-space AABB is computed across all objects. If bbox_override is given,
-      it is used verbatim to guarantee identical grid across phases.
-    - Each object's mesh is converted to a BVH in world space (no depsgraph).
-    - Overlapping fills: alphabetical priority (A→Z). Later names overwrite earlier ones.
-      Example: 'cabbage' overwrites 'Apple' in overlap.
+    - If apply_modifiers is True, evaluated meshes are used (modifiers/shape keys/armatures/lattices).
+    - When bbox_override is None, bounds are computed with (or without) modifiers based on apply_modifiers.
     """
     # Validate input meshes
     if not objects:
         raise ValueError("No objects provided for voxelization")
 
+    if apply_modifiers and depsgraph is None:
+        # Safe fallback
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+
     # Compute global bounds across objects (or use provided override).
-    # Padding is applied only when we compute bounds here (not when overriding).
     if bbox_override is not None:
         min_x, max_x, min_y, max_y, min_z, max_z = bbox_override
     else:
-        all_corners = []
+        # Compute bounds in world space (evaluated if requested)
+        min_x = min_y = min_z = float('inf')
+        max_x = max_y = max_z = float('-inf')
         for obj in objects:
-            all_corners.extend([obj.matrix_world @ Vector(corner) for corner in obj.bound_box])
-        min_x = min(corner.x for corner in all_corners)
-        max_x = max(corner.x for corner in all_corners)
-        min_y = min(corner.y for corner in all_corners)
-        max_y = max(corner.y for corner in all_corners)
-        min_z = min(corner.z for corner in all_corners)
-        max_z = max(corner.z for corner in all_corners)
+            if apply_modifiers and depsgraph is not None:
+                obj_eval = obj.evaluated_get(depsgraph)
+                me = obj_eval.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
+                try:
+                    for v in me.vertices:
+                        vw = obj_eval.matrix_world @ v.co
+                        if vw.x < min_x: min_x = vw.x
+                        if vw.x > max_x: max_x = vw.x
+                        if vw.y < min_y: min_y = vw.y
+                        if vw.y > max_y: max_y = vw.y
+                        if vw.z < min_z: min_z = vw.z
+                        if vw.z > max_z: max_z = vw.z
+                finally:
+                    obj_eval.to_mesh_clear()
+            else:
+                for corner in obj.bound_box:
+                    cw = obj.matrix_world @ Vector(corner)
+                    if cw.x < min_x: min_x = cw.x
+                    if cw.x > max_x: max_x = cw.x
+                    if cw.y < min_y: min_y = cw.y
+                    if cw.y > max_y: max_y = cw.y
+                    if cw.z < min_z: min_z = cw.z
+                    if cw.z > max_z: max_z = cw.z
         # Add padding only when not overriding
         min_x -= padding * voxel_size
         max_x += padding * voxel_size
@@ -444,7 +483,7 @@ def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback
     obj_data = []
     sorted_objs = sorted(objects, key=lambda o: o.name.casefold())
     for obj in sorted_objs:
-        bvh = _bvh_from_object(obj)
+        bvh = _bvh_from_object(obj, depsgraph=depsgraph, apply_modifiers=apply_modifiers)
         hu_val = float(getattr(obj, 'dicomator_hu', DEFAULT_DENSITY))
         hu_val = max(MIN_HU_VALUE, min(MAX_HU_VALUE, hu_val))
         obj_data.append((bvh, np.int16(hu_val), obj.name))
@@ -580,6 +619,7 @@ class MESH_OT_export_dicom(Operator):
             # Collect 4D frame parameters
             props = context.scene.dicomator_props
             export_4d = bool(props.export_4d)
+            apply_modifiers = bool(getattr(props, "apply_modifiers", True))
             if export_4d:
                 if props.use_timeline_range:
                     start = int(context.scene.frame_start)
@@ -592,33 +632,72 @@ class MESH_OT_export_dicom(Operator):
                     self.report({'ERROR'}, "End frame must be >= start frame")
                     return {'CANCELLED'}
 
-            # Compute bounds (global across frames if 4D) without depsgraph
+            # Compute bounds (global across frames if 4D), respecting modifiers when requested
             padding = 1
             saved_frame = context.scene.frame_current
             try:
-                bbox_corners = []
                 if export_4d:
-                    context.scene.frame_set(start, subframe=0.0)
-                    context.scene.frame_current = start
-                    _force_ui_redraw()
-                    # Sweep frames to collect global bbox
+                    min_x = min_y = min_z = float('inf')
+                    max_x = max_y = max_z = float('-inf')
                     for f in range(start, end + 1, step):
                         context.scene.frame_set(f, subframe=0.0)
                         context.scene.frame_current = f
                         _force_ui_redraw()
+                        depsgraph = context.evaluated_depsgraph_get()
                         print(f"[DICOMator] Bounds pass at frame {f}")
                         for o in selected_meshes:
-                            bbox_corners.extend([o.matrix_world @ Vector(corner) for corner in o.bound_box])
+                            if apply_modifiers:
+                                o_eval = o.evaluated_get(depsgraph)
+                                me = o_eval.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
+                                try:
+                                    for v in me.vertices:
+                                        vw = o_eval.matrix_world @ v.co
+                                        if vw.x < min_x: min_x = vw.x
+                                        if vw.x > max_x: max_x = vw.x
+                                        if vw.y < min_y: min_y = vw.y
+                                        if vw.y > max_y: max_y = vw.y
+                                        if vw.z < min_z: min_z = vw.z
+                                        if vw.z > max_z: max_z = vw.z
+                                finally:
+                                    o_eval.to_mesh_clear()
+                            else:
+                                for corner in o.bound_box:
+                                    cw = o.matrix_world @ Vector(corner)
+                                    if cw.x < min_x: min_x = cw.x
+                                    if cw.x > max_x: max_x = cw.x
+                                    if cw.y < min_y: min_y = cw.y
+                                    if cw.y > max_y: max_y = cw.y
+                                    if cw.z < min_z: min_z = cw.z
+                                    if cw.z > max_z: max_z = cw.z
                 else:
+                    # Single-frame bounds
+                    depsgraph = context.evaluated_depsgraph_get()
+                    min_x = min_y = min_z = float('inf')
+                    max_x = max_y = max_z = float('-inf')
                     for o in selected_meshes:
-                        bbox_corners.extend([o.matrix_world @ Vector(corner) for corner in o.bound_box])
-
-                min_x = min(corner.x for corner in bbox_corners)
-                max_x = max(corner.x for corner in bbox_corners)
-                min_y = min(corner.y for corner in bbox_corners)
-                max_y = max(corner.y for corner in bbox_corners)
-                min_z = min(corner.z for corner in bbox_corners)
-                max_z = max(corner.z for corner in bbox_corners)
+                        if apply_modifiers:
+                            o_eval = o.evaluated_get(depsgraph)
+                            me = o_eval.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
+                            try:
+                                for v in me.vertices:
+                                    vw = o_eval.matrix_world @ v.co
+                                    if vw.x < min_x: min_x = vw.x
+                                    if vw.x > max_x: max_x = vw.x
+                                    if vw.y < min_y: min_y = vw.y
+                                    if vw.y > max_y: max_y = vw.y
+                                    if vw.z < min_z: min_z = vw.z
+                                    if vw.z > max_z: max_z = vw.z
+                            finally:
+                                o_eval.to_mesh_clear()
+                        else:
+                            for corner in o.bound_box:
+                                cw = o.matrix_world @ Vector(corner)
+                                if cw.x < min_x: min_x = cw.x
+                                if cw.x > max_x: max_x = cw.x
+                                if cw.y < min_y: min_y = cw.y
+                                if cw.y > max_y: max_y = cw.y
+                                if cw.z < min_z: min_z = cw.z
+                                if cw.z > max_z: max_z = cw.z
             finally:
                 context.scene.frame_set(saved_frame)
 
@@ -669,6 +748,8 @@ class MESH_OT_export_dicom(Operator):
                     voxel_size=voxel_size,
                     padding=padding,
                     progress_callback=progress_callback,
+                    apply_modifiers=apply_modifiers,
+                    depsgraph=context.evaluated_depsgraph_get(),
                 )
 
                 # Optionally add Gaussian noise in HU before export
@@ -732,6 +813,8 @@ class MESH_OT_export_dicom(Operator):
                         padding=0,
                         progress_callback=progress_callback,
                         bbox_override=bbox_override,
+                        apply_modifiers=apply_modifiers,
+                        depsgraph=context.evaluated_depsgraph_get(),
                     )
 
                     # Optionally add Gaussian noise per phase
@@ -861,6 +944,12 @@ class DICOMatorProperties(PropertyGroup):
         max=10.0,
         step=10,
         precision=2
+    )
+    # Apply modifiers/deformations toggle
+    apply_modifiers: bpy.props.BoolProperty(
+        name="Apply Modifiers/Deformations",
+        description="Evaluate modifiers/shape keys/armatures/lattices when voxelizing",
+        default=True
     )
     export_directory: bpy.props.StringProperty(
         name="Export Directory",
@@ -1050,6 +1139,7 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
         box = layout.box()
         box.label(text="Export Settings", icon='SETTINGS')
         box.prop(props, "grid_resolution")
+        box.prop(props, "apply_modifiers", text="Apply Modifiers/Deformations")
         box.prop(props, "export_directory")
 
         # NEW: 4D controls
