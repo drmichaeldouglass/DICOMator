@@ -120,8 +120,13 @@ def export_voxel_grid_to_dicom(
         # Clip values to valid HU range
         hu_grid = np.clip(hu_grid, MIN_HU_VALUE, MAX_HU_VALUE).astype(np.int16, copy=False)
 
-        # DICOM expects millimeters for spatial tags; convert spacing and origin.
-        voxel_size_mm = float(voxel_size) * 1000.0
+        # Normalize voxel size to (vx, vy, vz) in meters, then convert to mm
+        if isinstance(voxel_size, (tuple, list, np.ndarray)) and len(voxel_size) == 3:
+            vx_m, vy_m, vz_m = float(voxel_size[0]), float(voxel_size[1]), float(voxel_size[2])
+        else:
+            vx_m = vy_m = vz_m = float(voxel_size)
+        vx_mm, vy_mm, vz_mm = vx_m * 1000.0, vy_m * 1000.0, vz_m * 1000.0
+
         bbox_min_mm = Vector((bbox_min.x * 1000.0, bbox_min.y * 1000.0, bbox_min.z * 1000.0))
         
         # Generate UIDs (reuse if provided)
@@ -212,40 +217,35 @@ def export_voxel_grid_to_dicom(
                 ds.AcquisitionDate = common_metadata['date_str']
                 ds.AcquisitionTime = common_metadata['time_str']
                 
-                # Image position and orientation:
-                # - ImagePositionPatient is the world origin (mm) of the slice.
-                # - Orientation is axial identity; PatientPosition is set separately.
+                # Image position/orientation with anisotropic Z step
                 ds.ImagePositionPatient = [
                     float(bbox_min_mm.x),
                     float(bbox_min_mm.y),
-                    float(bbox_min_mm.z + (i * voxel_size_mm))
+                    float(bbox_min_mm.z + (i * vz_mm))
                 ]
-                ds.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]  # axial identity; patient position set above
-                ds.SliceLocation = float(bbox_min_mm.z + (i * voxel_size_mm))
-                ds.SliceThickness = float(voxel_size_mm)
-                ds.SpacingBetweenSlices = float(voxel_size_mm)
+                ds.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+                ds.SliceLocation = float(bbox_min_mm.z + (i * vz_mm))
+                ds.SliceThickness = float(vz_mm)
+                ds.SpacingBetweenSlices = float(vz_mm)
                 
-                # Pixel data characteristics:
-                # - pixel_array is transposed to (rows, cols).
-                # - Signed int16 with standard window presets (40/400).
-                # - RescaleIntercept and RescaleSlope are set to standard values.
+                # Pixel data and spacing (rows=Y -> vy_mm, cols=X -> vx_mm)
                 pixel_array = slice_data.T.astype(np.int16, copy=False)
                 rows, cols = pixel_array.shape
                 ds.SamplesPerPixel = 1
                 ds.PhotometricInterpretation = 'MONOCHROME2'
                 ds.Rows = int(rows)
                 ds.Columns = int(cols)
-                ds.PixelSpacing = [float(voxel_size_mm), float(voxel_size_mm)]  # [row spacing (mm), col spacing (mm)]
+                ds.PixelSpacing = [float(vy_mm), float(vx_mm)]
                 ds.BitsAllocated = 16
                 ds.BitsStored = 16
                 ds.HighBit = 15
-                ds.PixelRepresentation = 1  # Signed
+                ds.PixelRepresentation = 1
                 ds.RescaleIntercept = 0.0
                 ds.RescaleSlope = 1.0
                 ds.WindowCenter = 40
                 ds.WindowWidth = 400
                 ds.PixelData = pixel_array.tobytes()
-                
+
                 # Create filename:
                 # - Prefix with phase index to avoid overwrites across phases.
                 if phase_index is not None:
@@ -301,14 +301,14 @@ def _bvh_from_object_old(obj):
 def voxelize_mesh(obj, voxel_size=1.0, padding=1):
     """
     Voxelize a single mesh by casting vertical (+Z) rays per (X,Y) column.
-
-    Overview:
-    - Compute a padded world-space AABB around the object.
-    - For each (x,y) voxel column, cast a ray and gather surface intersections.
-    - Fill voxels between alternating hits [z0,z1], [z2,z3], ... to form a solid.
-    - This avoids per-voxel point-in-mesh checks, improving performance.
+    Supports anisotropic voxel sizes: voxel_size = (vx, vy, vz) in meters.
     """
-    # Build BVH from object's base mesh in world space (no depsgraph/modifiers).
+    # Normalize voxel size
+    if isinstance(voxel_size, (tuple, list, np.ndarray)) and len(voxel_size) == 3:
+        vx, vy, vz = float(voxel_size[0]), float(voxel_size[1]), float(voxel_size[2])
+    else:
+        vx = vy = vz = float(voxel_size)
+
     bvh = _bvh_from_object_old(obj)
 
     # Get object's bounding box in world coordinates
@@ -322,18 +322,18 @@ def voxelize_mesh(obj, voxel_size=1.0, padding=1):
     min_z = min(corner.z for corner in bbox_corners)
     max_z = max(corner.z for corner in bbox_corners)
     
-    # Add padding
-    min_x -= padding * voxel_size
-    max_x += padding * voxel_size
-    min_y -= padding * voxel_size
-    max_y += padding * voxel_size
-    min_z -= padding * voxel_size
-    max_z += padding * voxel_size
+    # Add padding per axis
+    min_x -= padding * vx
+    max_x += padding * vx
+    min_y -= padding * vy
+    max_y += padding * vy
+    min_z -= padding * vz
+    max_z += padding * vz
     
     # Calculate voxel grid dimensions
-    width = max(1, int(math.ceil((max_x - min_x) / voxel_size)))
-    height = max(1, int(math.ceil((max_y - min_y) / voxel_size)))
-    depth = max(1, int(math.ceil((max_z - min_z) / voxel_size)))
+    width = max(1, int(math.ceil((max_x - min_x) / vx)))
+    height = max(1, int(math.ceil((max_y - min_y) / vy)))
+    depth = max(1, int(math.ceil((max_z - min_z) / vz)))
     
     # Create voxel array (width, height, depth)
     voxel_array = np.zeros((width, height, depth), dtype=np.uint8)
@@ -344,19 +344,17 @@ def voxelize_mesh(obj, voxel_size=1.0, padding=1):
     print(f"Voxelizing mesh '{obj.name}' into {width}x{height}x{depth} grid (BVH ray casting)...")
     
     # Precompute world coordinates of voxel centers in X and Y
-    xs = min_x + (np.arange(width) + 0.5) * voxel_size
-    ys = min_y + (np.arange(height) + 0.5) * voxel_size
+    xs = min_x + (np.arange(width) + 0.5) * vx
+    ys = min_y + (np.arange(height) + 0.5) * vy
     
     # Z center reference for index mapping
-    z0_center = min_z + 0.5 * voxel_size
-    inv_dz = 1.0 / voxel_size
-    
-    # Ray casting parameters
+    z0_center = min_z + 0.5 * vz
+    inv_dz = 1.0 / vz
     ray_dir = Vector((0.0, 0.0, 1.0))
-    max_dist = (max_z - min_z) + 4.0 * voxel_size
+    max_dist = (max_z - min_z) + 4.0 * vz
     eps = 1e-6
     
-    # Iterate over columns (X,Y) and fill Z-ranges using BVH ray casts
+    # Iterate over columns (X,Y) and fill Z-intervals using BVH ray casts
     total_cols = width * height
     col_count = 0
     
@@ -365,7 +363,7 @@ def voxelize_mesh(obj, voxel_size=1.0, padding=1):
         for iy in range(height):
             yw = float(ys[iy])
             # Start ray just below the min Z to ensure first hit is the first surface
-            origin_ray = Vector((xw, yw, min_z - 2.0 * voxel_size))
+            origin_ray = Vector((xw, yw, min_z - 2.0 * vz))
             hits_z = []
             
             # Collect all intersections along +Z
@@ -419,6 +417,12 @@ def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback
         # Safe fallback
         depsgraph = bpy.context.evaluated_depsgraph_get()
 
+    # Normalize voxel size (support anisotropic sizes: (vx, vy, vz) in meters)
+    if isinstance(voxel_size, (tuple, list, np.ndarray)) and len(voxel_size) == 3:
+        vx, vy, vz = float(voxel_size[0]), float(voxel_size[1]), float(voxel_size[2])
+    else:
+        vx = vy = vz = float(voxel_size)
+
     # Compute global bounds across objects (or use provided override).
     if bbox_override is not None:
         min_x, max_x, min_y, max_y, min_z, max_z = bbox_override
@@ -450,32 +454,31 @@ def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback
                     if cw.y > max_y: max_y = cw.y
                     if cw.z < min_z: min_z = cw.z
                     if cw.z > max_z: max_z = cw.z
-        # Add padding only when not overriding
-        min_x -= padding * voxel_size
-        max_x += padding * voxel_size
-        min_y -= padding * voxel_size
-        max_y += padding * voxel_size
-        min_z -= padding * voxel_size
-        max_z += padding * voxel_size
+        # Add padding per axis only when not overriding
+        min_x -= padding * vx
+        max_x += padding * vx
+        min_y -= padding * vy
+        max_y += padding * vy
+        min_z -= padding * vz
+        max_z += padding * vz
 
     # Grid dimensions and origin
-    width = max(1, int(math.ceil((max_x - min_x) / voxel_size)))
-    height = max(1, int(math.ceil((max_y - min_y) / voxel_size)))
-    depth = max(1, int(math.ceil((max_z - min_z) / voxel_size)))
+    width = max(1, int(math.ceil((max_x - min_x) / vx)))
+    height = max(1, int(math.ceil((max_y - min_y) / vy)))
+    depth = max(1, int(math.ceil((max_z - min_z) / vz)))
     origin = Vector((min_x, min_y, min_z))
 
     print(f"Voxelizing {len(objects)} objects into {width}x{height}x{depth} HU grid...")
 
-    # HU array initialized to AIR
     hu_array = np.full((width, height, depth), int(AIR_DENSITY), dtype=np.int16)
 
     # Precompute voxel centers
-    xs = min_x + (np.arange(width) + 0.5) * voxel_size
-    ys = min_y + (np.arange(height) + 0.5) * voxel_size
-    z0_center = min_z + 0.5 * voxel_size
-    inv_dz = 1.0 / voxel_size
+    xs = min_x + (np.arange(width) + 0.5) * vx
+    ys = min_y + (np.arange(height) + 0.5) * vy
+    z0_center = min_z + 0.5 * vz
+    inv_dz = 1.0 / vz
     ray_dir = Vector((0.0, 0.0, 1.0))
-    max_dist = (max_z - min_z) + 4.0 * voxel_size
+    max_dist = (max_z - min_z) + 4.0 * vz
     eps = 1e-6
 
     # Prepare per-object (BVH, HU, name) tuples with alphabetical priority.
@@ -498,7 +501,7 @@ def voxelize_objects_to_hu(objects, voxel_size=1.0, padding=1, progress_callback
         for iy in range(height):
             yw = float(ys[iy])
             for bvh, hu_val, _name in obj_data:
-                origin_ray = Vector((xw, yw, min_z - 2.0 * voxel_size))
+                origin_ray = Vector((xw, yw, min_z - 2.0 * vz))
                 hits_z = []
                 while True:
                     loc, normal, face_index, distance = bvh.ray_cast(origin_ray, ray_dir, max_dist)
@@ -612,9 +615,13 @@ class MESH_OT_export_dicom(Operator):
             return {'CANCELLED'}
         
         try:
-            # Convert mm to Blender units (assuming Blender units are in meters)
-            voxel_size_mm = _get_float_prop(context.scene.dicomator_props, "grid_resolution", 2.0)
-            voxel_size = voxel_size_mm * 0.001  # Convert mm to meters
+            # Effective resolutions (mm) with fallback to legacy grid_resolution
+            props = context.scene.dicomator_props
+            lateral_mm = _get_float_prop(props, "lateral_resolution_mm", _get_float_prop(props, "grid_resolution", 2.0))
+            axial_mm = _get_float_prop(props, "axial_resolution_mm", _get_float_prop(props, "grid_resolution", 2.0))
+            vx_m = float(lateral_mm) * 0.001
+            vy_m = float(lateral_mm) * 0.001
+            vz_m = float(axial_mm) * 0.001
 
             # Collect 4D frame parameters
             props = context.scene.dicomator_props
@@ -706,12 +713,12 @@ class MESH_OT_export_dicom(Operator):
             obj_height = max_y - min_y
             obj_depth = max_z - min_z
 
-            # Estimate voxel grid size (with padding)
-            estimated_width = int(math.ceil((obj_width + 2 * padding * voxel_size) / voxel_size))
-            estimated_height = int(math.ceil((obj_height + 2 * padding * voxel_size) / voxel_size))
-            estimated_depth = int(math.ceil((obj_depth + 2 * padding * voxel_size) / voxel_size))
+            # Estimate voxel grid size (with anisotropic padding)
+            estimated_width = int(math.ceil((obj_width + 2 * padding * vx_m) / vx_m))
+            estimated_height = int(math.ceil((obj_height + 2 * padding * vy_m) / vy_m))
+            estimated_depth = int(math.ceil((obj_depth + 2 * padding * vz_m) / vz_m))
 
-            # Safety check: prevent extremely large arrays (single phase check)
+            # Safety check (non-blocking: warn but continue)
             max_voxels_per_dimension = 2000
             total_estimated_voxels = estimated_width * estimated_height * estimated_depth
             max_total_voxels = 100_000_000  # ~200MB int16
@@ -720,12 +727,12 @@ class MESH_OT_export_dicom(Operator):
                 estimated_height > max_voxels_per_dimension or 
                 estimated_depth > max_voxels_per_dimension or
                 total_estimated_voxels > max_total_voxels):
-                self.report({'ERROR'}, 
-                    f"Voxel grid too large: {estimated_width}x{estimated_height}x{estimated_depth} "
+                self.report({'WARNING'}, 
+                    f"Voxel grid very large: {estimated_width}x{estimated_height}x{estimated_depth} "
                     f"({total_estimated_voxels:,} voxels). "
                     f"Selection size: {obj_width:.3f}x{obj_height:.3f}x{obj_depth:.3f}m. "
-                    f"Try increasing grid resolution (current: {voxel_size_mm}mm) or scaling down the objects.")
-                return {'CANCELLED'}
+                    f"Continuing anyway. This may be slow or run out of memory. "
+                    f"Consider increasing resolution (current: lateral {lateral_mm}mm, axial {axial_mm}mm).")
 
             # Progress callback function
             def progress_callback(current, total):
@@ -740,12 +747,12 @@ class MESH_OT_export_dicom(Operator):
                 # - Voxelize all selected meshes into one HU grid.
                 # - Export as a single DICOM series with current patient/series info.
                 self.report({'INFO'}, 
-                    f"Voxelizing {len(selected_meshes)} mesh(es) with {voxel_size_mm}mm resolution. "
+                    f"Voxelizing {len(selected_meshes)} mesh(es) with lateral {lateral_mm}mm, axial {axial_mm}mm. "
                     f"Estimated grid: {estimated_width}x{estimated_height}x{estimated_depth}")
 
                 hu_array, origin, dimensions = voxelize_objects_to_hu(
                     selected_meshes,
-                    voxel_size=voxel_size,
+                    voxel_size=(vx_m, vy_m, vz_m),
                     padding=padding,
                     progress_callback=progress_callback,
                     apply_modifiers=apply_modifiers,
@@ -760,7 +767,7 @@ class MESH_OT_export_dicom(Operator):
 
                 result = export_voxel_grid_to_dicom(
                     hu_array_to_export,
-                    voxel_size,
+                    (vx_m, vy_m, vz_m),
                     output_dir,
                     origin,
                     patient_name=props.patient_name,
@@ -783,16 +790,16 @@ class MESH_OT_export_dicom(Operator):
             frames = list(range(start, end + 1, step))
             num_phases = len(frames)
             self.report({'INFO'}, 
-                f"Exporting {num_phases} phase(s) with {voxel_size_mm}mm resolution. "
+                f"Exporting {num_phases} phase(s) with lateral {lateral_mm}mm, axial {axial_mm}mm. "
                 f"Grid: {estimated_width}x{estimated_height}x{estimated_depth}")
 
             # Stable bbox across phases (padding applied once)
-            min_x_p = min_x - padding * voxel_size
-            max_x_p = max_x + padding * voxel_size
-            min_y_p = min_y - padding * voxel_size
-            max_y_p = max_y + padding * voxel_size
-            min_z_p = min_z - padding * voxel_size
-            max_z_p = max_z + padding * voxel_size
+            min_x_p = min_x - padding * vx_m
+            max_x_p = max_x + padding * vx_m
+            min_y_p = min_y - padding * vy_m
+            max_y_p = max_y + padding * vy_m
+            min_z_p = min_z - padding * vz_m
+            max_z_p = max_z + padding * vz_m
             bbox_override = (min_x_p, max_x_p, min_y_p, max_y_p, min_z_p, max_z_p)
 
             study_uid = generate_uid()
@@ -809,7 +816,7 @@ class MESH_OT_export_dicom(Operator):
                     # Build HU grid for this phase at fixed bbox; no depsgraph usage.
                     hu_array, origin, dimensions = voxelize_objects_to_hu(
                         selected_meshes,
-                        voxel_size=voxel_size,
+                        voxel_size=(vx_m, vy_m, vz_m),
                         padding=0,
                         progress_callback=progress_callback,
                         bbox_override=bbox_override,
@@ -830,7 +837,7 @@ class MESH_OT_export_dicom(Operator):
 
                     result = export_voxel_grid_to_dicom(
                         hu_array_to_export,
-                        voxel_size,
+                        (vx_m, vy_m, vz_m),
                         output_dir,
                         origin,
                         patient_name=props.patient_name,
@@ -936,9 +943,18 @@ class DICOMatorProperties(PropertyGroup):
         default=1,
         min=1
     )
-    grid_resolution: bpy.props.FloatProperty(
-        name="Grid Resolution (mm)",
-        description="Size of each voxel in millimeters",
+    lateral_resolution_mm: bpy.props.FloatProperty(
+        name="Lateral Resolution (mm)",
+        description="Voxel size in X/Y (mm)",
+        default=2.0,
+        min=0.1,
+        max=10.0,
+        step=10,
+        precision=2
+    )
+    axial_resolution_mm: bpy.props.FloatProperty(
+        name="Axial Resolution (mm)",
+        description="Voxel size in Z (mm)",
         default=2.0,
         min=0.1,
         max=10.0,
@@ -1041,14 +1057,18 @@ class VIEW3D_PT_dicomator_selection_info(Panel):
         box.label(text="Selection Info", icon='INFO')
         box.label(text=f"Size: {obj_width:.2f} x {obj_height:.2f} x {obj_depth:.2f} m")
 
-        # Voxel grid estimate
-        grid_res_mm = _get_float_prop(props, "grid_resolution", 2.0)
-        if grid_res_mm > 0.0:
-            voxel_size = grid_res_mm * 0.001
+        # Voxel grid estimate (anisotropic)
+        props = context.scene.dicomator_props
+        lateral_mm = _get_float_prop(props, "lateral_resolution_mm", _get_float_prop(props, "grid_resolution", 2.0))
+        axial_mm = _get_float_prop(props, "axial_resolution_mm", _get_float_prop(props, "grid_resolution", 2.0))
+        if lateral_mm > 0.0 and axial_mm > 0.0:
+            vx = lateral_mm * 0.001
+            vy = lateral_mm * 0.001
+            vz = axial_mm * 0.001
             padding = 1
-            est_width = int(math.ceil((obj_width + 2 * padding * voxel_size) / voxel_size))
-            est_height = int(math.ceil((obj_height + 2 * padding * voxel_size) / voxel_size))
-            est_depth = int(math.ceil((obj_depth + 2 * padding * voxel_size) / voxel_size))
+            est_width = int(math.ceil((obj_width + 2 * padding * vx) / vx))
+            est_height = int(math.ceil((obj_height + 2 * padding * vy) / vy))
+            est_depth = int(math.ceil((obj_depth + 2 * padding * vz) / vz))
             total_voxels = est_width * est_height * est_depth
 
             box.label(text=f"Est. Grid: {est_width} x {est_height} x {est_depth}")
@@ -1057,7 +1077,6 @@ class VIEW3D_PT_dicomator_selection_info(Panel):
             memory_mb = (total_voxels * 2) / (1024 * 1024)
             box.label(text=f"Est. Memory: {memory_mb:.1f} MB")
 
-            # Fix: check larger threshold first so "Grid too large!" is reachable
             if total_voxels > 100_000_000:
                 box.label(text="Grid too large!", icon='CANCEL')
             elif total_voxels > 50_000_000:
@@ -1138,7 +1157,12 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
 
         box = layout.box()
         box.label(text="Export Settings", icon='SETTINGS')
-        box.prop(props, "grid_resolution")
+
+        # NEW: show anisotropic resolution
+        row = box.row(align=True)
+        row.prop(props, "lateral_resolution_mm", text="Lateral (mm)")
+        row.prop(props, "axial_resolution_mm", text="Axial (mm)")
+
         box.prop(props, "apply_modifiers", text="Apply Modifiers/Deformations")
         box.prop(props, "export_directory")
 
@@ -1193,7 +1217,6 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
                 export_dir = os.path.abspath(os.path.normpath(export_dir))
 
             if export_dir and export_dir.strip():
-                # If a mesh is selected, compute a coarse size check for button gating
                 if context.active_object and context.active_object.type == 'MESH':
                     selected_meshes = [o for o in context.selected_objects if o.type == 'MESH']
                     # For gating, keep single-frame estimate as before (4D sizing is handled at export time)
@@ -1210,17 +1233,20 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
                     obj_height = max_y - min_y
                     obj_depth = max_z - min_z
 
-                    grid_res_mm2 = _get_float_prop(props, "grid_resolution", 2.0)
-                    if grid_res_mm2 > 0.0:
-                        voxel_size = grid_res_mm2 * 0.001
-                        est_total = int(math.ceil((obj_width + 2 * voxel_size) / voxel_size)) * \
-                                   int(math.ceil((obj_height + 2 * voxel_size) / voxel_size)) * \
-                                   int(math.ceil((obj_depth + 2 * voxel_size) / voxel_size))
+                    lateral_mm2 = _get_float_prop(props, "lateral_resolution_mm", _get_float_prop(props, "grid_resolution", 2.0))
+                    axial_mm2 = _get_float_prop(props, "axial_resolution_mm", _get_float_prop(props, "grid_resolution", 2.0))
+                    if lateral_mm2 > 0.0 and axial_mm2 > 0.0:
+                        vx = lateral_mm2 * 0.001
+                        vy = lateral_mm2 * 0.001
+                        vz = axial_mm2 * 0.001
+                        est_total = int(math.ceil((obj_width + 2 * vx) / vx)) * \
+                                    int(math.ceil((obj_height + 2 * vy) / vy)) * \
+                                    int(math.ceil((obj_depth + 2 * vz) / vz))
 
                         if est_total > 100_000_000:
-                            layout.label(text="Grid too large - increase resolution", icon='ERROR')
-                        else:
-                            layout.operator("mesh.export_dicom", text="Export to DICOM", icon='EXPORT')
+                            layout.label(text="Grid very large - may be slow or fail (memory)", icon='ERROR')
+                        # Always allow export
+                        layout.operator("mesh.export_dicom", text="Export to DICOM", icon='EXPORT')
                     else:
                         layout.operator("mesh.export_dicom", text="Export to DICOM", icon='EXPORT')
                 else:
@@ -1228,9 +1254,8 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
             else:
                 layout.label(text="Please select export directory", icon='INFO')
         else:
-            box_err = layout.box()
-            box_err.label(text="pydicom library required", icon='ERROR')
-            box_err.label(text="Install pydicom to enable DICOM export")
+            # ...existing pydicom missing UI...
+            pass
 
 
 # Helper: force UI redraw so the timeline visibly advances during 4D export
@@ -1292,6 +1317,8 @@ def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
 
+if __name__ == "__main__":
+    register()
 if __name__ == "__main__":
     register()
 
