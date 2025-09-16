@@ -1,0 +1,32 @@
+name: Zip DICOMator Add-on on Release
+
+on:
+  release:
+    types: [published]   # runs when you click “Publish release”
+
+permissions:
+  contents: write        # needed to upload assets to the release
+
+jobs:
+  zip-and-attach:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the code at the release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Create zip (just the code)
+        run: |
+          zip -r test.zip . \
+            -x ".git/**" \
+               ".github/**" \
+               ".gitignore" \
+               "download_wheels.py"
+
+      - name: Upload test.zip to this release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dicomator.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
