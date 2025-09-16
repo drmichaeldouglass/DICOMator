@@ -203,12 +203,59 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
 
         box.prop(props, "series_description")
 
-        noise_box = box.box()
-        noise_box.label(text="Gaussian Noise", icon='RNDCURVE')
-        noise_box.prop(props, "enable_noise")
+        artifact_box = box.box()
+        artifact_box.label(text="CT Artifacts", icon='SHADERFX')
+
+        gaussian_box = artifact_box.box()
+        gaussian_box.label(text="Gaussian Noise", icon='RNDCURVE')
+        gaussian_box.prop(props, "enable_noise")
         if props.enable_noise:
-            row = noise_box.row(align=True)
-            row.prop(props, "noise_std_dev_hu", text="Std. Dev. (HU)")
+            gaussian_box.prop(props, "noise_std_dev_hu", text="Std. Dev. (HU)")
+
+        partial_box = artifact_box.box()
+        partial_box.label(text="Partial Volume Blur", icon='MOD_SMOOTH')
+        partial_box.prop(props, "enable_partial_volume")
+        if props.enable_partial_volume:
+            row = partial_box.row(align=True)
+            row.prop(props, "partial_volume_kernel")
+            row.prop(props, "partial_volume_iterations")
+            partial_box.prop(props, "partial_volume_mix")
+
+        metal_box = artifact_box.box()
+        metal_box.label(text="Metal Streaks", icon='MOD_SIMPLIFY')
+        metal_box.prop(props, "enable_metal_artifacts")
+        if props.enable_metal_artifacts:
+            row = metal_box.row(align=True)
+            row.prop(props, "metal_intensity")
+            row.prop(props, "metal_density_threshold")
+            row = metal_box.row(align=True)
+            row.prop(props, "metal_num_streaks")
+            row.prop(props, "metal_falloff")
+
+        ring_box = artifact_box.box()
+        ring_box.label(text="Ring Artifacts", icon='MATSHADERBALL')
+        ring_box.prop(props, "enable_ring_artifacts")
+        if props.enable_ring_artifacts:
+            ring_box.prop(props, "ring_intensity")
+            row = ring_box.row(align=True)
+            row.prop(props, "ring_count_min")
+            row.prop(props, "ring_count_max")
+            ring_box.prop(props, "ring_jitter")
+
+        motion_box = artifact_box.box()
+        motion_box.label(text="Motion Blur", icon='ARROW_LEFTRIGHT')
+        motion_box.prop(props, "enable_motion_artifact")
+        if props.enable_motion_artifact:
+            row = motion_box.row(align=True)
+            row.prop(props, "motion_blur_size")
+            row.prop(props, "motion_axis")
+            motion_box.prop(props, "motion_severity")
+
+        poisson_box = artifact_box.box()
+        poisson_box.label(text="Poisson Noise", icon='PARTICLES')
+        poisson_box.prop(props, "enable_poisson_noise")
+        if props.enable_poisson_noise:
+            poisson_box.prop(props, "poisson_scale")
 
         if PYDICOM_AVAILABLE:
             export_dir = get_str_prop(props, "export_directory", "")

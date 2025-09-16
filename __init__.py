@@ -4,6 +4,14 @@ from __future__ import annotations
 import bpy
 from bpy.props import FloatProperty, PointerProperty
 
+from .artifacts import (
+    add_gaussian_noise,
+    add_metal_artifacts,
+    add_motion_artifact,
+    add_poisson_noise,
+    add_ring_artifacts,
+    apply_partial_volume_effect,
+)
 from .constants import MAX_HU_VALUE, MIN_HU_VALUE
 from .dicom_export import export_voxel_grid_to_dicom
 from .operators import MESH_OT_export_dicom
@@ -16,7 +24,7 @@ from .panels import (
     VIEW3D_PT_dicomator_selection_info,
 )
 from .properties import DICOMatorProperties
-from .voxelization import add_gaussian_noise, voxelize_mesh, voxelize_objects_to_hu
+from .voxelization import voxelize_mesh, voxelize_objects_to_hu
 
 bl_info = {
     "name": "DICOMator",
@@ -74,6 +82,11 @@ def unregister() -> None:  # pragma: no cover - Blender registration
 
 __all__ = [
     "add_gaussian_noise",
+    "add_metal_artifacts",
+    "add_motion_artifact",
+    "add_poisson_noise",
+    "add_ring_artifacts",
+    "apply_partial_volume_effect",
     "export_voxel_grid_to_dicom",
     "voxelize_mesh",
     "voxelize_objects_to_hu",

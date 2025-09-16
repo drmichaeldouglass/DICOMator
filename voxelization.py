@@ -238,18 +238,7 @@ def voxelize_objects_to_hu(
     return hu_array, origin, (width, height, depth)
 
 
-def add_gaussian_noise(hu_array: np.ndarray, std_hu: float) -> np.ndarray:
-    """Add zero-mean Gaussian noise in HU to ``hu_array``."""
-    if std_hu <= 0.0:
-        return hu_array.astype(np.int16, copy=False)
-    noisy = hu_array.astype(np.float32, copy=False)
-    noisy += np.random.normal(0.0, float(std_hu), hu_array.shape).astype(np.float32, copy=False)
-    noisy = np.clip(noisy, MIN_HU_VALUE, MAX_HU_VALUE)
-    return noisy.astype(np.int16, copy=False)
-
-
 __all__ = [
     "voxelize_mesh",
     "voxelize_objects_to_hu",
-    "add_gaussian_noise",
 ]

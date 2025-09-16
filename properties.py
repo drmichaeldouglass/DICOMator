@@ -118,6 +118,147 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
         step=10,
         precision=1,
     )
+    enable_partial_volume: bpy.props.BoolProperty(
+        name="Add Partial Volume Blur",
+        description="Blend materials at boundaries using a volumetric blur",
+        default=False,
+    )
+    partial_volume_kernel: bpy.props.IntProperty(
+        name="Kernel Size",
+        description="Size of the averaging kernel (odd integer)",
+        default=3,
+        min=1,
+        soft_max=11,
+    )
+    partial_volume_iterations: bpy.props.IntProperty(
+        name="Iterations",
+        description="Number of smoothing passes to apply",
+        default=1,
+        min=1,
+        soft_max=5,
+    )
+    partial_volume_mix: bpy.props.FloatProperty(
+        name="Blend",
+        description="Blend factor between blurred and original data",
+        default=1.0,
+        min=0.0,
+        max=1.0,
+        subtype='FACTOR',
+    )
+    enable_metal_artifacts: bpy.props.BoolProperty(
+        name="Add Metal Streaks",
+        description="Simulate streak artifacts originating from dense materials",
+        default=False,
+    )
+    metal_intensity: bpy.props.FloatProperty(
+        name="Streak Intensity (HU)",
+        description="Base amplitude in HU for generated streaks",
+        default=400.0,
+        min=0.0,
+        soft_max=2000.0,
+        step=10,
+    )
+    metal_density_threshold: bpy.props.FloatProperty(
+        name="Metal Threshold (HU)",
+        description="HU value above which voxels count as metal",
+        default=2000.0,
+        min=0.0,
+        soft_max=4000.0,
+        step=10,
+    )
+    metal_num_streaks: bpy.props.IntProperty(
+        name="Streak Count",
+        description="Number of streaks per slice (0 = automatic)",
+        default=10,
+        min=0,
+        soft_max=32,
+    )
+    metal_falloff: bpy.props.FloatProperty(
+        name="Falloff",
+        description="Spatial decay of streaks away from the streak axis",
+        default=6.0,
+        min=0.1,
+        soft_max=12.0,
+        step=10,
+        precision=2,
+    )
+    enable_ring_artifacts: bpy.props.BoolProperty(
+        name="Add Ring Artifacts",
+        description="Introduce concentric banding similar to detector gain errors",
+        default=False,
+    )
+    ring_intensity: bpy.props.FloatProperty(
+        name="Ring Intensity (HU)",
+        description="Amplitude of the generated rings in HU",
+        default=80.0,
+        min=0.0,
+        soft_max=500.0,
+        step=10,
+    )
+    ring_count_min: bpy.props.IntProperty(
+        name="Minimum Rings",
+        description="Minimum number of concentric rings",
+        default=4,
+        min=1,
+        soft_max=16,
+    )
+    ring_count_max: bpy.props.IntProperty(
+        name="Maximum Rings",
+        description="Maximum number of concentric rings",
+        default=7,
+        min=1,
+        soft_max=32,
+    )
+    ring_jitter: bpy.props.FloatProperty(
+        name="Jitter",
+        description="Noise mixed with rings to avoid smooth bands",
+        default=0.02,
+        min=0.0,
+        soft_max=0.2,
+        precision=3,
+    )
+    enable_motion_artifact: bpy.props.BoolProperty(
+        name="Add Motion Blur",
+        description="Simulate in-plane patient motion during acquisition",
+        default=False,
+    )
+    motion_blur_size: bpy.props.IntProperty(
+        name="Blur Length",
+        description="Length of the motion blur kernel (odd integer)",
+        default=9,
+        min=1,
+        soft_max=21,
+    )
+    motion_severity: bpy.props.FloatProperty(
+        name="Severity",
+        description="Blend factor between original and blurred slice",
+        default=0.5,
+        min=0.0,
+        max=1.0,
+        subtype='FACTOR',
+    )
+    motion_axis: bpy.props.EnumProperty(
+        name="Blur Axis",
+        description="Direction of motion blur within each slice",
+        items=[
+            ('X', 'X Axis', 'Blur along the X axis (left/right)'),
+            ('Y', 'Y Axis', 'Blur along the Y axis (anterior/posterior)'),
+        ],
+        default='X',
+    )
+    enable_poisson_noise: bpy.props.BoolProperty(
+        name="Add Poisson Noise",
+        description="Approximate photon counting noise via a Poisson process",
+        default=False,
+    )
+    poisson_scale: bpy.props.FloatProperty(
+        name="Photon Scale",
+        description="Higher values reduce noise by increasing simulated counts",
+        default=150.0,
+        min=1.0,
+        soft_max=1000.0,
+        step=10,
+    )
 
 
 __all__ = ["DICOMatorProperties"]

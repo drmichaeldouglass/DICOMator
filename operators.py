@@ -8,10 +8,89 @@ import bpy
 from bpy.types import Operator
 from mathutils import Vector
 
+from .artifacts import (
+    add_gaussian_noise,
+    add_metal_artifacts,
+    add_motion_artifact,
+    add_poisson_noise,
+    add_ring_artifacts,
+    apply_partial_volume_effect,
+)
 from .constants import PYDICOM_AVAILABLE, generate_uid
 from .dicom_export import export_voxel_grid_to_dicom
 from .utils import force_ui_redraw, get_float_prop
-from .voxelization import add_gaussian_noise, voxelize_objects_to_hu
+from .voxelization import voxelize_objects_to_hu
+
+def _get_int_prop(props, name: str, default: int) -> int:
+    """Safely read an integer property, falling back to ``default`` on failure."""
+
+    try:
+        return int(getattr(props, name))
+    except Exception:
+        return int(default)
+
+
+def _apply_configured_artifacts(hu_array, props):
+    """Apply the artifacts configured in ``props`` to ``hu_array`` sequentially."""
+
+    result = hu_array
+
+    if getattr(props, "enable_partial_volume", False):
+        kernel = max(1, _get_int_prop(props, "partial_volume_kernel", 3))
+        if kernel % 2 == 0:
+            kernel += 1
+        iterations = max(1, _get_int_prop(props, "partial_volume_iterations", 1))
+        mix = max(0.0, min(1.0, get_float_prop(props, "partial_volume_mix", 1.0)))
+        result = apply_partial_volume_effect(result, kernel_size=kernel, iterations=iterations, mix=mix)
+
+    if getattr(props, "enable_metal_artifacts", False):
+        intensity = max(0.0, get_float_prop(props, "metal_intensity", 400.0))
+        threshold = get_float_prop(props, "metal_density_threshold", 2000.0)
+        streaks = max(0, _get_int_prop(props, "metal_num_streaks", 10))
+        falloff = max(0.1, get_float_prop(props, "metal_falloff", 6.0))
+        result = add_metal_artifacts(
+            result,
+            intensity=float(intensity),
+            density_threshold=float(threshold),
+            num_streaks=streaks,
+            falloff=float(falloff),
+        )
+
+    if getattr(props, "enable_ring_artifacts", False):
+        ring_intensity = max(0.0, get_float_prop(props, "ring_intensity", 80.0))
+        min_rings = max(1, _get_int_prop(props, "ring_count_min", 4))
+        max_rings = max(min_rings, _get_int_prop(props, "ring_count_max", 7))
+        jitter = max(0.0, get_float_prop(props, "ring_jitter", 0.02))
+        result = add_ring_artifacts(
+            result,
+            ring_intensity=float(ring_intensity),
+            num_rings=(min_rings, max_rings),
+            jitter=float(jitter),
+        )
+
+    if getattr(props, "enable_motion_artifact", False):
+        blur_size = max(1, _get_int_prop(props, "motion_blur_size", 9))
+        if blur_size % 2 == 0:
+            blur_size += 1
+        severity = max(0.0, min(1.0, get_float_prop(props, "motion_severity", 0.5)))
+        axis_prop = getattr(props, "motion_axis", 'X')
+        axis = 0 if str(axis_prop).upper() != 'Y' else 1
+        result = add_motion_artifact(
+            result,
+            blur_size=blur_size,
+            severity=float(severity),
+            axis=axis,
+        )
+
+    if getattr(props, "enable_noise", False) and get_float_prop(props, "noise_std_dev_hu", 0.0) > 0.0:
+        std_dev = max(0.0, get_float_prop(props, "noise_std_dev_hu", 20.0))
+        result = add_gaussian_noise(result, std_dev)
+
+    if getattr(props, "enable_poisson_noise", False) and get_float_prop(props, "poisson_scale", 0.0) > 0.0:
+        scale = max(1.0, get_float_prop(props, "poisson_scale", 150.0))
+        result = add_poisson_noise(result, scale=scale)
+
+    return result
 
 
 class MESH_OT_export_dicom(Operator):
@@ -213,10 +292,7 @@ class MESH_OT_export_dicom(Operator):
                     depsgraph=context.evaluated_depsgraph_get(),
                 )
 
-                if getattr(props, "enable_noise", False) and get_float_prop(props, "noise_std_dev_hu", 0.0) > 0.0:
-                    hu_array_to_export = add_gaussian_noise(hu_array, get_float_prop(props, "noise_std_dev_hu", 0.0))
-                else:
-                    hu_array_to_export = hu_array
+                hu_array_to_export = _apply_configured_artifacts(hu_array, props)
 
                 result = export_voxel_grid_to_dicom(
                     hu_array_to_export,
@@ -276,10 +352,7 @@ class MESH_OT_export_dicom(Operator):
                         depsgraph=context.evaluated_depsgraph_get(),
                     )
 
-                    if getattr(props, "enable_noise", False) and get_float_prop(props, "noise_std_dev_hu", 0.0) > 0.0:
-                        hu_array_to_export = add_gaussian_noise(hu_array, get_float_prop(props, "noise_std_dev_hu", 0.0))
-                    else:
-                        hu_array_to_export = hu_array
+                    hu_array_to_export = _apply_configured_artifacts(hu_array, props)
 
                     percent = (phase_index / num_phases) * 100.0
                     phase_series_desc = f"{props.series_description} - Phase {phase_index} ({percent:.1f}%)"
