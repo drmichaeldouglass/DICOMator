@@ -29,7 +29,7 @@ from .voxelization import voxelize_mesh, voxelize_objects_to_hu
 bl_info = {
     "name": "DICOMator",
     "author": "Michael Douglass",
-    "version": (0, 2, 0),
+    "version": (3, 0, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > DICOMator",
     "description": "Converts mesh objects into DICOM CT files",
