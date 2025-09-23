@@ -47,6 +47,10 @@ class VIEW3D_PT_dicomator_selection_info(Panel):
 
         selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
         active_obj = context.active_object
+        # If nothing is selected but there is an active mesh, treat the active
+        # object as the selection so bbox calculations have data.
+        if not selected_meshes and active_obj and active_obj.type == 'MESH':
+            selected_meshes = [active_obj]
         selection_count = len(selected_meshes)
         if selection_count > 1:
             layout.label(text=f"Selected: {selection_count} meshes (Active: {active_obj.name})", icon='MESH_DATA')
@@ -238,8 +242,8 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
         if props.enable_ring_artifacts:
             ring_box.prop(props, "ring_intensity")
             row = ring_box.row(align=True)
-            row.prop(props, "ring_count_min")
-            row.prop(props, "ring_count_max")
+            row.prop(props, "ring_radius")
+            row.prop(props, "ring_thickness")
             ring_box.prop(props, "ring_jitter")
 
         motion_box = artifact_box.box()
@@ -271,6 +275,10 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
             if export_dir and export_dir.strip():
                 if context.active_object and context.active_object.type == 'MESH':
                     selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+                    # If nothing is selected, fallback to the active mesh to
+                    # ensure export UI can still compute bounds.
+                    if not selected_meshes and context.active_object and context.active_object.type == 'MESH':
+                        selected_meshes = [context.active_object]
                     bbox_corners = []
                     for obj in selected_meshes:
                         bbox_corners.extend([obj.matrix_world @ Vector(corner) for corner in obj.bound_box])

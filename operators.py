@@ -58,13 +58,14 @@ def _apply_configured_artifacts(hu_array, props):
 
     if getattr(props, "enable_ring_artifacts", False):
         ring_intensity = max(0.0, get_float_prop(props, "ring_intensity", 80.0))
-        min_rings = max(1, _get_int_prop(props, "ring_count_min", 4))
-        max_rings = max(min_rings, _get_int_prop(props, "ring_count_max", 7))
+        ring_radius = get_float_prop(props, "ring_radius", 0.5)
+        thickness = max(0.0, get_float_prop(props, "ring_thickness", 0.02))
         jitter = max(0.0, get_float_prop(props, "ring_jitter", 0.02))
         result = add_ring_artifacts(
             result,
             ring_intensity=float(ring_intensity),
-            num_rings=(min_rings, max_rings),
+            ring_radius=float(ring_radius) if ring_radius is not None else None,
+            thickness=float(thickness),
             jitter=float(jitter),
         )
 

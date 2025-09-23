@@ -195,19 +195,21 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
         soft_max=500.0,
         step=10,
     )
-    ring_count_min: bpy.props.IntProperty(
-        name="Minimum Rings",
-        description="Minimum number of concentric rings",
-        default=4,
-        min=1,
-        soft_max=16,
+    ring_radius: bpy.props.FloatProperty(
+        name="Ring Radius (rel)",
+        description="Relative radius of the ring (0=center, 1=edge). Set to 0.0-1.0 or leave default to choose randomly",
+        default=0.5,
+        min=0.0,
+        max=1.0,
+        precision=3,
     )
-    ring_count_max: bpy.props.IntProperty(
-        name="Maximum Rings",
-        description="Maximum number of concentric rings",
-        default=7,
-        min=1,
-        soft_max=32,
+    ring_thickness: bpy.props.FloatProperty(
+        name="Ring Thickness (rel)",
+        description="Relative radial thickness of the ring (typical ~0.01-0.05)",
+        default=0.02,
+        min=0.0,
+        soft_max=0.1,
+        precision=3,
     )
     ring_jitter: bpy.props.FloatProperty(
         name="Jitter",

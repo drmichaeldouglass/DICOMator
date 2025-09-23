@@ -18,22 +18,70 @@ def _get_generator(rng: GeneratorLike) -> np.random.Generator:
 
 
 def _moving_average_along_axis(array: np.ndarray, kernel_size: int, axis: int) -> np.ndarray:
-    """Apply a 1D moving average with ``kernel_size`` along ``axis``."""
+    """Apply a 1D moving average with ``kernel_size`` along ``axis``.
+
+    Reimplemented to use 1D convolution (mode='same') so the output length
+    along ``axis`` always matches the input length and avoids off-by-one bugs.
+    """
     if kernel_size <= 1:
         return array
-    pad = kernel_size // 2
-    pad_width: list[tuple[int, int]] = [(0, 0)] * array.ndim
-    pad_width[axis] = (pad, pad)
-    padded = np.pad(array, pad_width=pad_width, mode="edge")
-    cumsum = np.cumsum(padded, axis=axis, dtype=np.float32)
+    k = int(kernel_size)
+    if k < 1:
+        return array
 
-    upper_slice: list[slice] = [slice(None)] * array.ndim
-    lower_slice: list[slice] = [slice(None)] * array.ndim
-    upper_slice[axis] = slice(kernel_size, None)
-    lower_slice[axis] = slice(None, -kernel_size)
+    # Ensure float computation and build normalized kernel.
+    arr = array.astype(np.float32, copy=False)
+    kernel = np.ones(k, dtype=np.float32) / float(k)
 
-    window_sums = cumsum[tuple(upper_slice)] - cumsum[tuple(lower_slice)]
-    return window_sums / float(kernel_size)
+    # Move the smoothing axis to the last dimension so we can convolve each 1D vector
+    # independently and preserve the shape using mode='same'.
+    moved = np.moveaxis(arr, axis, -1)
+
+    # Convolve along the last axis for every subarray.
+    # Using np.apply_along_axis keeps the original shape (mode='same').
+    def _conv_row(v: np.ndarray) -> np.ndarray:
+        return np.convolve(v, kernel, mode="same")
+
+    smoothed = np.apply_along_axis(_conv_row, -1, moved)
+
+    return np.moveaxis(smoothed, -1, axis)
+
+
+# New helper: ensure an array matches a target shape by center-cropping or edge-padding.
+def _ensure_shape_like(arr: np.ndarray, target_shape: tuple[int, ...]) -> np.ndarray:
+    """Return a view/array with shape exactly equal to target_shape.
+
+    If arr is larger along an axis it is center-cropped; if smaller it is
+    edge-padded. This keeps simple smoothing/resampling operations robust
+    to occasional off-by-one differences.
+    """
+    if arr.shape == target_shape:
+        return arr
+    res = arr
+    # Crop larger axes first (to avoid repeated padding on cropped data).
+    for axis in range(res.ndim):
+        curr = res.shape[axis] if axis < res.ndim else 1
+        target = target_shape[axis] if axis < len(target_shape) else 1
+        if curr > target:
+            start = (curr - target) // 2
+            end = start + target
+            slc = [slice(None)] * res.ndim
+            slc[axis] = slice(start, end)
+            res = res[tuple(slc)]
+    # Then pad smaller axes.
+    if res.shape != target_shape:
+        pad_width = []
+        for axis in range(res.ndim):
+            curr = res.shape[axis]
+            target = target_shape[axis]
+            if curr < target:
+                before = (target - curr) // 2
+                after = target - curr - before
+                pad_width.append((before, after))
+            else:
+                pad_width.append((0, 0))
+        res = np.pad(res, pad_width=pad_width, mode="edge")
+    return res
 
 
 def add_gaussian_noise(hu_array: np.ndarray, std_hu: float, rng: GeneratorLike = None) -> np.ndarray:
@@ -201,7 +249,8 @@ def add_metal_artifacts(
 def add_ring_artifacts(
     hu_array: np.ndarray,
     ring_intensity: float = 80.0,
-    num_rings: tuple[int, int] = (4, 7),
+    ring_radius: float | None = None,
+    thickness: float = 0.02,
     jitter: float = 0.02,
     rng: GeneratorLike = None,
 ) -> np.ndarray:
@@ -228,27 +277,45 @@ def add_ring_artifacts(
         Volume containing ring artifacts as ``int16``.
     """
 
-    if num_rings[0] <= 0 or num_rings[1] < num_rings[0]:
-        raise ValueError("num_rings must define a positive inclusive range")
+    # Validate user-provided ring parameters. A single ring will be created.
+    if thickness <= 0.0:
+        raise ValueError("thickness must be a positive number")
+    if ring_radius is not None and not (0.0 <= ring_radius <= 1.0):
+        raise ValueError("ring_radius must be between 0.0 and 1.0 (relative radius) or None")
 
     generator = _get_generator(rng)
     result = hu_array.astype(np.float32, copy=True)
-    width, height, depth = result.shape
 
-    # Normalized radial coordinate system to anchor concentric bands.
-    x_coords = np.linspace(-1.0, 1.0, width, dtype=np.float32)
-    y_coords = np.linspace(-1.0, 1.0, height, dtype=np.float32)
-    xx, yy = np.meshgrid(x_coords, y_coords, indexing="ij")
-    radius = np.sqrt(xx**2 + yy**2)
+    # Use explicit first-two axes from the volume to derive slice dimensions.
+    # This guarantees the radial grid shape matches result[:, :, iz] exactly.
+    if result.ndim < 3 or result.shape[2] == 0:
+        return result.astype(np.int16, copy=False)
+    rows = int(result.shape[0])
+    cols = int(result.shape[1])
+    depth = int(result.shape[2])
 
-    ring_count = int(generator.integers(num_rings[0], num_rings[1] + 1))
-    base_pattern = np.zeros_like(radius, dtype=np.float32)
-    for _ in range(ring_count):
-        r0 = generator.uniform(0.05, 0.95)
-        thickness = generator.uniform(0.01, 0.04)
-        amplitude = generator.uniform(0.4, 1.0) * ring_intensity * generator.choice([-1.0, 1.0])
-        base_pattern += amplitude * np.exp(-0.5 * ((radius - r0) / thickness) ** 2)
+    r_idx, c_idx = np.indices((rows, cols), dtype=np.float32)
+    if cols > 1:
+        x = (c_idx / (cols - 1)) * 2.0 - 1.0
+    else:
+        x = c_idx * 0.0
+    if rows > 1:
+        y = (r_idx / (rows - 1)) * 2.0 - 1.0
+    else:
+        y = r_idx * 0.0
 
+    radius = np.sqrt(x**2 + y**2)
+
+    # Build a single ring pattern. If the user did not specify a radius, pick
+    # a reasonable default location inside the detector area.
+    r0 = float(ring_radius) if ring_radius is not None else float(generator.uniform(0.05, 0.95))
+    t = float(thickness)
+    # Use the user-provided ring_intensity directly as the ring amplitude. This
+    # lets the caller precisely control how many HU the ring will add.
+    amplitude = float(ring_intensity)
+
+    base_pattern = amplitude * np.exp(-0.5 * ((radius - r0) / t) ** 2).astype(np.float32, copy=False)
+    # Slightly attenuate rings toward the edges to mimic typical detector falloff.
     base_pattern *= np.exp(-0.5 * radius**2)
 
     if jitter > 0.0:
@@ -256,12 +323,16 @@ def add_ring_artifacts(
     else:
         jitter_field = 0.0
 
+    # Apply the same base pattern to every slice, allowing small per-slice
+    # scale/offset variations so the effect isn't perfectly identical slice-to-slice.
     for iz in range(depth):
-        scale = generator.uniform(0.85, 1.15)
-        offset = generator.normal(0.0, ring_intensity * 0.05)
+        # small per-slice modulation preserves the user-selected intensity while
+        # still producing realistic slice-to-slice variation
+        scale = generator.uniform(0.98, 1.02)
+        offset = float(generator.normal(0.0, abs(ring_intensity) * 0.01))
         slice_pattern = scale * base_pattern + offset
         if isinstance(jitter_field, np.ndarray):
-            slice_pattern += ring_intensity * 0.1 * jitter_field
+            slice_pattern += abs(ring_intensity) * 0.1 * jitter_field
         result[:, :, iz] = np.clip(result[:, :, iz] + slice_pattern, MIN_HU_VALUE, MAX_HU_VALUE)
 
     return result.astype(np.int16, copy=False)
@@ -316,11 +387,16 @@ def add_motion_artifact(
         # Blur along the motion axis to emulate patient displacement.
         blurred = _moving_average_along_axis(slice_view, blur_size, axis)
 
+        # Ensure the blurred result has exactly the same shape as the source slice.
+        if blurred.shape != slice_view.shape:
+            blurred = _ensure_shape_like(blurred, slice_view.shape)
+
         # Create a light ghosted duplicate shifted in the motion direction.
         ghost_shift = generator.uniform(-1.0, 1.0)
         ghost = 0.5 * np.roll(slice_view, int(math.copysign(1, ghost_shift) or 1), axis=axis)
         ghost += 0.5 * np.roll(slice_view, -int(math.copysign(1, ghost_shift) or 1), axis=axis)
 
+        # Combine original, blurred and ghost components.
         slice_view = (1.0 - severity) * slice_view + severity * (0.7 * blurred + 0.3 * ghost)
         result[:, :, iz] = slice_view
 
