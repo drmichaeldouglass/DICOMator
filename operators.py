@@ -5,6 +5,7 @@ import math
 import os
 
 import bpy
+import numpy as np
 from bpy.types import Operator
 from mathutils import Vector
 
@@ -17,6 +18,7 @@ from .artifacts import (
     apply_partial_volume_effect,
 )
 from .constants import PYDICOM_AVAILABLE, generate_uid
+from .drr import generate_drr_image
 from .dicom_export import export_voxel_grid_to_dicom
 from .utils import force_ui_redraw, get_float_prop
 from .voxelization import voxelize_objects_to_hu
@@ -92,6 +94,136 @@ def _apply_configured_artifacts(hu_array, props):
         result = add_poisson_noise(result, scale=scale)
 
     return result
+
+
+def _save_drr_as_png(image_data: np.ndarray, filepath: str, scene: bpy.types.Scene | None = None) -> None:
+    """Save a normalized 2D image array to ``filepath`` as an uncompressed PNG."""
+
+    if image_data.ndim != 2:
+        raise ValueError("Expected 2D image data for DRR export")
+
+    height, width = image_data.shape
+    if height <= 0 or width <= 0:
+        raise ValueError("DRR image dimensions must be positive")
+
+    image = bpy.data.images.new("DICOMator_DRR", width=width, height=height, alpha=True, float_buffer=False)
+    try:
+        normalized = np.clip(image_data.astype(np.float32), 0.0, 1.0)
+        flipped = np.flipud(normalized)
+        rgba = np.empty((height, width, 4), dtype=np.float32)
+        rgba[..., 0] = flipped
+        rgba[..., 1] = flipped
+        rgba[..., 2] = flipped
+        rgba[..., 3] = 1.0
+        flat = np.ascontiguousarray(rgba.reshape(-1))
+        image.pixels.foreach_set(flat)
+
+        active_scene = scene or bpy.context.scene
+        if active_scene is None:
+            raise RuntimeError("No active scene available to save PNG")
+
+        render_settings = active_scene.render.image_settings
+        prev_format = render_settings.file_format
+        prev_compression = render_settings.compression
+        prev_color_depth = render_settings.color_depth
+        try:
+            render_settings.file_format = 'PNG'
+            render_settings.compression = 0
+            render_settings.color_depth = '8'
+            image.file_format = 'PNG'
+            image.filepath_raw = filepath
+            image.save(filepath=filepath, scene=active_scene)
+        finally:
+            render_settings.file_format = prev_format
+            render_settings.compression = prev_compression
+            render_settings.color_depth = prev_color_depth
+    finally:
+        bpy.data.images.remove(image)
+
+
+class MESH_OT_generate_drr(Operator):
+    """Generate a digital radiograph reconstruction for selected meshes."""
+
+    bl_idname = "mesh.generate_drr"
+    bl_label = "Generate DRR"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:  # pragma: no cover - Blender UI code
+        return (
+            context.active_object is not None
+            and context.active_object.type == 'MESH'
+            and context.active_object.mode == 'OBJECT'
+        )
+
+    def execute(self, context: bpy.types.Context):  # pragma: no cover - Blender runtime
+        props = context.scene.dicomator_props
+        selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+        if not selected_meshes and context.active_object and context.active_object.type == 'MESH':
+            selected_meshes = [context.active_object]
+
+        if not selected_meshes:
+            self.report({'ERROR'}, "Please select at least one mesh object")
+            return {'CANCELLED'}
+
+        output_path_raw = getattr(props, "drr_output_path", "")
+        if not output_path_raw or not str(output_path_raw).strip():
+            self.report({'ERROR'}, "Please specify an output PNG file")
+            return {'CANCELLED'}
+
+        output_path = str(output_path_raw)
+        if output_path.startswith('//'):
+            relative_path = output_path[2:].replace('/', os.sep).replace('\\', os.sep)
+            if bpy.data.filepath:
+                base_dir = os.path.dirname(bpy.data.filepath)
+            else:
+                base_dir = os.getcwd()
+            output_path = os.path.join(base_dir, relative_path)
+
+        output_path = os.path.abspath(os.path.normpath(output_path))
+        if not output_path.lower().endswith(".png"):
+            output_path += ".png"
+
+        output_dir = os.path.dirname(output_path)
+        if output_dir and not os.path.exists(output_dir):
+            try:
+                os.makedirs(output_dir, exist_ok=True)
+            except Exception as exc:
+                self.report({'ERROR'}, f"Cannot create output directory: {exc}")
+                return {'CANCELLED'}
+
+        lateral_mm = get_float_prop(props, "lateral_resolution_mm", get_float_prop(props, "grid_resolution", 2.0))
+        axial_mm = get_float_prop(props, "axial_resolution_mm", get_float_prop(props, "grid_resolution", 2.0))
+        if lateral_mm <= 0.0 or axial_mm <= 0.0:
+            self.report({'ERROR'}, "Voxel resolution must be positive")
+            return {'CANCELLED'}
+
+        angle_deg = get_float_prop(props, "drr_angle_deg", 0.0)
+        apply_modifiers = bool(getattr(props, "apply_modifiers", True))
+        depsgraph = context.evaluated_depsgraph_get() if apply_modifiers else None
+
+        try:
+            image_data = generate_drr_image(
+                selected_meshes,
+                lateral_resolution_mm=float(lateral_mm),
+                axial_resolution_mm=float(axial_mm),
+                angle_degrees=float(angle_deg),
+                apply_modifiers=apply_modifiers,
+                depsgraph=depsgraph,
+            )
+        except Exception as exc:
+            self.report({'ERROR'}, f"Failed to generate DRR: {exc}")
+            return {'CANCELLED'}
+
+        try:
+            _save_drr_as_png(image_data, output_path, context.scene)
+        except Exception as exc:
+            self.report({'ERROR'}, f"Failed to save DRR PNG: {exc}")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, f"Saved DRR image to {output_path}")
+        print(f"[DICOMator] DRR saved to {output_path}")
+        return {'FINISHED'}
 
 
 class MESH_OT_export_dicom(Operator):

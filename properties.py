@@ -104,6 +104,21 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
         description="Description for the DICOM series",
         default="CT Series from DICOMator",
     )
+    drr_angle_deg: bpy.props.FloatProperty(
+        name="DRR Angle (deg)",
+        description="Angle (in degrees) around the +Z axis used for the DRR projection",
+        default=0.0,
+        min=-180.0,
+        max=180.0,
+        step=10,
+        precision=1,
+    )
+    drr_output_path: bpy.props.StringProperty(
+        name="DRR Output PNG",
+        description="Location to save the generated digital radiograph as a PNG file",
+        subtype='FILE_PATH',
+        default="//drr.png",
+    )
     enable_noise: bpy.props.BoolProperty(
         name="Add Gaussian Noise",
         description="Add zero-mean Gaussian noise to exported HU images",

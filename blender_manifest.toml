@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "dicomator"  # use lowercase unique id
-version = "3.0.0"
+version = "3.1.0"
 name = "DICOMator"
 tagline = "Converts mesh objects into DICOM CT files"
 maintainer = "Michael Douglass"

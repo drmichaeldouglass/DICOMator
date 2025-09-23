@@ -14,13 +14,15 @@ from .artifacts import (
 )
 from .constants import MAX_HU_VALUE, MIN_HU_VALUE
 from .dicom_export import export_voxel_grid_to_dicom
-from .operators import MESH_OT_export_dicom
+from .drr import generate_drr_image
+from .operators import MESH_OT_export_dicom, MESH_OT_generate_drr
 from .panels import (
     VIEW3D_PT_dicomator_export_settings,
     VIEW3D_PT_dicomator_orientation,
     VIEW3D_PT_dicomator_panel,
     VIEW3D_PT_dicomator_patient_info,
     VIEW3D_PT_dicomator_per_object_hu,
+    VIEW3D_PT_dicomator_drr,
     VIEW3D_PT_dicomator_selection_info,
 )
 from .properties import DICOMatorProperties
@@ -29,7 +31,7 @@ from .voxelization import voxelize_mesh, voxelize_objects_to_hu
 bl_info = {
     "name": "DICOMator",
     "author": "Michael Douglass",
-    "version": (3, 0, 0),
+    "version": (3, 1, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > DICOMator",
     "description": "Converts mesh objects into DICOM CT files",
@@ -40,12 +42,14 @@ bl_info = {
 
 classes = (
     DICOMatorProperties,
+    MESH_OT_generate_drr,
     MESH_OT_export_dicom,
     VIEW3D_PT_dicomator_panel,
     VIEW3D_PT_dicomator_selection_info,
     VIEW3D_PT_dicomator_per_object_hu,
     VIEW3D_PT_dicomator_patient_info,
     VIEW3D_PT_dicomator_orientation,
+    VIEW3D_PT_dicomator_drr,
     VIEW3D_PT_dicomator_export_settings,
 )
 
@@ -88,6 +92,7 @@ __all__ = [
     "add_ring_artifacts",
     "apply_partial_volume_effect",
     "export_voxel_grid_to_dicom",
+    "generate_drr_image",
     "voxelize_mesh",
     "voxelize_objects_to_hu",
     "register",

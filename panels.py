@@ -317,6 +317,37 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
             layout.label(text="pydicom library not available", icon='ERROR')
 
 
+class VIEW3D_PT_dicomator_drr(Panel):
+    bl_label = "Digital Radiograph"
+    bl_idname = "VIEW3D_PT_dicomator_drr"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "DICOMator"
+    bl_parent_id = "VIEW3D_PT_dicomator_panel"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context: Context) -> None:  # pragma: no cover - Blender UI code
+        layout = self.layout
+        props = context.scene.dicomator_props
+        box = layout.box()
+        box.label(text="Digital Radiograph", icon='IMAGE_DATA')
+        box.prop(props, "drr_angle_deg")
+        box.prop(props, "drr_output_path")
+
+        output_path_val = get_str_prop(props, "drr_output_path", "")
+        if output_path_val.startswith('//'):
+            relative_path = output_path_val[2:].replace('/', os.sep).replace('\\', os.sep)
+            if bpy.data.filepath:
+                base_dir = os.path.dirname(bpy.data.filepath)
+            else:
+                base_dir = os.getcwd()
+            resolved_path = os.path.abspath(os.path.normpath(os.path.join(base_dir, relative_path)))
+            box.label(text=f"Resolved: {resolved_path}", icon='FILE_IMAGE')
+
+        box.operator("mesh.generate_drr", text="Generate DRR", icon='IMAGE')
+        box.label(text="Angle rotates around the +Z axis (degrees).", icon='INFO')
+
+
 __all__ = [
     "VIEW3D_PT_dicomator_panel",
     "VIEW3D_PT_dicomator_selection_info",
@@ -324,4 +355,5 @@ __all__ = [
     "VIEW3D_PT_dicomator_patient_info",
     "VIEW3D_PT_dicomator_orientation",
     "VIEW3D_PT_dicomator_export_settings",
+    "VIEW3D_PT_dicomator_drr",
 ]

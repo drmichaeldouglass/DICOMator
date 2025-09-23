@@ -18,6 +18,9 @@ Blender add-on that converts selected mesh objects into a DICOM CT image series.
 - **Synthetic CT artifact suite**
   - Partial volume blur, metal streaks, ring artifacts, motion blur, Gaussian noise, and Poisson noise can be combined
   - Artifact order matches the UI: partial volume → metal streaks → rings → motion → Gaussian → Poisson
+- **Digital radiograph reconstruction (DRR)**
+  - Generate an attenuation-style projection from the selected meshes at any rotation about the +Z axis
+  - Save the resulting radiograph directly to an uncompressed PNG file (supports `//` relative paths)
 - **Patient and orientation metadata**
   - Patient Name, MRN (Patient ID), Sex, and Patient Position (HFS/FFS/HFP/FFP/HFDR/HFDL/FFDR/FFDL)
   - Customizable Series Description per export or phase
@@ -57,6 +60,7 @@ Blender add-on that converts selected mesh objects into a DICOM CT image series.
      - Toggle **Export 4D** to export multiple frames
        - Use the timeline range or set a custom `Start`/`End`/`Frame Step`
      - Enter a **Series Description** (used directly or extended per phase)
+   - **Digital Radiograph** – Choose the projection angle, output path, and press **Generate DRR** to write a PNG snapshot
    - **CT Artifacts** – Enable and tune optional artifact simulations:
      - *Gaussian Noise*: zero-mean HU noise with configurable standard deviation
      - *Partial Volume Blur*: volumetric smoothing with kernel size, iterations, and blend control
