@@ -114,11 +114,16 @@ class VIEW3D_PT_dicomator_per_object_hu(Panel):
             layout.label(text="No mesh selected", icon='INFO')
             return
         selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+        props = context.scene.dicomator_props
         box_hu = layout.box()
         box_hu.label(text="Per-Object HU", icon='MOD_PHYSICS')
+        box_hu.prop(props, "imaging_modality", text="Modality")
         for obj in selected_meshes:
-            row = box_hu.row(align=True)
-            row.prop(obj, "dicomator_hu", text=f"{obj.name} HU")
+            col = box_hu.column(align=True)
+            col.label(text=obj.name, icon='MESH_DATA')
+            row = col.row(align=True)
+            row.prop(obj, "dicomator_material", text="Material")
+            row.prop(obj, "dicomator_hu", text="Intensity")
 
 
 class VIEW3D_PT_dicomator_patient_info(Panel):

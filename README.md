@@ -6,7 +6,10 @@ Blender add-on that converts selected mesh objects into a DICOM CT image series.
 
 - **Per-object Hounsfield Units (HU)**
   - Set HU on each mesh (Object property `HU` via the Per-Object HU panel)
-  - Overlapping meshes resolve by taking the maximum HU
+  - Overlapping meshes resolve deterministically by mesh name; alphabetically last meshes win when voxels coincide
+- **Tissue intensity presets**
+  - Choose CT, T1 MR, or T2 MR modalities and assign tissue presets from a curated table
+  - Selected presets automatically populate per-object intensities while still allowing manual overrides
 - **Single-phase or 4D export**
   - Export the current frame or a range of frames (timeline or custom range)
   - One `SeriesInstanceUID` per phase; phases are written as separate series with temporal DICOM tags (`NumberOfTemporalPositions`, `TemporalPositionIndex`, `TemporalPositionIdentifier`)
@@ -47,7 +50,7 @@ Blender add-on that converts selected mesh objects into a DICOM CT image series.
 1. Select one or more mesh objects in the 3D Viewport.
 2. In **Sidebar → DICOMator**, configure the panels:
    - **Selection Info** – Inspect selection size, estimated grid resolution, voxel count, and memory. Guardrails warn when exceeding 2,000 voxels per axis or 100M total voxels.
-   - **Per-Object HU** – Assign HU values to each selected mesh (defaults to 0 HU). Overlaps keep the hottest (highest HU) value.
+  - **Per-Object HU** – Assign HU values or pick modality-aware tissue presets for each selected mesh. When meshes overlap, alphabetical ordering of object names decides the winning intensity (last name wins).
    - **Patient Information** – Set patient name, MRN, and sex.
    - **Image Orientation** – Choose the Patient Position tag applied to the DICOM slices.
    - **Export Settings**

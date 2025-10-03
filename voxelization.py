@@ -127,7 +127,12 @@ def voxelize_objects_to_hu(
     apply_modifiers: bool = False,
     depsgraph: Optional[bpy.types.Depsgraph] = None,
 ) -> Tuple[np.ndarray, Vector, Tuple[int, int, int]]:
-    """Voxelize multiple objects into a single HU grid."""
+    """Voxelize multiple objects into a single HU grid.
+
+    Overlapping solids resolve deterministically: meshes are processed in
+    alphabetical order by name and the alphabetically last mesh wins any
+    conflicting voxels.
+    """
     if not objects:
         raise ValueError("No objects provided for voxelization")
 
@@ -192,13 +197,16 @@ def voxelize_objects_to_hu(
     max_dist = (max_z - min_z) + 4.0 * vz
     epsilon = 1e-6
 
-    sorted_objects = sorted(objects, key=lambda obj: obj.name.casefold())
-    object_data = []
+    sorted_objects = sorted(
+        objects,
+        key=lambda obj: (obj.name.casefold(), obj.name),
+    )
+    object_data: list[tuple[str, BVHTree, np.int16]] = []
     for obj in sorted_objects:
         bvh = _bvh_from_object(obj, depsgraph=depsgraph, apply_modifiers=apply_modifiers)
         hu_value = float(getattr(obj, 'dicomator_hu', DEFAULT_DENSITY))
         hu_value = max(MIN_HU_VALUE, min(MAX_HU_VALUE, hu_value))
-        object_data.append((bvh, np.int16(hu_value), obj.name))
+        object_data.append((obj.name, bvh, np.int16(hu_value)))
 
     total_columns = width * height
     processed_columns = 0
@@ -207,7 +215,7 @@ def voxelize_objects_to_hu(
         x_world = float(xs[ix])
         for iy in range(height):
             y_world = float(ys[iy])
-            for bvh, hu_value, _name in object_data:
+            for _name, bvh, hu_value in object_data:
                 origin_ray = Vector((x_world, y_world, min_z - 2.0 * vz))
                 hits_z: list[float] = []
                 while True:
@@ -227,6 +235,9 @@ def voxelize_objects_to_hu(
                             s = max(0, start_idx)
                             e = min(depth - 1, end_idx)
                             if e >= s:
+                                # Alphabetical sorting ensures the final mesh in the
+                                # list (last name) overwrites earlier assignments
+                                # wherever voxel solids overlap.
                                 hu_array[ix, iy, s:e + 1] = hu_value
             processed_columns += 1
             if progress_callback and (processed_columns % 5000) == 0:

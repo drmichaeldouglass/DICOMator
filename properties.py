@@ -3,6 +3,46 @@ from __future__ import annotations
 
 import bpy
 
+from .constants import IMAGING_MODALITY_ITEMS, get_material_intensity
+
+
+def apply_material_intensity(obj: bpy.types.Object, modality: str) -> None:
+    """Assign the intensity for ``obj`` based on its material and modality."""
+
+    material_key = getattr(obj, "dicomator_material", "CUSTOM")
+    if material_key == "CUSTOM":
+        return
+
+    value = get_material_intensity(material_key, modality)
+    if value is not None:
+        obj.dicomator_hu = float(value)
+
+
+def update_imaging_modality(self, context: bpy.types.Context) -> None:
+    """Refresh material-derived intensities when the modality changes."""
+
+    if context is None or context.scene is None:
+        return
+
+    for obj in context.scene.objects:
+        if obj.type != 'MESH':
+            continue
+        apply_material_intensity(obj, self.imaging_modality)
+
+
+def update_object_material(self, context: bpy.types.Context) -> None:
+    """Update an object's intensity when its material preset changes."""
+
+    if context is None or context.scene is None:
+        return
+
+    props = getattr(context.scene, "dicomator_props", None)
+    if props is None:
+        return
+
+    modality = getattr(props, "imaging_modality", IMAGING_MODALITY_ITEMS[0][0])
+    apply_material_intensity(self, modality)
+
 
 class DICOMatorProperties(bpy.types.PropertyGroup):
     """Properties exposed in the DICOMator UI."""
@@ -41,6 +81,13 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
             ('FFDL', 'Feet First Decubitus Left', 'Feet First Decubitus Left'),
         ],
         default='HFS',
+    )
+    imaging_modality: bpy.props.EnumProperty(
+        name="Imaging Modality",
+        description="Select the imaging modality used for material presets",
+        items=IMAGING_MODALITY_ITEMS,
+        default=IMAGING_MODALITY_ITEMS[0][0],
+        update=update_imaging_modality,
     )
     export_4d: bpy.props.BoolProperty(
         name="Export 4D (use animated frames)",
@@ -263,4 +310,9 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
     )
 
 
-__all__ = ["DICOMatorProperties"]
+__all__ = [
+    "DICOMatorProperties",
+    "apply_material_intensity",
+    "update_imaging_modality",
+    "update_object_material",
+]
