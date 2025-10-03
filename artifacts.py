@@ -445,6 +445,64 @@ def add_poisson_noise(hu_array: np.ndarray, scale: float = 150.0, rng: Generator
     return noisy.astype(np.int16, copy=False)
 
 
+def add_bias_field_shading(
+    intensity_array: np.ndarray,
+    strength: float = 0.25,
+    scale: float = 0.3,
+    rng: GeneratorLike = None,
+) -> np.ndarray:
+    """Apply a smooth intensity bias field to mimic MRI coil shading.
+
+    Parameters
+    ----------
+    intensity_array:
+        Input volume whose intensities should be modulated.
+    strength:
+        Fractional amplitude of the multiplicative bias (0 disables the effect).
+    scale:
+        Relative smoothing window (0-1) controlling how quickly the bias varies.
+        Larger values produce slower spatial variation.
+    rng:
+        Optional seed or :class:`numpy.random.Generator` for deterministic bias.
+
+    Returns
+    -------
+    numpy.ndarray
+        Volume with low-frequency multiplicative shading, preserving dtype.
+    """
+
+    if strength <= 0.0:
+        return intensity_array
+
+    generator = _get_generator(rng)
+    source = intensity_array.astype(np.float32, copy=False)
+
+    if source.size == 0:
+        return intensity_array
+
+    field = generator.normal(0.0, 1.0, size=source.shape).astype(np.float32, copy=False)
+
+    # Smooth the random field along each axis to produce a gentle bias pattern.
+    for axis, axis_len in enumerate(source.shape):
+        window = max(3, int(round(scale * max(1, axis_len))))
+        if window % 2 == 0:
+            window += 1
+        field = _moving_average_along_axis(field, window, axis)
+
+    field -= float(np.mean(field))
+    max_abs = float(np.max(np.abs(field)))
+    if max_abs > 0.0:
+        field /= max_abs
+    bias = 1.0 + float(strength) * field
+
+    biased = source * bias
+    min_val = float(np.min(source))
+    max_val = float(np.max(source))
+    if max_val > min_val:
+        biased = np.clip(biased, min_val, max_val)
+    return biased.astype(intensity_array.dtype, copy=False)
+
+
 __all__ = [
     "add_gaussian_noise",
     "apply_partial_volume_effect",
@@ -452,4 +510,5 @@ __all__ = [
     "add_ring_artifacts",
     "add_motion_artifact",
     "add_poisson_noise",
+    "add_bias_field_shading",
 ]

@@ -1,12 +1,15 @@
 # DICOMator
 
-Blender add-on that converts selected mesh objects into a DICOM CT image series. It voxelizes the active mesh selection directly into Hounsfield Units, supports single-phase or 4D acquisitions, and can layer in synthetic CT artifacts for training or visualization workflows.
+Blender add-on that converts selected mesh objects into a DICOM image series (CT or MR-style). It voxelizes the active mesh selection directly into modality-appropriate intensities, supports single-phase or 4D acquisitions, and layers in synthetic artifacts tailored to the chosen modality for training or visualization workflows.
 
 ## Features
 
 - **Per-object Hounsfield Units (HU)**
   - Set HU on each mesh (Object property `HU` via the Per-Object HU panel)
-  - Overlapping meshes resolve by taking the maximum HU
+  - Overlapping meshes resolve deterministically by mesh name; alphabetically last meshes win when voxels coincide
+- **Tissue intensity presets**
+  - Choose CT, T1 MR, or T2 MR modalities and assign tissue presets from a curated table
+  - Selected presets automatically populate per-object intensities while still allowing manual overrides
 - **Single-phase or 4D export**
   - Export the current frame or a range of frames (timeline or custom range)
   - One `SeriesInstanceUID` per phase; phases are written as separate series with temporal DICOM tags (`NumberOfTemporalPositions`, `TemporalPositionIndex`, `TemporalPositionIdentifier`)
@@ -15,9 +18,10 @@ Blender add-on that converts selected mesh objects into a DICOM CT image series.
   - Independent lateral (XY) and axial (Z) voxel size in millimeters
   - Optional evaluation of modifiers/shape keys/armatures during voxelization
   - BVH-based +Z column fill for solid voxelization with consistent grid dimensions
-- **Synthetic CT artifact suite**
-  - Partial volume blur, metal streaks, ring artifacts, motion blur, Gaussian noise, and Poisson noise can be combined
-  - Artifact order matches the UI: partial volume → metal streaks → rings → motion → Gaussian → Poisson
+- **Synthetic artifact suite**
+  - CT modality exposes partial volume blur, metal streaks, ring artifacts, motion blur, Gaussian noise, and Poisson noise
+  - MRI modalities expose Gaussian noise, coil bias-field shading, and motion blur tuned for MR appearance
+  - Artifact order matches the UI and adapts per modality so effects apply consistently
 - **Patient and orientation metadata**
   - Patient Name, MRN (Patient ID), Sex, and Patient Position (HFS/FFS/HFP/FFP/HFDR/HFDL/FFDR/FFDL)
   - Customizable Series Description per export or phase
@@ -47,7 +51,7 @@ Blender add-on that converts selected mesh objects into a DICOM CT image series.
 1. Select one or more mesh objects in the 3D Viewport.
 2. In **Sidebar → DICOMator**, configure the panels:
    - **Selection Info** – Inspect selection size, estimated grid resolution, voxel count, and memory. Guardrails warn when exceeding 2,000 voxels per axis or 100M total voxels.
-   - **Per-Object HU** – Assign HU values to each selected mesh (defaults to 0 HU). Overlaps keep the hottest (highest HU) value.
+  - **Per-Object HU** – Assign HU values or pick modality-aware tissue presets for each selected mesh. When meshes overlap, alphabetical ordering of object names decides the winning intensity (last name wins).
    - **Patient Information** – Set patient name, MRN, and sex.
    - **Image Orientation** – Choose the Patient Position tag applied to the DICOM slices.
    - **Export Settings**
@@ -57,27 +61,23 @@ Blender add-on that converts selected mesh objects into a DICOM CT image series.
      - Toggle **Export 4D** to export multiple frames
        - Use the timeline range or set a custom `Start`/`End`/`Frame Step`
      - Enter a **Series Description** (used directly or extended per phase)
-   - **CT Artifacts** – Enable and tune optional artifact simulations:
-     - *Gaussian Noise*: zero-mean HU noise with configurable standard deviation
-     - *Partial Volume Blur*: volumetric smoothing with kernel size, iterations, and blend control
-     - *Metal Streaks*: streak artifacts originating from voxels above a HU threshold (intensity, streak count, falloff)
-     - *Ring Artifacts*: concentric banding with adjustable amplitude, ring count, and jitter
-     - *Motion Blur*: in-plane motion blur/ghosting with odd-length kernel, severity, and axis choice
-     - *Poisson Noise*: photon-count style noise governed by a photon scale factor
+   - **Artifact Controls** – The panel title changes with the modality:
+     - *CT*: Gaussian noise, partial volume blur, metal streaks, ring artifacts, motion blur, and Poisson noise
+     - *MRI (T1/T2)*: Gaussian noise (intensity-scaled), low-frequency coil bias-field shading, and motion blur
 3. Click **Export to DICOM**.
    - For single-phase exports the mesh selection is voxelized once and written directly in HU.
    - For 4D exports the timeline advances through the configured frame range, re-voxelizing each phase inside a fixed padded bounding box so every phase shares identical grid dimensions. Each phase receives its own Series Instance UID and the series description is suffixed with the phase number and percent completion.
 
 Notes:
 - During 4D export the timeline visibly advances; keep animation drivers and dependencies evaluated.
-- Export filenames default to `CT_Slice_####.dcm`. 4D phases are prefixed with `Phase_###_`.
+- Export filenames include the modality (e.g., `CT_Slice_####.dcm` or `MR_Slice_####.dcm`). 4D phases are prefixed with `Phase_###_` followed by the modality.
 - When using relative (`//`) paths, save your `.blend` file so the path resolves predictably.
 
 ## Output details
 
-- Modality: CT (CT Image Storage)
-- Data type: int16 signed (direct HU values)
-- Window: Center 40, Width 400
+- Modality: CT (`CTImageStorage`) or MR (`MRImageStorage`) depending on the selected imaging modality
+- Data type: int16 signed (direct HU/intensity values)
+- Window: CT exports default to Center 40 / Width 400; MR exports use Center 128 / Width 256
 - Geometry:
   - `PixelSpacing = [voxel_size_mm_y, voxel_size_mm_x]`
   - `SliceThickness = SpacingBetweenSlices = voxel_size_mm_z`
@@ -110,7 +110,7 @@ Notes:
 - Voxelization is axis-aligned and uses +Z column fills; only mesh geometry is sampled (materials/textures are ignored).
 - Modifier/armature evaluation is optional but increases memory/time usage; complex rigs may still require baking.
 - Output orientation is fixed to axial slices aligned with Blender world axes.
-- Only synthetic artifacts listed above are available; additional acquisition effects are not modeled in this release.
+- Only the modality-specific artifacts listed above are available; additional acquisition effects are not modeled in this release.
 
 ## Troubleshooting
 

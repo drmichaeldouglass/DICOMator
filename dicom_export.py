@@ -36,6 +36,7 @@ def export_voxel_grid_to_dicom(
     progress_callback: SliceProgressCallback = None,
     direct_hu: bool = False,
     patient_position: str = "HFS",
+    dicom_modality: str = "CT",
     study_instance_uid: Optional[str] = None,
     frame_of_reference_uid: Optional[str] = None,
     series_instance_uid: Optional[str] = None,
@@ -50,6 +51,10 @@ def export_voxel_grid_to_dicom(
         return {'error': 'pydicom not available'}
 
     os.makedirs(output_dir, exist_ok=True)
+
+    modality = str(dicom_modality or "CT").upper()
+    if modality not in {"CT", "MR"}:
+        modality = "CT"
 
     current_datetime = datetime.now()
     date_str = current_datetime.strftime('%Y%m%d')
@@ -91,7 +96,8 @@ def export_voxel_grid_to_dicom(
         slice_data = hu_grid[:, :, index]
         try:
             file_meta = Dataset()
-            file_meta.MediaStorageSOPClassUID = pydicom.uid.CTImageStorage
+            storage_uid = pydicom.uid.CTImageStorage if modality == "CT" else pydicom.uid.MRImageStorage
+            file_meta.MediaStorageSOPClassUID = storage_uid
             file_meta.MediaStorageSOPInstanceUID = generate_uid()
             file_meta.ImplementationClassUID = pydicom.uid.PYDICOM_IMPLEMENTATION_UID
             file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
@@ -128,7 +134,7 @@ def export_voxel_grid_to_dicom(
             if temporal_position_identifier is not None:
                 dataset.TemporalPositionIdentifier = int(temporal_position_identifier)
 
-            dataset.Modality = 'CT'
+            dataset.Modality = modality
             dataset.Manufacturer = 'DICOMator'
             dataset.InstitutionName = 'Virtual Hospital'
             dataset.StationName = 'Blender'
@@ -163,14 +169,18 @@ def export_voxel_grid_to_dicom(
             dataset.PixelRepresentation = 1
             dataset.RescaleIntercept = 0.0
             dataset.RescaleSlope = 1.0
-            dataset.WindowCenter = 40
-            dataset.WindowWidth = 400
+            if modality == "MR":
+                dataset.WindowCenter = 128
+                dataset.WindowWidth = 256
+            else:
+                dataset.WindowCenter = 40
+                dataset.WindowWidth = 400
             dataset.PixelData = pixel_array.tobytes()
 
             if phase_index is not None:
-                filename = os.path.join(output_dir, f"Phase_{int(phase_index):03d}_CT_Slice_{index + 1:04d}.dcm")
+                filename = os.path.join(output_dir, f"Phase_{int(phase_index):03d}_{modality}_Slice_{index + 1:04d}.dcm")
             else:
-                filename = os.path.join(output_dir, f"CT_Slice_{index + 1:04d}.dcm")
+                filename = os.path.join(output_dir, f"{modality}_Slice_{index + 1:04d}.dcm")
 
             dataset.is_little_endian = True
             dataset.is_implicit_VR = False

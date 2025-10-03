@@ -9,6 +9,7 @@ from bpy.types import Operator
 from mathutils import Vector
 
 from .artifacts import (
+    add_bias_field_shading,
     add_gaussian_noise,
     add_metal_artifacts,
     add_motion_artifact,
@@ -16,7 +17,7 @@ from .artifacts import (
     add_ring_artifacts,
     apply_partial_volume_effect,
 )
-from .constants import PYDICOM_AVAILABLE, generate_uid
+from .constants import MODALITY_CT, MRI_MODALITIES, PYDICOM_AVAILABLE, generate_uid
 from .dicom_export import export_voxel_grid_to_dicom
 from .utils import force_ui_redraw, get_float_prop
 from .voxelization import voxelize_objects_to_hu
@@ -34,8 +35,13 @@ def _apply_configured_artifacts(hu_array, props):
     """Apply the artifacts configured in ``props`` to ``hu_array`` sequentially."""
 
     result = hu_array
+    modality = getattr(props, "imaging_modality", MODALITY_CT)
+    if modality not in MRI_MODALITIES and modality != MODALITY_CT:
+        modality = MODALITY_CT
+    is_mri = modality in MRI_MODALITIES
+    is_ct = modality == MODALITY_CT
 
-    if getattr(props, "enable_partial_volume", False):
+    if getattr(props, "enable_partial_volume", False) and is_ct:
         kernel = max(1, _get_int_prop(props, "partial_volume_kernel", 3))
         if kernel % 2 == 0:
             kernel += 1
@@ -43,7 +49,7 @@ def _apply_configured_artifacts(hu_array, props):
         mix = max(0.0, min(1.0, get_float_prop(props, "partial_volume_mix", 1.0)))
         result = apply_partial_volume_effect(result, kernel_size=kernel, iterations=iterations, mix=mix)
 
-    if getattr(props, "enable_metal_artifacts", False):
+    if getattr(props, "enable_metal_artifacts", False) and is_ct:
         intensity = max(0.0, get_float_prop(props, "metal_intensity", 400.0))
         threshold = get_float_prop(props, "metal_density_threshold", 2000.0)
         streaks = max(0, _get_int_prop(props, "metal_num_streaks", 10))
@@ -56,7 +62,7 @@ def _apply_configured_artifacts(hu_array, props):
             falloff=float(falloff),
         )
 
-    if getattr(props, "enable_ring_artifacts", False):
+    if getattr(props, "enable_ring_artifacts", False) and is_ct:
         ring_intensity = max(0.0, get_float_prop(props, "ring_intensity", 80.0))
         ring_radius = get_float_prop(props, "ring_radius", 0.5)
         thickness = max(0.0, get_float_prop(props, "ring_thickness", 0.02))
@@ -83,11 +89,16 @@ def _apply_configured_artifacts(hu_array, props):
             axis=axis,
         )
 
+    if getattr(props, "enable_bias_field", False) and is_mri:
+        strength = max(0.0, min(1.0, get_float_prop(props, "bias_field_strength", 0.25)))
+        scale = max(0.05, min(1.0, get_float_prop(props, "bias_field_scale", 0.3)))
+        result = add_bias_field_shading(result, strength=float(strength), scale=float(scale))
+
     if getattr(props, "enable_noise", False) and get_float_prop(props, "noise_std_dev_hu", 0.0) > 0.0:
         std_dev = max(0.0, get_float_prop(props, "noise_std_dev_hu", 20.0))
         result = add_gaussian_noise(result, std_dev)
 
-    if getattr(props, "enable_poisson_noise", False) and get_float_prop(props, "poisson_scale", 0.0) > 0.0:
+    if getattr(props, "enable_poisson_noise", False) and get_float_prop(props, "poisson_scale", 0.0) > 0.0 and is_ct:
         scale = max(1.0, get_float_prop(props, "poisson_scale", 150.0))
         result = add_poisson_noise(result, scale=scale)
 
@@ -157,6 +168,9 @@ class MESH_OT_export_dicom(Operator):
             vx_m = float(lateral_mm) * 0.001
             vy_m = float(lateral_mm) * 0.001
             vz_m = float(axial_mm) * 0.001
+
+            modality_key = getattr(props, "imaging_modality", MODALITY_CT)
+            dicom_modality = "MR" if modality_key in MRI_MODALITIES else "CT"
 
             export_4d = bool(props.export_4d)
             apply_modifiers = bool(getattr(props, "apply_modifiers", True))
@@ -307,6 +321,7 @@ class MESH_OT_export_dicom(Operator):
                     progress_callback=progress_callback,
                     direct_hu=True,
                     patient_position=props.patient_position,
+                    dicom_modality=dicom_modality,
                 )
                 context.window_manager.progress_end()
                 if 'error' in result:
@@ -380,6 +395,7 @@ class MESH_OT_export_dicom(Operator):
                         temporal_position_index=frame,
                         temporal_position_identifier=phase_index,
                         phase_index=phase_index,
+                        dicom_modality=dicom_modality,
                     )
                     if 'error' in result:
                         context.window_manager.progress_end()
