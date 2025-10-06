@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
+import logging
 
 AIR_DENSITY = -1000.0  # HU value for air (DICOM standard reference for air)
 DEFAULT_DENSITY = 0.0   # Default HU for objects unless overridden per-object
@@ -128,14 +130,21 @@ FileDataset = None
 generate_uid = None
 pydicom = None
 
-_pydicom_spec = importlib.util.find_spec("pydicom")
-if _pydicom_spec is not None:
-    pydicom = importlib.import_module("pydicom")
-    from pydicom.dataset import Dataset, FileDataset
-    from pydicom.uid import generate_uid
-    PYDICOM_AVAILABLE = True
-else:
-    print("Warning: pydicom not available. DICOM export functionality will be disabled.")
+# Robustly check for pydicom without allowing import-time exceptions to propagate.
+try:
+    if importlib.util.find_spec("pydicom") is not None:
+        pydicom = importlib.import_module("pydicom")
+        from pydicom.dataset import Dataset, FileDataset
+        from pydicom.uid import generate_uid
+        PYDICOM_AVAILABLE = True
+except Exception:
+    logging.getLogger(__name__).warning(
+        "pydicom not available or failed to import. DICOM export functionality will be disabled."
+    )
+    pydicom = None
+    Dataset = None
+    FileDataset = None
+    generate_uid = None
 
 __all__ = [
     "AIR_DENSITY",
