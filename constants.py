@@ -95,6 +95,26 @@ MATERIAL_INTENSITIES = {
         MODALITY_MRI_T1: 30,
         MODALITY_MRI_T2: 230,
     },
+    "LUNG": {
+        MODALITY_CT: -700,       # typical aerated lung parenchyma
+        MODALITY_MRI_T1: 20,
+        MODALITY_MRI_T2: 80,
+    },
+    "SOFT_TISSUE": {
+        MODALITY_CT: 40,         # generic soft tissue (~muscle)
+        MODALITY_MRI_T1: 100,
+        MODALITY_MRI_T2: 90,
+    },
+    "ALUMINIUM": {
+        MODALITY_CT: 300,        # moderately dense metal equivalent
+        MODALITY_MRI_T1: 0,      # metal causes signal void in MRI
+        MODALITY_MRI_T2: 0,
+    },
+    "TITANIUM": {
+        MODALITY_CT: 3000,       # very high CT attenuation (may clip to MAX_HU_VALUE)
+        MODALITY_MRI_T1: 0,      # signal void / artifact in MRI
+        MODALITY_MRI_T2: 0,
+    },
 }
 
 MATERIAL_ITEMS = [
@@ -113,6 +133,10 @@ MATERIAL_ITEMS = [
     ("WHITE_MATTER", "White Matter", "Brighter than gray on T1"),
     ("GRAY_MATTER", "Gray Matter", "Brighter than white on T2"),
     ("CSF_WATER", "CSF / Water / Edema", "Fluid signal"),
+    ("LUNG", "Lung Parenchyma", "Aerated lung tissue"),
+    ("SOFT_TISSUE", "Soft Tissue", "Generic soft tissue / organ parenchyma"),
+    ("ALUMINIUM", "Aluminium", "Moderately dense metal (implant/foil)"),
+    ("TITANIUM", "Titanium (implant)", "High-density metal, produces CT hyperintensity"),
 ]
 
 
