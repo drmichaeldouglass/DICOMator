@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import bpy
-from bpy.props import FloatProperty, PointerProperty
+from bpy.props import EnumProperty, FloatProperty, PointerProperty
 
 from .artifacts import (
     add_gaussian_noise,
@@ -12,7 +12,7 @@ from .artifacts import (
     add_ring_artifacts,
     apply_partial_volume_effect,
 )
-from .constants import MAX_HU_VALUE, MIN_HU_VALUE
+from .constants import MATERIAL_ITEMS, MAX_HU_VALUE, MIN_HU_VALUE
 from .dicom_export import export_voxel_grid_to_dicom
 from .operators import MESH_OT_export_dicom
 from .panels import (
@@ -23,7 +23,7 @@ from .panels import (
     VIEW3D_PT_dicomator_per_object_hu,
     VIEW3D_PT_dicomator_selection_info,
 )
-from .properties import DICOMatorProperties
+from .properties import DICOMatorProperties, update_object_material
 from .voxelization import voxelize_mesh, voxelize_objects_to_hu
 
 bl_info = {
@@ -68,10 +68,22 @@ def register() -> None:  # pragma: no cover - Blender registration
             precision=0,
         )
 
+    if not hasattr(bpy.types.Object, "dicomator_material"):
+        bpy.types.Object.dicomator_material = EnumProperty(
+            name="Material",
+            description="Select a predefined tissue/material",
+            items=MATERIAL_ITEMS,
+            default="CUSTOM",
+            update=update_object_material,
+        )
+
 
 def unregister() -> None:  # pragma: no cover - Blender registration
     if hasattr(bpy.types.Scene, "dicomator_props"):
         del bpy.types.Scene.dicomator_props
+
+    if hasattr(bpy.types.Object, "dicomator_material"):
+        del bpy.types.Object.dicomator_material
 
     if hasattr(bpy.types.Object, "dicomator_hu"):
         del bpy.types.Object.dicomator_hu
