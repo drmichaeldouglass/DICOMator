@@ -10,7 +10,7 @@ blender_version_min = "4.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
 tags = ["3D View", "Medical", "CT", "DICOM"]
 copyright = ["2024 Michael Douglass"]
-platforms = ["windows-x64"]
+platforms = ["windows-x64","macos-arm64"]
 wheels = [
     "./wheels/scikit_image-0.24.0-cp311-cp311-win_amd64.whl",
     "./wheels/pydicom-2.3.1-py3-none-any.whl",
