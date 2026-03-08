@@ -45,10 +45,22 @@ Blender add-on that converts selected mesh objects into DICOM outputs for either
 
 ## Installation
 
-1. Zip the `dicomator` folder or install the add-on folder directly from Blender:
-   - Blender → **Edit → Preferences → Add-ons → Install…**
-   - Select the packaged zip or folder, then enable **“DICOMator”**.
-2. Ensure `pydicom` is available. Install it into Blender’s Python environment or use the provided helper script (`python download_wheels.py`) and point Blender to the downloaded wheels.
+Blender 4.2+ uses the **Extensions** workflow for add-ons.
+
+1. Create an extension zip from this repository root (the zip must include `blender_manifest.toml` at the top level).
+2. In Blender, open **Edit → Preferences → Extensions**.
+3. Open the Extensions menu (top-right caret) and choose **Install from Disk...**.
+4. Select the zip file and install.
+5. Enable **DICOMator** if it is not enabled automatically.
+
+Development fallback (unpacked source):
+
+1. Copy or symlink this folder into your Blender user scripts add-ons directory.
+2. In Blender, open **Edit → Preferences → Add-ons**, search for **DICOMator**, and enable it.
+
+Dependency note:
+
+- Ensure `pydicom` is available in Blender's Python environment.
 
 ## Usage
 
