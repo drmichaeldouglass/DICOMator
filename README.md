@@ -122,6 +122,7 @@ Notes:
 <img src="https://github.com/user-attachments/assets/eca22ede-4a6f-47ca-a82c-e53dccb0649d" alt="skull_dose_lat" width="420" />
 <img src="https://github.com/user-attachments/assets/8eb7a3ce-fbaf-4d7d-b70d-33e7b808e0fd" alt="Lung_geometry" width="420" />
 <img src="https://github.com/user-attachments/assets/77e204bd-2a70-46bb-af8f-c3327ef7eb8f" alt="Lung" width="420" />
+<img width="359" height="362" alt="SuzanneXRay" src="https://github.com/user-attachments/assets/2951918f-773b-4505-88cc-4086dfd64b2c" width="420"/>
 
 ## Performance and limits
 
