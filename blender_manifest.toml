@@ -1,8 +1,8 @@
 schema_version = "1.0.0"
 id = "dicomator"  # use lowercase unique id
-version = "3.0.0"
+version = "3.1.0"
 name = "DICOMator"
-tagline = "Converts mesh objects into DICOM CT files"
+tagline = "Converts mesh objects into synthetic CT/MR series or camera-based DRRs"
 maintainer = "Michael Douglass"
 type = "add-on"
 website = "https://github.com/drmichaeldouglass/DICOMator"

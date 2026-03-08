@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import importlib
-import importlib.util
 import logging
 
 AIR_DENSITY = -1000.0  # HU value for air (DICOM standard reference for air)
@@ -14,6 +13,8 @@ MIN_HU_VALUE = -1024    # Min HU (typical CT lower bound)
 MODALITY_CT = "CT"
 MODALITY_MRI_T1 = "MRI_T1"
 MODALITY_MRI_T2 = "MRI_T2"
+OUTPUT_MODE_VOLUME = "VOLUME"
+OUTPUT_MODE_DRR = "DRR"
 
 MRI_MODALITIES = {MODALITY_MRI_T1, MODALITY_MRI_T2}
 
@@ -21,6 +22,11 @@ IMAGING_MODALITY_ITEMS = [
     (MODALITY_CT, "CT", "Assign CT Hounsfield Units"),
     (MODALITY_MRI_T1, "T1 MR", "Assign intensities for T1-weighted MRI"),
     (MODALITY_MRI_T2, "T2 MR", "Assign intensities for T2-weighted MRI"),
+]
+
+OUTPUT_MODE_ITEMS = [
+    (OUTPUT_MODE_VOLUME, "Synthetic Volume", "Export a voxelized CT or MR image series"),
+    (OUTPUT_MODE_DRR, "DRR", "Export a digital reconstructed radiograph from the active camera"),
 ]
 
 # Tissue/material presets with representative intensities for each modality.
@@ -153,22 +159,55 @@ Dataset = None
 FileDataset = None
 generate_uid = None
 pydicom = None
+PYDICOM_IMPORT_ERROR = ""
 
-# Robustly check for pydicom without allowing import-time exceptions to propagate.
-try:
-    if importlib.util.find_spec("pydicom") is not None:
-        pydicom = importlib.import_module("pydicom")
-        from pydicom.dataset import Dataset, FileDataset
-        from pydicom.uid import generate_uid
+
+def ensure_pydicom_available() -> bool:
+    """Import ``pydicom`` on demand and cache the resolved module globals."""
+
+    global PYDICOM_AVAILABLE
+    global PYDICOM_IMPORT_ERROR
+    global Dataset
+    global FileDataset
+    global generate_uid
+    global pydicom
+
+    if PYDICOM_AVAILABLE and pydicom is not None and Dataset is not None and FileDataset is not None and generate_uid is not None:
+        return True
+
+    try:
+        module = importlib.import_module("pydicom")
+        dataset_module = importlib.import_module("pydicom.dataset")
+        uid_module = importlib.import_module("pydicom.uid")
+
+        pydicom = module
+        Dataset = dataset_module.Dataset
+        FileDataset = dataset_module.FileDataset
+        generate_uid = uid_module.generate_uid
         PYDICOM_AVAILABLE = True
-except Exception:
-    logging.getLogger(__name__).warning(
-        "pydicom not available or failed to import. DICOM export functionality will be disabled."
-    )
-    pydicom = None
-    Dataset = None
-    FileDataset = None
-    generate_uid = None
+        PYDICOM_IMPORT_ERROR = ""
+        return True
+    except Exception as exc:
+        PYDICOM_AVAILABLE = False
+        PYDICOM_IMPORT_ERROR = str(exc)
+        pydicom = None
+        Dataset = None
+        FileDataset = None
+        generate_uid = None
+        LOGGER.warning(
+            "pydicom not available or failed to import. DICOM export functionality will be disabled.",
+            exc_info=True,
+        )
+        return False
+
+
+def get_pydicom_error() -> str:
+    """Return the last pydicom import error, if any."""
+
+    return str(PYDICOM_IMPORT_ERROR or "")
+
+
+ensure_pydicom_available()
 
 __all__ = [
     "AIR_DENSITY",
@@ -178,14 +217,20 @@ __all__ = [
     "MODALITY_CT",
     "MODALITY_MRI_T1",
     "MODALITY_MRI_T2",
+    "OUTPUT_MODE_VOLUME",
+    "OUTPUT_MODE_DRR",
     "MRI_MODALITIES",
     "IMAGING_MODALITY_ITEMS",
+    "OUTPUT_MODE_ITEMS",
     "MATERIAL_INTENSITIES",
     "MATERIAL_ITEMS",
     "get_material_intensity",
+    "ensure_pydicom_available",
+    "get_pydicom_error",
     "PYDICOM_AVAILABLE",
     "Dataset",
     "FileDataset",
     "generate_uid",
     "pydicom",
 ]
+LOGGER = logging.getLogger(__name__)

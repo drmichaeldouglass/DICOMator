@@ -7,3 +7,17 @@ __pycache__/panels.cpython-311.pyc
 __pycache__/properties.cpython-311.pyc
 __pycache__/utils.cpython-311.pyc
 __pycache__/voxelization.cpython-311.pyc
+.DS_Store
+__pycache__/__init__.cpython-314.pyc
+__pycache__/artifacts.cpython-314.pyc
+__pycache__/constants.cpython-314.pyc
+__pycache__/dicom_export.cpython-314.pyc
+__pycache__/download_wheels.cpython-314.pyc
+__pycache__/drr.cpython-311.pyc
+__pycache__/drr.cpython-314.pyc
+__pycache__/LoadDICOM.cpython-314.pyc
+__pycache__/operators.cpython-314.pyc
+__pycache__/panels.cpython-314.pyc
+__pycache__/properties.cpython-314.pyc
+__pycache__/utils.cpython-314.pyc
+__pycache__/voxelization.cpython-314.pyc

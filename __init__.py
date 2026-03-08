@@ -13,7 +13,8 @@ from .artifacts import (
     apply_partial_volume_effect,
 )
 from .constants import MATERIAL_ITEMS, MAX_HU_VALUE, MIN_HU_VALUE
-from .dicom_export import export_voxel_grid_to_dicom
+from .dicom_export import export_projection_to_dicom, export_voxel_grid_to_dicom
+from .drr import generate_drr_from_hu_volume, resolve_drr_detector_size
 from .operators import MESH_OT_export_dicom
 from .panels import (
     VIEW3D_PT_dicomator_export_settings,
@@ -29,10 +30,10 @@ from .voxelization import voxelize_mesh, voxelize_objects_to_hu
 bl_info = {
     "name": "DICOMator",
     "author": "Michael Douglass",
-    "version": (3, 0, 0),
+    "version": (3, 1, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > DICOMator",
-    "description": "Converts mesh objects into DICOM CT files",
+    "description": "Converts mesh objects into synthetic CT/MR series or camera-based DRR DICOM images",
     "warning": "",
     "doc_url": "https://github.com/drmichaeldouglass/DICOMator",
     "category": "3D View",
@@ -99,9 +100,12 @@ __all__ = [
     "add_poisson_noise",
     "add_ring_artifacts",
     "apply_partial_volume_effect",
+    "export_projection_to_dicom",
     "export_voxel_grid_to_dicom",
+    "generate_drr_from_hu_volume",
     "voxelize_mesh",
     "voxelize_objects_to_hu",
+    "resolve_drr_detector_size",
     "register",
     "unregister",
 ]

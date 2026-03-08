@@ -8,7 +8,8 @@ import bpy
 from bpy.types import Context, Panel
 from mathutils import Vector
 
-from .constants import MRI_MODALITIES, PYDICOM_AVAILABLE
+from .constants import MRI_MODALITIES, OUTPUT_MODE_DRR, ensure_pydicom_available, get_pydicom_error
+from .drr import resolve_drr_detector_size
 from .utils import get_float_prop, get_str_prop
 
 
@@ -98,6 +99,20 @@ class VIEW3D_PT_dicomator_selection_info(Panel):
             elif total_voxels > 50_000_000:
                 box.label(text="Large grid - may be slow", icon='ERROR')
 
+        if getattr(props, "output_mode", "") == OUTPUT_MODE_DRR:
+            camera_obj = context.scene.camera
+            detector_box = layout.box()
+            detector_box.label(text="DRR Detector", icon='CAMERA_DATA')
+            if camera_obj and camera_obj.type == 'CAMERA':
+                detector_box.label(text=f"Active Camera: {camera_obj.name}", icon='CAMERA_DATA')
+                detector_width, detector_height = resolve_drr_detector_size(
+                    context.scene,
+                    resolution_scale=get_float_prop(props, "drr_resolution_scale", 1.0),
+                )
+                detector_box.label(text=f"Detector: {detector_width} x {detector_height} px", icon='IMAGE_DATA')
+            else:
+                detector_box.label(text="Set an active scene camera for DRR export", icon='ERROR')
+
 
 class VIEW3D_PT_dicomator_per_object_hu(Panel):
     bl_label = "Per-Object HU"
@@ -177,10 +192,26 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
 
         box = layout.box()
         box.label(text="Export Settings", icon='SETTINGS')
+        box.prop(props, "output_mode", text="Reconstruction")
 
         row = box.row(align=True)
         row.prop(props, "lateral_resolution_mm", text="Lateral (mm)")
         row.prop(props, "axial_resolution_mm", text="Axial (mm)")
+
+        if getattr(props, "output_mode", "") == OUTPUT_MODE_DRR:
+            drr_box = box.box()
+            drr_box.label(text="DRR Geometry", icon='CAMERA_DATA')
+            drr_box.prop(props, "drr_resolution_scale")
+            camera_obj = context.scene.camera
+            if camera_obj and camera_obj.type == 'CAMERA':
+                detector_width, detector_height = resolve_drr_detector_size(
+                    context.scene,
+                    resolution_scale=get_float_prop(props, "drr_resolution_scale", 1.0),
+                )
+                drr_box.label(text=f"Active Camera: {camera_obj.name}", icon='CAMERA_DATA')
+                drr_box.label(text=f"Detector: {detector_width} x {detector_height} px", icon='IMAGE_DATA')
+            else:
+                drr_box.label(text="No active scene camera", icon='ERROR')
 
         box.prop(props, "apply_modifiers", text="Apply Modifiers/Deformations")
         box.prop(props, "export_directory")
@@ -212,72 +243,80 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
 
         box.prop(props, "series_description")
 
-        artifact_box = box.box()
         modality = getattr(props, "imaging_modality", None)
         is_mri = modality in MRI_MODALITIES
-        artifact_box.label(text="MRI Artifacts" if is_mri else "CT Artifacts", icon='SHADERFX')
-
-        gaussian_box = artifact_box.box()
-        gaussian_box.label(text="Gaussian Noise", icon='RNDCURVE')
-        gaussian_box.prop(props, "enable_noise")
-        if props.enable_noise:
-            label = "Std. Dev." if is_mri else "Std. Dev. (HU)"
-            gaussian_box.prop(props, "noise_std_dev_hu", text=label)
-
-        if is_mri:
-            bias_box = artifact_box.box()
-            bias_box.label(text="Bias Field Shading", icon='OUTLINER_OB_LIGHTPROBE')
-            bias_box.prop(props, "enable_bias_field")
-            if props.enable_bias_field:
-                bias_box.prop(props, "bias_field_strength")
-                bias_box.prop(props, "bias_field_scale")
+        if getattr(props, "output_mode", "") == OUTPUT_MODE_DRR:
+            note_box = box.box()
+            note_box.label(text="DRR Notes", icon='INFO')
+            note_box.label(text="Projection uses the active scene camera geometry.")
+            note_box.label(text="Voxel spacing controls attenuation sampling fidelity.")
+            if is_mri:
+                note_box.label(text="CT modality presets are recommended for DRR attenuation.", icon='ERROR')
         else:
-            partial_box = artifact_box.box()
-            partial_box.label(text="Partial Volume Blur", icon='MOD_SMOOTH')
-            partial_box.prop(props, "enable_partial_volume")
-            if props.enable_partial_volume:
-                row = partial_box.row(align=True)
-                row.prop(props, "partial_volume_kernel")
-                row.prop(props, "partial_volume_iterations")
-                partial_box.prop(props, "partial_volume_mix")
+            artifact_box = box.box()
+            artifact_box.label(text="MRI Artifacts" if is_mri else "CT Artifacts", icon='SHADERFX')
 
-            metal_box = artifact_box.box()
-            metal_box.label(text="Metal Streaks", icon='MOD_SIMPLIFY')
-            metal_box.prop(props, "enable_metal_artifacts")
-            if props.enable_metal_artifacts:
-                row = metal_box.row(align=True)
-                row.prop(props, "metal_intensity")
-                row.prop(props, "metal_density_threshold")
-                row = metal_box.row(align=True)
-                row.prop(props, "metal_num_streaks")
-                row.prop(props, "metal_falloff")
+            gaussian_box = artifact_box.box()
+            gaussian_box.label(text="Gaussian Noise", icon='RNDCURVE')
+            gaussian_box.prop(props, "enable_noise")
+            if props.enable_noise:
+                label = "Std. Dev." if is_mri else "Std. Dev. (HU)"
+                gaussian_box.prop(props, "noise_std_dev_hu", text=label)
 
-            ring_box = artifact_box.box()
-            ring_box.label(text="Ring Artifacts", icon='MATSHADERBALL')
-            ring_box.prop(props, "enable_ring_artifacts")
-            if props.enable_ring_artifacts:
-                ring_box.prop(props, "ring_intensity")
-                row = ring_box.row(align=True)
-                row.prop(props, "ring_radius")
-                row.prop(props, "ring_thickness")
-                ring_box.prop(props, "ring_jitter")
+            if is_mri:
+                bias_box = artifact_box.box()
+                bias_box.label(text="Bias Field Shading", icon='OUTLINER_OB_LIGHTPROBE')
+                bias_box.prop(props, "enable_bias_field")
+                if props.enable_bias_field:
+                    bias_box.prop(props, "bias_field_strength")
+                    bias_box.prop(props, "bias_field_scale")
+            else:
+                partial_box = artifact_box.box()
+                partial_box.label(text="Partial Volume Blur", icon='MOD_SMOOTH')
+                partial_box.prop(props, "enable_partial_volume")
+                if props.enable_partial_volume:
+                    row = partial_box.row(align=True)
+                    row.prop(props, "partial_volume_kernel")
+                    row.prop(props, "partial_volume_iterations")
+                    partial_box.prop(props, "partial_volume_mix")
 
-            poisson_box = artifact_box.box()
-            poisson_box.label(text="Poisson Noise", icon='PARTICLES')
-            poisson_box.prop(props, "enable_poisson_noise")
-            if props.enable_poisson_noise:
-                poisson_box.prop(props, "poisson_scale")
+                metal_box = artifact_box.box()
+                metal_box.label(text="Metal Streaks", icon='MOD_SIMPLIFY')
+                metal_box.prop(props, "enable_metal_artifacts")
+                if props.enable_metal_artifacts:
+                    row = metal_box.row(align=True)
+                    row.prop(props, "metal_intensity")
+                    row.prop(props, "metal_density_threshold")
+                    row = metal_box.row(align=True)
+                    row.prop(props, "metal_num_streaks")
+                    row.prop(props, "metal_falloff")
 
-        motion_box = artifact_box.box()
-        motion_box.label(text="Motion Blur", icon='ARROW_LEFTRIGHT')
-        motion_box.prop(props, "enable_motion_artifact")
-        if props.enable_motion_artifact:
-            row = motion_box.row(align=True)
-            row.prop(props, "motion_blur_size")
-            row.prop(props, "motion_axis")
-            motion_box.prop(props, "motion_severity")
+                ring_box = artifact_box.box()
+                ring_box.label(text="Ring Artifacts", icon='MATSHADERBALL')
+                ring_box.prop(props, "enable_ring_artifacts")
+                if props.enable_ring_artifacts:
+                    ring_box.prop(props, "ring_intensity")
+                    row = ring_box.row(align=True)
+                    row.prop(props, "ring_radius")
+                    row.prop(props, "ring_thickness")
+                    ring_box.prop(props, "ring_jitter")
 
-        if PYDICOM_AVAILABLE:
+                poisson_box = artifact_box.box()
+                poisson_box.label(text="Poisson Noise", icon='PARTICLES')
+                poisson_box.prop(props, "enable_poisson_noise")
+                if props.enable_poisson_noise:
+                    poisson_box.prop(props, "poisson_scale")
+
+            motion_box = artifact_box.box()
+            motion_box.label(text="Motion Blur", icon='ARROW_LEFTRIGHT')
+            motion_box.prop(props, "enable_motion_artifact")
+            if props.enable_motion_artifact:
+                row = motion_box.row(align=True)
+                row.prop(props, "motion_blur_size")
+                row.prop(props, "motion_axis")
+                motion_box.prop(props, "motion_severity")
+
+        if ensure_pydicom_available():
             export_dir = get_str_prop(props, "export_directory", "")
             if export_dir.startswith('//'):
                 relative_path = export_dir[2:].replace('/', os.sep).replace('\\', os.sep)
@@ -322,15 +361,20 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
 
                         if est_total > 100_000_000:
                             layout.label(text="Grid very large - may be slow or fail (memory)", icon='ERROR')
-                        layout.operator("mesh.export_dicom", text="Export to DICOM", icon='EXPORT')
+                        button_text = "Export DRR" if getattr(props, "output_mode", "") == OUTPUT_MODE_DRR else "Export to DICOM"
+                        layout.operator("mesh.export_dicom", text=button_text, icon='EXPORT')
                     else:
-                        layout.operator("mesh.export_dicom", text="Export to DICOM", icon='EXPORT')
+                        button_text = "Export DRR" if getattr(props, "output_mode", "") == OUTPUT_MODE_DRR else "Export to DICOM"
+                        layout.operator("mesh.export_dicom", text=button_text, icon='EXPORT')
                 else:
                     layout.label(text="Select a mesh object to export", icon='INFO')
             else:
                 layout.label(text="Please select export directory", icon='INFO')
         else:
             layout.label(text="pydicom library not available", icon='ERROR')
+            error_detail = get_pydicom_error()
+            if error_detail:
+                layout.label(text=error_detail[:120], icon='INFO')
 
 
 __all__ = [

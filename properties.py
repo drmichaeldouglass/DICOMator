@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import bpy
 
-from .constants import IMAGING_MODALITY_ITEMS, get_material_intensity
+from .constants import IMAGING_MODALITY_ITEMS, OUTPUT_MODE_ITEMS, get_material_intensity
 
 
 def apply_material_intensity(obj: bpy.types.Object, modality: str) -> None:
@@ -46,6 +46,13 @@ def update_object_material(self, context: bpy.types.Context) -> None:
 
 class DICOMatorProperties(bpy.types.PropertyGroup):
     """Properties exposed in the DICOMator UI."""
+
+    output_mode: bpy.props.EnumProperty(
+        name="Reconstruction",
+        description="Choose whether to export a synthetic volume or a digital reconstructed radiograph",
+        items=OUTPUT_MODE_ITEMS,
+        default=OUTPUT_MODE_ITEMS[0][0],
+    )
 
     patient_name: bpy.props.StringProperty(
         name="Patient Name",
@@ -90,8 +97,8 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
         update=update_imaging_modality,
     )
     export_4d: bpy.props.BoolProperty(
-        name="Export 4D (use animated frames)",
-        description="Export each selected animation frame as a 4D CT phase",
+        name="Export 4D/Time Series",
+        description="Export each selected animation frame as a separate phase or projection",
         default=False,
     )
     use_timeline_range: bpy.props.BoolProperty(
@@ -139,6 +146,14 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
         name="Apply Modifiers/Deformations",
         description="Evaluate modifiers/shape keys/armatures/lattices when voxelizing",
         default=True,
+    )
+    drr_resolution_scale: bpy.props.FloatProperty(
+        name="DRR Resolution Scale",
+        description="Scale factor applied to the scene render resolution when generating the DRR detector image",
+        default=1.0,
+        min=0.1,
+        max=2.0,
+        precision=2,
     )
     export_directory: bpy.props.StringProperty(
         name="Export Directory",

@@ -1,6 +1,6 @@
 # DICOMator
 
-Blender add-on that converts selected mesh objects into a DICOM image series (CT or MR-style). It voxelizes the active mesh selection directly into modality-appropriate intensities, supports single-phase or 4D acquisitions, and layers in synthetic artifacts tailored to the chosen modality for training or visualization workflows.
+Blender add-on that converts selected mesh objects into DICOM outputs for either synthetic CT/MR image series or camera-based digital reconstructed radiographs (DRRs). It voxelizes the active mesh selection directly into modality-appropriate intensities, supports single-phase or 4D acquisitions, and layers in synthetic artifacts tailored to the chosen modality for training or visualization workflows.
 
 ## Features
 
@@ -14,6 +14,10 @@ Blender add-on that converts selected mesh objects into a DICOM image series (CT
   - Export the current frame or a range of frames (timeline or custom range)
   - One `SeriesInstanceUID` per phase; phases are written as separate series with temporal DICOM tags (`NumberOfTemporalPositions`, `TemporalPositionIndex`, `TemporalPositionIdentifier`)
   - Timeline advances during 4D export and a fixed padded bounding box keeps grids aligned between phases
+- **Camera-based DRR generation**
+  - Switch the reconstruction mode from synthetic volume export to DRR
+  - The DRR is generated from the active scene camera using a Beer-Lambert projection through the voxelized HU volume
+  - Detector size follows the Blender render resolution with an optional DRR resolution scale
 - **Voxelization control**
   - Independent lateral (XY) and axial (Z) voxel size in millimeters
   - Optional evaluation of modifiers/shape keys/armatures during voxelization
@@ -51,22 +55,28 @@ Blender add-on that converts selected mesh objects into a DICOM image series (CT
 1. Select one or more mesh objects in the 3D Viewport.
 2. In **Sidebar → DICOMator**, configure the panels:
    - **Selection Info** – Inspect selection size, estimated grid resolution, voxel count, and memory. Guardrails warn when exceeding 2,000 voxels per axis or 100M total voxels.
-  - **Per-Object HU** – Assign HU values or pick modality-aware tissue presets for each selected mesh. When meshes overlap, alphabetical ordering of object names decides the winning intensity (last name wins).
+     - When DRR mode is active, the panel also shows the active camera and estimated detector pixel dimensions.
+   - **Per-Object HU** – Assign HU values or pick modality-aware tissue presets for each selected mesh. When meshes overlap, alphabetical ordering of object names decides the winning intensity (last name wins).
    - **Patient Information** – Set patient name, MRN, and sex.
    - **Image Orientation** – Choose the Patient Position tag applied to the DICOM slices.
    - **Export Settings**
+     - Choose **Reconstruction**:
+       - **Synthetic Volume** – writes CT or MR slices according to the selected imaging modality
+       - **DRR** – writes a camera-based projection image from the active scene camera
      - Configure **Lateral (mm)** and **Axial (mm)** voxel spacing
      - Toggle **Apply Modifiers/Deformations** to evaluate modifiers, armatures, and shape keys during voxelization
+     - In DRR mode, set **DRR Resolution Scale** to scale the Blender render resolution used for the projection detector
      - Choose an **Export Directory** (supports `//` relative paths)
      - Toggle **Export 4D** to export multiple frames
        - Use the timeline range or set a custom `Start`/`End`/`Frame Step`
      - Enter a **Series Description** (used directly or extended per phase)
-   - **Artifact Controls** – The panel title changes with the modality:
+   - **Artifact Controls** – Available for synthetic volume export only. The panel title changes with the modality:
      - *CT*: Gaussian noise, partial volume blur, metal streaks, ring artifacts, motion blur, and Poisson noise
      - *MRI (T1/T2)*: Gaussian noise (intensity-scaled), low-frequency coil bias-field shading, and motion blur
-3. Click **Export to DICOM**.
+3. Click **Export to DICOM** or **Export DRR**.
    - For single-phase exports the mesh selection is voxelized once and written directly in HU.
    - For 4D exports the timeline advances through the configured frame range, re-voxelizing each phase inside a fixed padded bounding box so every phase shares identical grid dimensions. Each phase receives its own Series Instance UID and the series description is suffixed with the phase number and percent completion.
+   - In DRR mode, the voxelized HU volume is projected from the active camera into a single DICOM secondary-capture image per phase. If MRI presets are selected, the export still works, but CT presets are recommended because the DRR attenuation model assumes HU-like values.
 
 Notes:
 - During 4D export the timeline visibly advances; keep animation drivers and dependencies evaluated.
@@ -75,14 +85,22 @@ Notes:
 
 ## Output details
 
-- Modality: CT (`CTImageStorage`) or MR (`MRImageStorage`) depending on the selected imaging modality
-- Data type: int16 signed (direct HU/intensity values)
-- Window: CT exports default to Center 40 / Width 400; MR exports use Center 128 / Width 256
-- Geometry:
-  - `PixelSpacing = [voxel_size_mm_y, voxel_size_mm_x]`
-  - `SliceThickness = SpacingBetweenSlices = voxel_size_mm_z`
-  - `ImageOrientationPatient = [1,0,0, 0,1,0]` (axial, aligned to world axes)
-  - `ImagePositionPatient` derived from the padded world-space bounding box origin
+- **Synthetic Volume mode**
+  - Modality: CT (`CTImageStorage`) or MR (`MRImageStorage`) depending on the selected imaging modality
+  - Data type: int16 signed (direct HU/intensity values)
+  - Window: CT exports default to Center 40 / Width 400; MR exports use Center 128 / Width 256
+  - Geometry:
+    - `PixelSpacing = [voxel_size_mm_y, voxel_size_mm_x]`
+    - `SliceThickness = SpacingBetweenSlices = voxel_size_mm_z`
+    - `ImageOrientationPatient = [1,0,0, 0,1,0]` (axial, aligned to world axes)
+    - `ImagePositionPatient` derived from the padded world-space bounding box origin
+- **DRR mode**
+  - Storage class: Secondary Capture (`SecondaryCaptureImageStorage`) with `ImageType = DERIVED\\PRIMARY\\DRR`
+  - Data type: uint16 monochrome projection image
+  - Geometry:
+    - `PixelSpacing` follows the active camera detector plane dimensions divided by detector pixels
+    - `ImageOrientationPatient` follows the active camera detector row/column axes
+    - `ImagePositionPatient` is written from the detector plane top-left corner in world coordinates
 - Temporal DICOM tags (4D only):
   - `NumberOfTemporalPositions` (total phases)
   - `TemporalPositionIndex` (timeline frame number)
@@ -108,8 +126,10 @@ Notes:
 ## Known limitations
 
 - Voxelization is axis-aligned and uses +Z column fills; only mesh geometry is sampled (materials/textures are ignored).
+- DRR generation currently projects the voxelized volume rather than the original triangle mesh, so image sharpness depends on the chosen voxel spacing.
 - Modifier/armature evaluation is optional but increases memory/time usage; complex rigs may still require baking.
 - Output orientation is fixed to axial slices aligned with Blender world axes.
+- DRR export requires an active scene camera and currently uses the existing HU grid without the synthetic CT/MR artifact stack.
 - Only the modality-specific artifacts listed above are available; additional acquisition effects are not modeled in this release.
 
 ## Troubleshooting
@@ -118,6 +138,8 @@ Notes:
   - Install `pydicom` in Blender’s Python or use the helper script to fetch wheels, then restart Blender.
 - **“Grid too large”**
   - Increase voxel spacing (mm), reduce padding/selection size, or limit the frame range.
+- **“Set an active scene camera before exporting a DRR”**
+  - Assign a camera to the scene (`Scene Properties → Camera`) or make a camera active in the 3D View before DRR export.
 - **“Output directory is not writable”**
   - Choose a folder with write permissions; for `//` paths, save your `.blend` so the relative path resolves.
 - **Artifacts look too strong/weak**
