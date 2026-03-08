@@ -118,10 +118,10 @@ Notes:
   - `TemporalPositionIndex` (timeline frame number)
   - `TemporalPositionIdentifier` (1-based phase index)
 
-![skull_multi](https://github.com/user-attachments/assets/b1c62567-4189-4a66-812f-005b57629184)
-![skull_dose_lat](https://github.com/user-attachments/assets/eca22ede-4a6f-47ca-a82c-e53dccb0649d)
-![Lung_geometry](https://github.com/user-attachments/assets/8eb7a3ce-fbaf-4d7d-b70d-33e7b808e0fd)
-![Lung](https://github.com/user-attachments/assets/77e204bd-2a70-46bb-af8f-c3327ef7eb8f)
+<img src="https://github.com/user-attachments/assets/b1c62567-4189-4a66-812f-005b57629184" alt="skull_multi" width="420" />
+<img src="https://github.com/user-attachments/assets/eca22ede-4a6f-47ca-a82c-e53dccb0649d" alt="skull_dose_lat" width="420" />
+<img src="https://github.com/user-attachments/assets/8eb7a3ce-fbaf-4d7d-b70d-33e7b808e0fd" alt="Lung_geometry" width="420" />
+<img src="https://github.com/user-attachments/assets/77e204bd-2a70-46bb-af8f-c3327ef7eb8f" alt="Lung" width="420" />
 
 ## Performance and limits
 
