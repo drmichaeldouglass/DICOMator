@@ -41,7 +41,15 @@ Blender add-on that converts selected mesh objects into DICOM outputs for either
 - NumPy (bundled with Blender, used for grid operations)
 - pydicom (required for DICOM export; the add-on warns and disables export if missing)
 - Optional helper wheels
-  - Run `download_wheels.py` to download Windows-compatible wheels (pydicom, scikit-image, SciPy) into `./wheels`
+  - Run `download_wheels.py` to download a Blender-targeted `pydicom` wheel into `./wheels` (defaults to Blender 5.1 / Python 3.13 tags, overrideable via environment variables)
+
+## Blender 5.1 compatibility review
+
+- Reviewed against the Blender 5.1 Python API changes listed in the release notes shared in this issue. The add-on does **not** call any of the renamed VSE strip properties, removed brush stroke flags, `sculpt.sample_color`, deprecated `UILayout.template_list(columns=...)`, GPU framebuffer read helpers, or the new exit/cachedir APIs, so no Blender 5.1 API breakage was found in those areas.
+- The add-on has **no OpenVDB dependency**. Voxelization is performed with Blender mesh evaluation, `mathutils.bvhtree.BVHTree`, and NumPy arrays, so the OpenVDB 13.x update does not affect the current code path.
+- NumPy 2.x compatibility was tightened by replacing the direct `np.array(..., copy=False)` conversion used during DICOM export with `np.asarray(...)`, which avoids the stricter copy semantics introduced in NumPy 2.0+.
+- Extension packaging was cleaned up so the manifest only advertises the vendored `pydicom` wheel that the add-on actually uses. The previous manifest listed SciPy and scikit-image wheels that are not required by the codebase and were not present in the repository.
+- Remaining caveat: the repository still vendors `pydicom 2.3.1`, which is pure Python and may continue to work, but it predates Blender 5.1's Python 3.13 runtime. If you package this add-on specifically for Blender 5.1, refresh the wheel with `download_wheels.py` once you have network access to a Python-3.13-compatible `pydicom` release.
 
 ## Installation
 

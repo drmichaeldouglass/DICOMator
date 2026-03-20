@@ -63,7 +63,7 @@ def export_voxel_grid_to_dicom(
 
     num_slices = voxel_grid.shape[2]
     if direct_hu:
-        hu_grid = np.array(voxel_grid, dtype=np.int16, copy=False)
+        hu_grid = np.asarray(voxel_grid, dtype=np.int16)
     else:
         hu_grid = np.where(voxel_grid > 0, DEFAULT_DENSITY, AIR_DENSITY).astype(np.int16, copy=False)
     hu_grid = np.clip(hu_grid, MIN_HU_VALUE, MAX_HU_VALUE).astype(np.int16, copy=False)

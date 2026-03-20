@@ -30,7 +30,7 @@ from .voxelization import voxelize_mesh, voxelize_objects_to_hu
 bl_info = {
     "name": "DICOMator",
     "author": "Michael Douglass",
-    "version": (3, 1, 0),
+    "version": (3, 1, 1),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > DICOMator",
     "description": "Converts mesh objects into synthetic CT/MR series or camera-based DRR DICOM images",
