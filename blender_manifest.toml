@@ -7,7 +7,7 @@ maintainer = "Michael Douglass"
 type = "add-on"
 website = "https://github.com/drmichaeldouglass/DICOMator"
 blender_version_min = "4.2.0"
-license = ["SPDX:GPL-3.0-or-later"]
+license = ["SPDX:MIT"]
 tags = ["3D View", "Medical", "CT", "DICOM"]
 copyright = ["2024 Michael Douglass"]
 platforms = ["windows-x64","macos-arm64"]
@@ -18,4 +18,3 @@ wheels = [
 # Required permissions for file operations
 [permissions]
 files = "Save DICOM files to disk"
-

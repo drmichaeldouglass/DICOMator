@@ -297,7 +297,9 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
                 if props.enable_ring_artifacts:
                     ring_box.prop(props, "ring_intensity")
                     row = ring_box.row(align=True)
-                    row.prop(props, "ring_radius")
+                    row.prop(props, "ring_random_radius")
+                    if not props.ring_random_radius:
+                        row.prop(props, "ring_radius")
                     row.prop(props, "ring_thickness")
                     ring_box.prop(props, "ring_jitter")
 

@@ -92,6 +92,7 @@ Dependency note:
      - Enter a **Series Description** (used directly or extended per phase)
    - **Artifact Controls** – Available for synthetic volume export only. The panel title changes with the modality:
      - *CT*: Gaussian noise, partial volume blur, metal streaks, ring artifacts, motion blur, and Poisson noise
+       - Ring artifacts can use either a fixed relative radius or a randomized radius per export
      - *MRI (T1/T2)*: Gaussian noise (intensity-scaled), low-frequency coil bias-field shading, and motion blur
 3. Click **Export to DICOM** or **Export DRR**.
    - For single-phase exports the mesh selection is voxelized once and written directly in HU.
@@ -123,8 +124,8 @@ Notes:
     - `ImagePositionPatient` is written from the detector plane top-left corner in world coordinates
 - Temporal DICOM tags (4D only):
   - `NumberOfTemporalPositions` (total phases)
-  - `TemporalPositionIndex` (timeline frame number)
-  - `TemporalPositionIdentifier` (1-based phase index)
+  - `TemporalPositionIndex` (1-based phase order)
+  - `TemporalPositionIdentifier` (1-based phase order)
 
 <img src="https://github.com/user-attachments/assets/b1c62567-4189-4a66-812f-005b57629184" alt="skull_multi" width="420" />
 <img src="https://github.com/user-attachments/assets/eca22ede-4a6f-47ca-a82c-e53dccb0649d" alt="skull_dose_lat" width="420" />

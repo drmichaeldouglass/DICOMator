@@ -88,7 +88,7 @@ def _apply_configured_artifacts(hu_array, props):
 
     if getattr(props, "enable_ring_artifacts", False) and is_ct:
         ring_intensity = max(0.0, get_float_prop(props, "ring_intensity", 80.0))
-        ring_radius = get_float_prop(props, "ring_radius", 0.5)
+        ring_radius = None if getattr(props, "ring_random_radius", False) else get_float_prop(props, "ring_radius", 0.5)
         thickness = max(0.0, get_float_prop(props, "ring_thickness", 0.02))
         jitter = max(0.0, get_float_prop(props, "ring_jitter", 0.02))
         result = add_ring_artifacts(
@@ -457,7 +457,7 @@ class MESH_OT_export_dicom(Operator):
                             series_number=phase_index,
                             instance_number=1,
                             number_of_temporal_positions=num_phases if num_phases > 1 else None,
-                            temporal_position_index=frame if num_phases > 1 else None,
+                            temporal_position_index=phase_index if num_phases > 1 else None,
                             temporal_position_identifier=phase_index if num_phases > 1 else None,
                         )
                     else:
@@ -480,7 +480,7 @@ class MESH_OT_export_dicom(Operator):
                             series_instance_uid=series_uid,
                             series_number=phase_index,
                             number_of_temporal_positions=num_phases if num_phases > 1 else None,
-                            temporal_position_index=frame if num_phases > 1 else None,
+                            temporal_position_index=phase_index if num_phases > 1 else None,
                             temporal_position_identifier=phase_index if num_phases > 1 else None,
                             phase_index=phase_index if num_phases > 1 else None,
                         )

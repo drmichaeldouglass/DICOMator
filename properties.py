@@ -278,9 +278,14 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
         soft_max=500.0,
         step=10,
     )
+    ring_random_radius: bpy.props.BoolProperty(
+        name="Random Radius",
+        description="Choose a random ring radius for each export",
+        default=False,
+    )
     ring_radius: bpy.props.FloatProperty(
         name="Ring Radius (rel)",
-        description="Relative radius of the ring (0=center, 1=edge). Set to 0.0-1.0 or leave default to choose randomly",
+        description="Relative radius of the ring (0=center, 1=edge) when random radius is disabled",
         default=0.5,
         min=0.0,
         max=1.0,

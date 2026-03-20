@@ -43,6 +43,8 @@ def _moving_average_along_axis(array: np.ndarray, kernel_size: int, axis: int) -
         return np.convolve(v, kernel, mode="same")
 
     smoothed = np.apply_along_axis(_conv_row, -1, moved)
+    if smoothed.shape != moved.shape:
+        smoothed = _ensure_shape_like(smoothed, moved.shape)
 
     return np.moveaxis(smoothed, -1, axis)
 
@@ -262,9 +264,9 @@ def add_ring_artifacts(
         Input HU volume.
     ring_intensity:
         Maximum amplitude in HU applied to the generated rings.
-    num_rings:
-        Range ``(min_rings, max_rings)`` that controls the number of rings in
-        the base pattern.
+    ring_radius:
+        Relative radius of the ring (0 = center, 1 = edge). When ``None``, a
+        random radius is chosen for the exported volume.
     jitter:
         Standard deviation of a low-amplitude speckle field mixed with the
         rings to avoid perfectly smooth structures.

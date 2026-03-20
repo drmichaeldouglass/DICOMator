@@ -4,6 +4,8 @@ from __future__ import annotations
 import importlib
 import logging
 
+LOGGER = logging.getLogger(__name__)
+
 AIR_DENSITY = -1000.0  # HU value for air (DICOM standard reference for air)
 DEFAULT_DENSITY = 0.0   # Default HU for objects unless overridden per-object
 MAX_HU_VALUE = 3071     # Max HU for 12-bit CT representations
@@ -233,4 +235,3 @@ __all__ = [
     "generate_uid",
     "pydicom",
 ]
-LOGGER = logging.getLogger(__name__)
