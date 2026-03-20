@@ -49,7 +49,7 @@ Blender add-on that converts selected mesh objects into DICOM outputs for either
 - The add-on has **no OpenVDB dependency**. Voxelization is performed with Blender mesh evaluation, `mathutils.bvhtree.BVHTree`, and NumPy arrays, so the OpenVDB 13.x update does not affect the current code path.
 - NumPy 2.x compatibility was tightened by replacing the direct `np.array(..., copy=False)` conversion used during DICOM export with `np.asarray(...)`, which avoids the stricter copy semantics introduced in NumPy 2.0+.
 - Extension packaging was cleaned up so the manifest only advertises the vendored `pydicom` wheel that the add-on actually uses. The previous manifest listed SciPy and scikit-image wheels that are not required by the codebase and were not present in the repository.
-- Remaining caveat: the repository still vendors `pydicom 2.3.1`, which is pure Python and may continue to work, but it predates Blender 5.1's Python 3.13 runtime. If you package this add-on specifically for Blender 5.1, refresh the wheel with `download_wheels.py` once you have network access to a Python-3.13-compatible `pydicom` release.
+- The repository now vendors `pydicom 3.0.1` (`py3-none-any`), which requires Python 3.10+ and is compatible with NumPy 2.x and Python 3.13, matching Blender 5.1's runtime.
 
 ## Installation
 

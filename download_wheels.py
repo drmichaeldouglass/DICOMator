@@ -21,7 +21,7 @@ def main() -> None:
     abi_tag = os.environ.get("BLENDER_ABI", _python_tag(blender_python))
     packages = [
         pkg.strip()
-        for pkg in os.environ.get("DICOMATOR_WHEEL_PACKAGES", "pydicom==2.3.1").split(',')
+        for pkg in os.environ.get("DICOMATOR_WHEEL_PACKAGES", "pydicom==3.0.1").split(',')
         if pkg.strip()
     ]
 

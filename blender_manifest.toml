@@ -12,7 +12,7 @@ tags = ["3D View", "Medical", "CT", "DICOM"]
 copyright = ["2024 Michael Douglass"]
 platforms = ["windows-x64","macos-arm64"]
 wheels = [
-    "./wheels/pydicom-2.3.1-py3-none-any.whl"
+    "./wheels/pydicom-3.0.1-py3-none-any.whl"
 ]
 
 # Required permissions for file operations
