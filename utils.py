@@ -1,6 +1,8 @@
 """Utility helpers for Blender property access and UI refresh."""
 from __future__ import annotations
 
+import os
+
 import bpy
 
 
@@ -22,6 +24,24 @@ def get_str_prop(props, name: str, default: str) -> str:
         return str(default)
 
 
+def resolve_output_directory(output_dir: str) -> str:
+    """Resolve Blender-relative paths into an absolute export directory."""
+
+    resolved_dir = str(output_dir or "").strip()
+    if not resolved_dir:
+        return ""
+
+    if resolved_dir.startswith('//'):
+        relative_path = resolved_dir[2:].replace('/', os.sep).replace('\\', os.sep)
+        if bpy.data.filepath:
+            blend_dir = os.path.dirname(bpy.data.filepath)
+            resolved_dir = os.path.join(blend_dir, relative_path)
+        else:
+            resolved_dir = os.path.join(os.getcwd(), relative_path)
+
+    return os.path.abspath(os.path.normpath(resolved_dir))
+
+
 def force_ui_redraw() -> None:
     """Trigger a UI redraw so timeline/frame changes are visible to the user."""
     try:
@@ -34,4 +54,9 @@ def force_ui_redraw() -> None:
                     area.tag_redraw()
 
 
-__all__ = ["get_float_prop", "get_str_prop", "force_ui_redraw"]
+__all__ = [
+    "get_float_prop",
+    "get_str_prop",
+    "resolve_output_directory",
+    "force_ui_redraw",
+]

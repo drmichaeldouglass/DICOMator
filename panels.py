@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import math
-import os
 
 import bpy
 from bpy.types import Context, Panel
@@ -10,7 +9,7 @@ from mathutils import Vector
 
 from .constants import MRI_MODALITIES, OUTPUT_MODE_DRR, ensure_pydicom_available, get_pydicom_error
 from .drr import resolve_drr_detector_size
-from .utils import get_float_prop, get_str_prop
+from .utils import get_float_prop, get_str_prop, resolve_output_directory
 
 
 class VIEW3D_PT_dicomator_panel(Panel):
@@ -231,14 +230,8 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
             col.prop(props, "frame_step")
 
         export_dir_val = get_str_prop(props, "export_directory", "")
-        if export_dir_val.startswith('//'):
-            relative_path = export_dir_val[2:].replace('/', os.sep).replace('\\', os.sep)
-            if bpy.data.filepath:
-                blend_dir = os.path.dirname(bpy.data.filepath)
-                resolved_path = os.path.join(blend_dir, relative_path)
-            else:
-                resolved_path = os.path.join(os.getcwd(), relative_path)
-            resolved_path = os.path.abspath(os.path.normpath(resolved_path))
+        resolved_path = resolve_output_directory(export_dir_val)
+        if resolved_path and export_dir_val.strip().startswith('//'):
             box.label(text=f"Resolved: {resolved_path}", icon='FILE_FOLDER')
 
         box.prop(props, "series_description")
@@ -319,15 +312,7 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
                 motion_box.prop(props, "motion_severity")
 
         if ensure_pydicom_available():
-            export_dir = get_str_prop(props, "export_directory", "")
-            if export_dir.startswith('//'):
-                relative_path = export_dir[2:].replace('/', os.sep).replace('\\', os.sep)
-                if bpy.data.filepath:
-                    blend_dir = os.path.dirname(bpy.data.filepath)
-                    export_dir = os.path.join(blend_dir, relative_path)
-                else:
-                    export_dir = os.path.join(os.getcwd(), relative_path)
-                export_dir = os.path.abspath(os.path.normpath(export_dir))
+            export_dir = resolve_output_directory(get_str_prop(props, "export_directory", ""))
 
             if export_dir and export_dir.strip():
                 if context.active_object and context.active_object.type == 'MESH':

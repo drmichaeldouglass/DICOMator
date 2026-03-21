@@ -159,7 +159,7 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
         name="Export Directory",
         description="Directory to save DICOM files",
         subtype='DIR_PATH',
-        default="C:\\Users\\Public\\DICOM_Export",
+        default="//DICOM_Export",
     )
     series_description: bpy.props.StringProperty(
         name="Series Description",
