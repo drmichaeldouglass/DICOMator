@@ -28,7 +28,7 @@ from .constants import (
 )
 from .dicom_export import export_projection_to_dicom, export_voxel_grid_to_dicom
 from .drr import generate_drr_from_hu_volume
-from .utils import force_ui_redraw, get_float_prop
+from .utils import force_ui_redraw, get_float_prop, resolve_output_directory
 from .voxelization import voxelize_objects_to_hu
 
 
@@ -39,20 +39,6 @@ def _get_int_prop(props, name: str, default: int) -> int:
         return int(getattr(props, name))
     except Exception:
         return int(default)
-
-
-def _resolve_output_directory(output_dir: str) -> str:
-    """Resolve Blender-relative paths into an absolute output directory."""
-
-    resolved_dir = str(output_dir or "")
-    if resolved_dir.startswith('//'):
-        relative_path = resolved_dir[2:].replace('/', os.sep).replace('\\', os.sep)
-        if bpy.data.filepath:
-            blend_dir = os.path.dirname(bpy.data.filepath)
-            resolved_dir = os.path.join(blend_dir, relative_path)
-        else:
-            resolved_dir = os.path.join(os.getcwd(), relative_path)
-    return os.path.abspath(os.path.normpath(resolved_dir))
 
 
 def _apply_configured_artifacts(hu_array, props):
@@ -306,7 +292,7 @@ class MESH_OT_export_dicom(Operator):
             return {'CANCELLED'}
 
         props = context.scene.dicomator_props
-        output_dir = _resolve_output_directory(props.export_directory)
+        output_dir = resolve_output_directory(props.export_directory)
         if not output_dir:
             self.report({'ERROR'}, "Please specify an export directory")
             return {'CANCELLED'}

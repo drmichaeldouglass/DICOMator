@@ -31,6 +31,7 @@ Blender add-on that converts selected mesh objects into DICOM outputs for either
   - Customizable Series Description per export or phase
 - **Export path handling and progress feedback**
   - Accepts Blender-relative paths starting with `//` (resolved relative to the `.blend` file or current working directory)
+  - Defaults to `//DICOM_Export` so a new install starts with a portable export location instead of an OS-specific absolute path
   - Progress bar feedback for voxelization and slice writing
 - **Selection insights**
   - Live estimates of grid dimensions, voxel counts, and approximate memory usage before export
@@ -86,7 +87,7 @@ Dependency note:
      - Configure **Lateral (mm)** and **Axial (mm)** voxel spacing
      - Toggle **Apply Modifiers/Deformations** to evaluate modifiers, armatures, and shape keys during voxelization
      - In DRR mode, set **DRR Resolution Scale** to scale the Blender render resolution used for the projection detector
-     - Choose an **Export Directory** (supports `//` relative paths)
+     - Choose an **Export Directory** (supports `//` relative paths and defaults to `//DICOM_Export`)
      - Toggle **Export 4D** to export multiple frames
        - Use the timeline range or set a custom `Start`/`End`/`Frame Step`
      - Enter a **Series Description** (used directly or extended per phase)
@@ -163,7 +164,7 @@ Notes:
 - **“Set an active scene camera before exporting a DRR”**
   - Assign a camera to the scene (`Scene Properties → Camera`) or make a camera active in the 3D View before DRR export.
 - **“Output directory is not writable”**
-  - Choose a folder with write permissions; for `//` paths, save your `.blend` so the relative path resolves.
+  - Choose a folder with write permissions; blank export paths are rejected, and for `//` paths, save your `.blend` so the relative path resolves.
 - **Artifacts look too strong/weak**
   - Adjust intensity/severity controls or disable individual artifact toggles to isolate effects.
 
