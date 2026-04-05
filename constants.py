@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import importlib
 import logging
+import sys
+import zipfile
+from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
 
@@ -156,6 +159,59 @@ def get_material_intensity(material_key: str, modality: str) -> float | None:
         return None
     return intensities.get(modality)
 
+
+# ---------------------------------------------------------------------------
+# RT DICOM SOP class UIDs
+# ---------------------------------------------------------------------------
+
+#: SOP Class UID for RT Structure Set (DICOM PS3.4 B.5)
+RTSTRUCT_SOP_CLASS = "1.2.840.10008.5.1.4.1.1.481.3"
+
+#: SOP Class UID for RT Dose (DICOM PS3.4 B.5)
+RTDOSE_SOP_CLASS = "1.2.840.10008.5.1.4.1.1.481.2"
+
+# ---------------------------------------------------------------------------
+# Per-object DICOM type items (used as EnumProperty items on bpy.types.Object)
+# ---------------------------------------------------------------------------
+
+DICOM_OBJECT_TYPE_ITEMS = [
+    ("CT", "CT Volume", "Voxelize and export as a CT image series"),
+    ("RTDOSE", "RT Dose", "Voxelize and export as an RT Dose grid (Gy)"),
+    ("RTSTRUCT", "RT Structure", "Export surface contours as an RT Structure Set"),
+]
+
+# ---------------------------------------------------------------------------
+# ROI type items (DICOM RTROIInterpretedType codes, PS3.3 C.8.8.8)
+# ---------------------------------------------------------------------------
+
+ROI_TYPE_ITEMS = [
+    ("GTV", "GTV", "Gross Tumour Volume"),
+    ("CTV", "CTV", "Clinical Target Volume"),
+    ("PTV", "PTV", "Planning Target Volume"),
+    ("OAR", "OAR", "Organ At Risk"),
+    ("EXTERNAL", "External", "External patient outline / body contour"),
+    ("CONTROL", "Control", "Control ROI (e.g. dose normalisation point)"),
+    ("AVOIDANCE", "Avoidance", "Region to avoid during optimisation"),
+    ("ORGAN", "Organ", "Anatomical organ not classified as an OAR"),
+    ("TREATED_VOLUME", "Treated Volume", "Treated volume (isodose surface)"),
+    ("IRRAD_VOLUME", "Irradiated Volume", "Volume receiving a clinically significant dose"),
+]
+
+# ---------------------------------------------------------------------------
+# RT Dose metadata items
+# ---------------------------------------------------------------------------
+
+DOSE_TYPE_ITEMS = [
+    ("PHYSICAL", "Physical", "Physical absorbed dose (Gy)"),
+    ("EFFECTIVE", "Effective", "Radiobiologically weighted effective dose"),
+]
+
+DOSE_SUMMATION_TYPE_ITEMS = [
+    ("PLAN", "Plan", "Summed over all beams in the plan"),
+    ("FRACTION", "Fraction", "Dose for a single treatment fraction"),
+    ("BEAM", "Beam", "Dose from a single beam"),
+]
+
 PYDICOM_AVAILABLE = False
 Dataset = None
 FileDataset = None
@@ -176,6 +232,21 @@ def ensure_pydicom_available() -> bool:
 
     if PYDICOM_AVAILABLE and pydicom is not None and Dataset is not None and FileDataset is not None and generate_uid is not None:
         return True
+
+    # Wheels are zip archives; pydicom uses open() on __file__-relative paths
+    # (e.g. data/urls.json), which fails when the module lives inside a zip.
+    # Extract the wheel to a real directory alongside the wheel file so that
+    # normal filesystem I/O works correctly.
+    _wheels_dir = Path(__file__).parent / "wheels"
+    if _wheels_dir.is_dir():
+        for _whl in _wheels_dir.glob("pydicom*.whl"):
+            _extract_dir = _whl.parent / (_whl.stem + "_extracted")
+            if not _extract_dir.is_dir():
+                with zipfile.ZipFile(_whl) as _zf:
+                    _zf.extractall(_extract_dir)
+            _extract_str = str(_extract_dir)
+            if _extract_str not in sys.path:
+                sys.path.insert(0, _extract_str)
 
     try:
         module = importlib.import_module("pydicom")
@@ -227,6 +298,12 @@ __all__ = [
     "MATERIAL_INTENSITIES",
     "MATERIAL_ITEMS",
     "get_material_intensity",
+    "RTSTRUCT_SOP_CLASS",
+    "RTDOSE_SOP_CLASS",
+    "DICOM_OBJECT_TYPE_ITEMS",
+    "ROI_TYPE_ITEMS",
+    "DOSE_TYPE_ITEMS",
+    "DOSE_SUMMATION_TYPE_ITEMS",
     "ensure_pydicom_available",
     "get_pydicom_error",
     "PYDICOM_AVAILABLE",

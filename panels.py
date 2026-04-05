@@ -114,7 +114,7 @@ class VIEW3D_PT_dicomator_selection_info(Panel):
 
 
 class VIEW3D_PT_dicomator_per_object_hu(Panel):
-    bl_label = "Per-Object HU"
+    bl_label = "Per-Object Settings"
     bl_idname = "VIEW3D_PT_dicomator_per_object_hu"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
@@ -129,15 +129,32 @@ class VIEW3D_PT_dicomator_per_object_hu(Panel):
             return
         selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
         props = context.scene.dicomator_props
+
+        # The modality selector affects HU look-up for CT-typed objects.
         box_hu = layout.box()
-        box_hu.label(text="Per-Object HU", icon='MOD_PHYSICS')
-        box_hu.prop(props, "imaging_modality", text="Modality")
+        box_hu.label(text="Per-Object Settings", icon='MOD_PHYSICS')
+        box_hu.prop(props, "imaging_modality", text="CT Modality")
+
         for obj in selected_meshes:
             col = box_hu.column(align=True)
             col.label(text=obj.name, icon='MESH_DATA')
-            row = col.row(align=True)
-            row.prop(obj, "dicomator_material", text="Material")
-            row.prop(obj, "dicomator_hu", text="Intensity")
+
+            # DICOM object type selector — determines which pipeline this mesh
+            # feeds into when exported.
+            col.prop(obj, "dicomator_object_type", text="DICOM Type")
+
+            obj_type = getattr(obj, "dicomator_object_type", "CT")
+
+            if obj_type == "CT":
+                row = col.row(align=True)
+                row.prop(obj, "dicomator_material", text="Material")
+                row.prop(obj, "dicomator_hu", text="HU")
+
+            elif obj_type == "RTDOSE":
+                col.prop(obj, "dicomator_dose", text="Dose (Gy)")
+
+            elif obj_type == "RTSTRUCT":
+                col.prop(obj, "dicomator_roi_type", text="ROI Type")
 
 
 class VIEW3D_PT_dicomator_patient_info(Panel):
@@ -235,6 +252,15 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
             box.label(text=f"Resolved: {resolved_path}", icon='FILE_FOLDER')
 
         box.prop(props, "series_description")
+
+        # Show RT Dose settings when at least one selected mesh is typed RTDOSE.
+        selected_meshes_all = [obj for obj in context.selected_objects if obj.type == 'MESH']
+        any_dose = any(getattr(obj, "dicomator_object_type", "CT") == "RTDOSE" for obj in selected_meshes_all)
+        if any_dose:
+            dose_box = box.box()
+            dose_box.label(text="RT Dose Settings", icon='OUTLINER_OB_FORCE_FIELD')
+            dose_box.prop(props, "dose_type", text="Dose Type")
+            dose_box.prop(props, "dose_summation_type", text="Summation Type")
 
         modality = getattr(props, "imaging_modality", None)
         is_mri = modality in MRI_MODALITIES

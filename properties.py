@@ -3,7 +3,13 @@ from __future__ import annotations
 
 import bpy
 
-from .constants import IMAGING_MODALITY_ITEMS, OUTPUT_MODE_ITEMS, get_material_intensity
+from .constants import (
+    DOSE_SUMMATION_TYPE_ITEMS,
+    DOSE_TYPE_ITEMS,
+    IMAGING_MODALITY_ITEMS,
+    OUTPUT_MODE_ITEMS,
+    get_material_intensity,
+)
 
 
 def apply_material_intensity(obj: bpy.types.Object, modality: str) -> None:
@@ -348,6 +354,23 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
         min=1.0,
         soft_max=1000.0,
         step=10,
+    )
+
+    # ------------------------------------------------------------------
+    # RT Dose export settings
+    # ------------------------------------------------------------------
+
+    dose_type: bpy.props.EnumProperty(
+        name="Dose Type",
+        description="Physical dose (Gy) or radiobiologically weighted effective dose",
+        items=DOSE_TYPE_ITEMS,
+        default="PHYSICAL",
+    )
+    dose_summation_type: bpy.props.EnumProperty(
+        name="Dose Summation Type",
+        description="Whether the dose grid represents a plan total, a single fraction, or a single beam",
+        items=DOSE_SUMMATION_TYPE_ITEMS,
+        default="PLAN",
     )
 
 

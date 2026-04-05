@@ -28,8 +28,10 @@ from .constants import (
 )
 from .dicom_export import export_projection_to_dicom, export_voxel_grid_to_dicom
 from .drr import generate_drr_from_hu_volume
+from .rtdose_export import export_rtdose_to_dicom
+from .rtstruct_export import export_rtstruct_to_dicom
 from .utils import force_ui_redraw, get_float_prop, resolve_output_directory
-from .voxelization import voxelize_objects_to_hu
+from .voxelization import voxelize_objects_to_dose, voxelize_objects_to_hu
 
 
 def _get_int_prop(props, name: str, default: int) -> int:
@@ -291,6 +293,19 @@ class MESH_OT_export_dicom(Operator):
             self.report({'ERROR'}, "Please select a mesh object")
             return {'CANCELLED'}
 
+        # ------------------------------------------------------------------
+        # Partition selected meshes by their declared DICOM object type.
+        # Objects whose dicomator_object_type is not set default to 'CT'
+        # (backward-compatible with pre-RT versions of the add-on).
+        # ------------------------------------------------------------------
+        ct_objects = [obj for obj in selected_meshes if getattr(obj, "dicomator_object_type", "CT") == "CT"]
+        dose_objects = [obj for obj in selected_meshes if getattr(obj, "dicomator_object_type", "CT") == "RTDOSE"]
+        struct_objects = [obj for obj in selected_meshes if getattr(obj, "dicomator_object_type", "CT") == "RTSTRUCT"]
+
+        if not ct_objects and not dose_objects and not struct_objects:
+            self.report({'ERROR'}, "No selected meshes have a DICOM object type assigned")
+            return {'CANCELLED'}
+
         props = context.scene.dicomator_props
         output_dir = resolve_output_directory(props.export_directory)
         if not output_dir:
@@ -311,6 +326,11 @@ class MESH_OT_export_dicom(Operator):
         camera_obj = context.scene.camera if output_mode == OUTPUT_MODE_DRR else None
         if output_mode == OUTPUT_MODE_DRR and (camera_obj is None or camera_obj.type != 'CAMERA'):
             self.report({'ERROR'}, "Set an active scene camera before exporting a DRR")
+            return {'CANCELLED'}
+
+        # DRR is only valid when there are CT objects.
+        if output_mode == OUTPUT_MODE_DRR and not ct_objects:
+            self.report({'ERROR'}, "DRR export requires at least one CT-type mesh to be selected")
             return {'CANCELLED'}
 
         lateral_mm = get_float_prop(props, "lateral_resolution_mm", get_float_prop(props, "grid_resolution", 2.0))
@@ -339,9 +359,14 @@ class MESH_OT_export_dicom(Operator):
         padding_voxels = 1
 
         try:
+            # ------------------------------------------------------------------
+            # Compute a UNIFIED bounding box across ALL selected objects
+            # (CT ∪ RTDOSE ∪ RTSTRUCT) so that all exported files share the
+            # same coordinate space and FrameOfReferenceUID is meaningful.
+            # ------------------------------------------------------------------
             bounds = _bounds_across_frames(
                 context,
-                selected_meshes,
+                selected_meshes,  # all types together for the unified bbox
                 frames,
                 apply_modifiers=apply_modifiers,
             )
@@ -368,16 +393,30 @@ class MESH_OT_export_dicom(Operator):
 
             num_phases = len(frames)
             series_description_base = _series_description(props.series_description, output_mode)
+
+            # Generate study-level UIDs once — shared across CT, RTDOSE, RTSTRUCT
+            # so that all files belong to the same study and frame of reference.
             study_uid = generate_uid()
             frame_of_ref_uid = generate_uid()
             saved_frame = context.scene.frame_current
 
-            summary_label = "DRR projection(s)" if output_mode == OUTPUT_MODE_DRR else "synthetic series"
+            # Build a human-readable list of active export types for reporting.
+            active_types: list[str] = []
+            if ct_objects:
+                active_types.append("CT" if output_mode == OUTPUT_MODE_VOLUME else "DRR")
+            if dose_objects:
+                active_types.append("RT Dose")
+            if struct_objects:
+                active_types.append("RT Structure")
+            types_label = " + ".join(active_types)
+
             self.report(
                 {'INFO'},
                 (
-                    f"Exporting {num_phases} {summary_label} with lateral {lateral_mm}mm and axial {axial_mm}mm. "
-                    f"Grid: {estimated_width}x{estimated_height}x{estimated_depth}"
+                    f"Exporting {num_phases} phase(s) [{types_label}] "
+                    f"lateral {lateral_mm}mm / axial {axial_mm}mm. "
+                    f"Grid: {estimated_width}x{estimated_height}x{estimated_depth}. "
+                    f"Shared StudyUID: {study_uid[:12]}… ForUID: {frame_of_ref_uid[:12]}…"
                 ),
             )
 
@@ -387,101 +426,192 @@ class MESH_OT_export_dicom(Operator):
                 for phase_index, frame in enumerate(frames, start=1):
                     phase_start = float(phase_index - 1) / float(num_phases)
                     phase_end = float(phase_index) / float(num_phases)
-                    voxel_progress = _make_progress_callback(context, phase_start, phase_start + (phase_end - phase_start) * 0.55)
-                    write_progress = _make_progress_callback(context, phase_start + (phase_end - phase_start) * 0.55, phase_end)
+
+                    # Sub-divide the phase span across active export types.
+                    num_active = len(active_types)
+                    type_span = (phase_end - phase_start) / max(1, num_active)
+                    slot = 0
 
                     context.scene.frame_set(frame, subframe=0.0)
                     force_ui_redraw()
-
-                    hu_array, origin, _dimensions = voxelize_objects_to_hu(
-                        selected_meshes,
-                        voxel_size=voxel_size_m,
-                        padding=0,
-                        progress_callback=voxel_progress,
-                        bbox_override=padded_bounds,
-                        apply_modifiers=apply_modifiers,
-                        depsgraph=context.evaluated_depsgraph_get(),
-                    )
+                    depsgraph = context.evaluated_depsgraph_get()
 
                     phase_description = series_description_base
                     if num_phases > 1:
                         percent = (phase_index / num_phases) * 100.0
                         phase_description = f"{series_description_base} - Phase {phase_index} ({percent:.1f}%)"
 
-                    series_uid = generate_uid()
+                    # ----------------------------------------------------------
+                    # CT / DRR export
+                    # ----------------------------------------------------------
+                    if ct_objects:
+                        t_start = phase_start + slot * type_span
+                        voxel_progress = _make_progress_callback(context, t_start, t_start + type_span * 0.55)
+                        write_progress = _make_progress_callback(context, t_start + type_span * 0.55, t_start + type_span)
+                        slot += 1
 
-                    if output_mode == OUTPUT_MODE_DRR:
-                        projection_image, projection_metadata = generate_drr_from_hu_volume(
-                            hu_array,
+                        hu_array, origin, _dimensions = voxelize_objects_to_hu(
+                            ct_objects,
+                            voxel_size=voxel_size_m,
+                            padding=0,
+                            progress_callback=voxel_progress,
+                            bbox_override=padded_bounds,
+                            apply_modifiers=apply_modifiers,
+                            depsgraph=depsgraph,
+                        )
+
+                        ct_series_uid = generate_uid()
+
+                        if output_mode == OUTPUT_MODE_DRR:
+                            projection_image, projection_metadata = generate_drr_from_hu_volume(
+                                hu_array,
+                                voxel_size_m,
+                                origin,
+                                context.scene,
+                                camera_obj,
+                                resolution_scale=get_float_prop(props, "drr_resolution_scale", 1.0),
+                                progress_callback=write_progress,
+                            )
+                            filename = (
+                                f"Phase_{phase_index:03d}_DRR.dcm"
+                                if num_phases > 1 else
+                                "DRR_Image_0001.dcm"
+                            )
+                            result = export_projection_to_dicom(
+                                projection_image,
+                                output_dir,
+                                filename=filename,
+                                patient_name=props.patient_name,
+                                patient_id=props.patient_id,
+                                patient_sex=props.patient_sex,
+                                patient_position=props.patient_position,
+                                series_description=phase_description,
+                                pixel_spacing_mm=projection_metadata.get("pixel_spacing_mm"),
+                                image_position_patient=projection_metadata.get("image_position_patient"),
+                                image_orientation_patient=projection_metadata.get("image_orientation_patient"),
+                                study_instance_uid=study_uid,
+                                frame_of_reference_uid=frame_of_ref_uid,
+                                series_instance_uid=ct_series_uid,
+                                series_number=phase_index,
+                                instance_number=1,
+                                number_of_temporal_positions=num_phases if num_phases > 1 else None,
+                                temporal_position_index=phase_index if num_phases > 1 else None,
+                                temporal_position_identifier=phase_index if num_phases > 1 else None,
+                            )
+                        else:
+                            hu_array_to_export = _apply_configured_artifacts(hu_array, props)
+                            result = export_voxel_grid_to_dicom(
+                                hu_array_to_export,
+                                voxel_size_m,
+                                output_dir,
+                                origin,
+                                patient_name=props.patient_name,
+                                patient_id=props.patient_id,
+                                patient_sex=props.patient_sex,
+                                series_description=phase_description,
+                                progress_callback=write_progress,
+                                direct_hu=True,
+                                patient_position=props.patient_position,
+                                dicom_modality=dicom_modality,
+                                study_instance_uid=study_uid,
+                                frame_of_reference_uid=frame_of_ref_uid,
+                                series_instance_uid=ct_series_uid,
+                                series_number=phase_index,
+                                number_of_temporal_positions=num_phases if num_phases > 1 else None,
+                                temporal_position_index=phase_index if num_phases > 1 else None,
+                                temporal_position_identifier=phase_index if num_phases > 1 else None,
+                                phase_index=phase_index if num_phases > 1 else None,
+                            )
+
+                        if 'error' in result:
+                            self.report({'ERROR'}, result['error'])
+                            return {'CANCELLED'}
+
+                    # ----------------------------------------------------------
+                    # RT Dose export
+                    # ----------------------------------------------------------
+                    if dose_objects:
+                        t_start = phase_start + slot * type_span
+                        dose_voxel_progress = _make_progress_callback(context, t_start, t_start + type_span * 0.55)
+                        slot += 1
+
+                        dose_array, dose_origin, _dose_dims = voxelize_objects_to_dose(
+                            dose_objects,
+                            voxel_size=voxel_size_m,
+                            padding=0,
+                            progress_callback=dose_voxel_progress,
+                            bbox_override=padded_bounds,
+                            apply_modifiers=apply_modifiers,
+                            depsgraph=depsgraph,
+                        )
+
+                        dose_series_uid = generate_uid()
+                        dose_type = getattr(props, "dose_type", "PHYSICAL")
+                        dose_summation_type = getattr(props, "dose_summation_type", "PLAN")
+
+                        result = export_rtdose_to_dicom(
+                            dose_array,
                             voxel_size_m,
-                            origin,
-                            context.scene,
-                            camera_obj,
-                            resolution_scale=get_float_prop(props, "drr_resolution_scale", 1.0),
-                            progress_callback=write_progress,
-                        )
-                        filename = (
-                            f"Phase_{phase_index:03d}_DRR.dcm"
-                            if num_phases > 1 else
-                            "DRR_Image_0001.dcm"
-                        )
-                        result = export_projection_to_dicom(
-                            projection_image,
+                            dose_origin,
                             output_dir,
-                            filename=filename,
                             patient_name=props.patient_name,
                             patient_id=props.patient_id,
                             patient_sex=props.patient_sex,
                             patient_position=props.patient_position,
-                            series_description=phase_description,
-                            pixel_spacing_mm=projection_metadata.get("pixel_spacing_mm"),
-                            image_position_patient=projection_metadata.get("image_position_patient"),
-                            image_orientation_patient=projection_metadata.get("image_orientation_patient"),
+                            series_description=f"{phase_description} - RT Dose",
+                            dose_type=dose_type,
+                            dose_summation_type=dose_summation_type,
                             study_instance_uid=study_uid,
                             frame_of_reference_uid=frame_of_ref_uid,
-                            series_instance_uid=series_uid,
-                            series_number=phase_index,
-                            instance_number=1,
-                            number_of_temporal_positions=num_phases if num_phases > 1 else None,
-                            temporal_position_index=phase_index if num_phases > 1 else None,
-                            temporal_position_identifier=phase_index if num_phases > 1 else None,
-                        )
-                    else:
-                        hu_array_to_export = _apply_configured_artifacts(hu_array, props)
-                        result = export_voxel_grid_to_dicom(
-                            hu_array_to_export,
-                            voxel_size_m,
-                            output_dir,
-                            origin,
-                            patient_name=props.patient_name,
-                            patient_id=props.patient_id,
-                            patient_sex=props.patient_sex,
-                            series_description=phase_description,
-                            progress_callback=write_progress,
-                            direct_hu=True,
-                            patient_position=props.patient_position,
-                            dicom_modality=dicom_modality,
-                            study_instance_uid=study_uid,
-                            frame_of_reference_uid=frame_of_ref_uid,
-                            series_instance_uid=series_uid,
-                            series_number=phase_index,
-                            number_of_temporal_positions=num_phases if num_phases > 1 else None,
-                            temporal_position_index=phase_index if num_phases > 1 else None,
-                            temporal_position_identifier=phase_index if num_phases > 1 else None,
+                            series_instance_uid=dose_series_uid,
+                            series_number=phase_index + (len(frames) if ct_objects else 0),
                             phase_index=phase_index if num_phases > 1 else None,
                         )
 
-                    if 'error' in result:
-                        self.report({'ERROR'}, result['error'])
-                        return {'CANCELLED'}
+                        if 'error' in result:
+                            self.report({'ERROR'}, result['error'])
+                            return {'CANCELLED'}
+
+                    # ----------------------------------------------------------
+                    # RT Structure Set export
+                    # ----------------------------------------------------------
+                    if struct_objects:
+                        t_start = phase_start + slot * type_span
+                        slot += 1
+
+                        struct_series_uid = generate_uid()
+                        # bbox_min for RTSTRUCT uses the padded grid origin:
+                        # padded_bounds = (min_x, max_x, min_y, max_y, min_z, max_z)
+                        struct_bbox_min = Vector((padded_bounds[0], padded_bounds[2], padded_bounds[4]))
+                        result = export_rtstruct_to_dicom(
+                            struct_objects,
+                            bbox_min=struct_bbox_min,
+                            voxel_size=voxel_size_m,
+                            n_slices=estimated_depth,
+                            output_dir=output_dir,
+                            depsgraph=depsgraph,
+                            patient_name=props.patient_name,
+                            patient_id=props.patient_id,
+                            patient_sex=props.patient_sex,
+                            patient_position=props.patient_position,
+                            series_description=f"{phase_description} - RT Structure",
+                            apply_modifiers=apply_modifiers,
+                            study_instance_uid=study_uid,
+                            frame_of_reference_uid=frame_of_ref_uid,
+                            series_instance_uid=struct_series_uid,
+                            series_number=phase_index + (len(frames) if ct_objects else 0) + (len(frames) if dose_objects else 0),
+                            phase_index=phase_index if num_phases > 1 else None,
+                        )
+
+                        if 'error' in result:
+                            self.report({'ERROR'}, result['error'])
+                            return {'CANCELLED'}
+
             finally:
                 context.scene.frame_set(saved_frame, subframe=0.0)
                 context.window_manager.progress_end()
 
-            if output_mode == OUTPUT_MODE_DRR:
-                self.report({'INFO'}, f"Successfully exported {num_phases} DRR projection(s) to {output_dir}")
-            else:
-                self.report({'INFO'}, f"Successfully exported {num_phases} synthetic volume phase(s) to {output_dir}")
+            self.report({'INFO'}, f"Successfully exported {num_phases} phase(s) [{types_label}] to {output_dir}")
             return {'FINISHED'}
         except Exception as exc:
             try:
