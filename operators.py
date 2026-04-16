@@ -77,7 +77,9 @@ def _apply_configured_artifacts(hu_array, props):
     if getattr(props, "enable_ring_artifacts", False) and is_ct:
         ring_intensity = max(0.0, get_float_prop(props, "ring_intensity", 80.0))
         ring_radius = None if getattr(props, "ring_random_radius", False) else get_float_prop(props, "ring_radius", 0.5)
-        thickness = max(0.0, get_float_prop(props, "ring_thickness", 0.02))
+        # ``add_ring_artifacts`` requires strictly positive thickness.
+        # Keep UI-entered zero values from aborting the export pipeline.
+        thickness = max(1e-4, get_float_prop(props, "ring_thickness", 0.02))
         jitter = max(0.0, get_float_prop(props, "ring_jitter", 0.02))
         result = add_ring_artifacts(
             result,

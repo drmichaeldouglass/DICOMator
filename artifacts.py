@@ -376,6 +376,8 @@ def add_motion_artifact(
         return hu_array.astype(np.int16, copy=False)
     if blur_size % 2 == 0:
         raise ValueError("blur_size must be an odd integer >= 1")
+    if axis not in (0, 1):
+        raise ValueError("axis must be 0 (x) or 1 (y) for in-plane motion blur")
 
     severity = float(np.clip(severity, 0.0, 1.0))
     generator = _get_generator(rng)
