@@ -138,9 +138,14 @@ def export_rtdose_to_dicom(
     # Each frame is a 2D slice dose_f32[:, :, iz] with shape (W, H).
     # Transposing to (H, W) matches DICOM row-major convention (rows first).
     pixel_frames = np.zeros((depth, height, width), dtype=np.uint32)
+    uint32_max_value = np.iinfo(np.uint32).max
     for iz in range(depth):
         slice_2d = dose_f32[:, :, iz]  # (W, H)
-        pixel_frames[iz] = (slice_2d / dose_grid_scaling).astype(np.uint32).T  # (H, W)
+        # Clip before casting: float32 precision on a uint32-range scale can
+        # push values a fraction above uint32_max, which silently wraps on
+        # cast. Clamping keeps the maximum dose as 0xFFFFFFFF.
+        scaled = np.clip(slice_2d / dose_grid_scaling, 0.0, uint32_max_value)
+        pixel_frames[iz] = scaled.astype(np.uint32).T  # (H, W)
 
     now = datetime.now()
     date_str = now.strftime("%Y%m%d")
@@ -203,10 +208,13 @@ def export_rtdose_to_dicom(
         ds.NumberOfFrames = int(depth)
 
         # --- Image plane ---
+        # ImagePositionPatient is the center of the first voxel (PS3.3
+        # C.7.6.2.1.1), not the grid corner.  Offset by half a voxel so the
+        # dose grid aligns with the co-exported CT/RT Structure Set.
         ds.ImagePositionPatient = [
-            float(bbox_min_mm.x),
-            float(bbox_min_mm.y),
-            float(bbox_min_mm.z),
+            float(bbox_min_mm.x + 0.5 * vx_mm),
+            float(bbox_min_mm.y + 0.5 * vy_mm),
+            float(bbox_min_mm.z + 0.5 * vz_mm),
         ]
         ds.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         ds.PixelSpacing = [float(vy_mm), float(vx_mm)]

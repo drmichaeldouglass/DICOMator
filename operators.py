@@ -402,6 +402,12 @@ class MESH_OT_export_dicom(Operator):
             frame_of_ref_uid = generate_uid()
             saved_frame = context.scene.frame_current
 
+            # Captured per phase so the RT Structure Set can reference the
+            # corresponding CT series (SeriesInstanceUID + per-slice SOP UIDs).
+            ct_series_uid_for_struct: str | None = None
+            ct_sop_class_uid_for_struct: str | None = None
+            ct_sop_instance_uids_for_struct: list[str] = []
+
             # Build a human-readable list of active export types for reporting.
             active_types: list[str] = []
             if ct_objects:
@@ -442,6 +448,13 @@ class MESH_OT_export_dicom(Operator):
                     if num_phases > 1:
                         percent = (phase_index / num_phases) * 100.0
                         phase_description = f"{series_description_base} - Phase {phase_index} ({percent:.1f}%)"
+
+                    # Reset the per-phase references collected from the CT
+                    # export; RT Struct will use them only if the CT path ran
+                    # in VOLUME mode this phase.
+                    ct_series_uid_for_struct = None
+                    ct_sop_class_uid_for_struct = None
+                    ct_sop_instance_uids_for_struct = []
 
                     # ----------------------------------------------------------
                     # CT / DRR export
@@ -524,6 +537,10 @@ class MESH_OT_export_dicom(Operator):
                                 temporal_position_identifier=phase_index if num_phases > 1 else None,
                                 phase_index=phase_index if num_phases > 1 else None,
                             )
+                            # Capture references for RTStruct to link back.
+                            ct_series_uid_for_struct = ct_series_uid
+                            ct_sop_class_uid_for_struct = result.get('sop_class_uid')
+                            ct_sop_instance_uids_for_struct = list(result.get('sop_instance_uids') or [])
 
                         if 'error' in result:
                             self.report({'ERROR'}, result['error'])
@@ -603,6 +620,9 @@ class MESH_OT_export_dicom(Operator):
                             series_instance_uid=struct_series_uid,
                             series_number=phase_index + (len(frames) if ct_objects else 0) + (len(frames) if dose_objects else 0),
                             phase_index=phase_index if num_phases > 1 else None,
+                            referenced_ct_series_instance_uid=ct_series_uid_for_struct,
+                            referenced_ct_sop_class_uid=ct_sop_class_uid_for_struct,
+                            referenced_ct_sop_instance_uids=ct_sop_instance_uids_for_struct,
                         )
 
                         if 'error' in result:

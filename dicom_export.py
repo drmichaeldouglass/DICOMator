@@ -93,13 +93,17 @@ def export_voxel_grid_to_dicom(
         'time_str': time_str,
     }
 
+    slice_sop_instance_uids: list[str] = []
+    storage_uid = pydicom.uid.CTImageStorage if modality == "CT" else pydicom.uid.MRImageStorage
+
     for index in range(num_slices):
         slice_data = hu_grid[:, :, index]
         try:
             file_meta = Dataset()
-            storage_uid = pydicom.uid.CTImageStorage if modality == "CT" else pydicom.uid.MRImageStorage
             file_meta.MediaStorageSOPClassUID = storage_uid
-            file_meta.MediaStorageSOPInstanceUID = generate_uid()
+            sop_instance_uid = generate_uid()
+            file_meta.MediaStorageSOPInstanceUID = sop_instance_uid
+            slice_sop_instance_uids.append(sop_instance_uid)
             file_meta.ImplementationClassUID = pydicom.uid.PYDICOM_IMPLEMENTATION_UID
             file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
 
@@ -147,13 +151,16 @@ def export_voxel_grid_to_dicom(
             dataset.AcquisitionDate = common_metadata['date_str']
             dataset.AcquisitionTime = common_metadata['time_str']
 
+            # Per DICOM PS3.3 C.7.6.2.1.1, ImagePositionPatient is the center
+            # of the first transmitted voxel, not the grid corner.
+            slice_z_center_mm = bbox_min_mm.z + (index + 0.5) * vz_mm
             dataset.ImagePositionPatient = [
-                float(bbox_min_mm.x),
-                float(bbox_min_mm.y),
-                float(bbox_min_mm.z + (index * vz_mm)),
+                float(bbox_min_mm.x + 0.5 * vx_mm),
+                float(bbox_min_mm.y + 0.5 * vy_mm),
+                float(slice_z_center_mm),
             ]
             dataset.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-            dataset.SliceLocation = float(bbox_min_mm.z + (index * vz_mm))
+            dataset.SliceLocation = float(slice_z_center_mm)
             dataset.SliceThickness = float(vz_mm)
             dataset.SpacingBetweenSlices = float(vz_mm)
 
@@ -193,7 +200,11 @@ def export_voxel_grid_to_dicom(
             print(f"Error saving DICOM file for slice {index + 1}: {exc}")
             return {'error': f"Error saving DICOM file for slice {index + 1}: {exc}"}
 
-    return {'success': f"Successfully exported {num_slices} DICOM slices to {output_dir}"}
+    return {
+        'success': f"Successfully exported {num_slices} DICOM slices to {output_dir}",
+        'sop_class_uid': str(storage_uid),
+        'sop_instance_uids': slice_sop_instance_uids,
+    }
 
 
 def export_projection_to_dicom(

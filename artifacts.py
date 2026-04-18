@@ -364,7 +364,8 @@ def add_motion_artifact(
         Axis within each slice along which the motion blur is applied. ``0``
         blurs along the x-axis (first dimension), ``1`` along the y-axis.
     rng:
-        Optional seed or generator controlling random sub-voxel jitter.
+        Accepted for API compatibility. The current implementation is
+        deterministic and does not use randomness.
 
     Returns
     -------
@@ -380,7 +381,6 @@ def add_motion_artifact(
         raise ValueError("axis must be 0 (x) or 1 (y) for in-plane motion blur")
 
     severity = float(np.clip(severity, 0.0, 1.0))
-    generator = _get_generator(rng)
 
     result = hu_array.astype(np.float32, copy=True)
     depth = result.shape[2]
@@ -396,9 +396,8 @@ def add_motion_artifact(
             blurred = _ensure_shape_like(blurred, slice_view.shape)
 
         # Create a light ghosted duplicate shifted in the motion direction.
-        ghost_shift = generator.uniform(-1.0, 1.0)
-        ghost = 0.5 * np.roll(slice_view, int(math.copysign(1, ghost_shift) or 1), axis=axis)
-        ghost += 0.5 * np.roll(slice_view, -int(math.copysign(1, ghost_shift) or 1), axis=axis)
+        ghost = 0.5 * np.roll(slice_view, 1, axis=axis)
+        ghost += 0.5 * np.roll(slice_view, -1, axis=axis)
 
         # Combine original, blurred and ghost components.
         slice_view = (1.0 - severity) * slice_view + severity * (0.7 * blurred + 0.3 * ghost)
