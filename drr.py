@@ -140,7 +140,10 @@ def generate_drr_from_hu_volume(
 
     for row_start in range(0, detector_height, rows_per_chunk):
         row_end = min(detector_height, row_start + rows_per_chunk)
-        pixel_v = (np.arange(row_start, row_end, dtype=np.float32) + 0.5) / float(detector_height)
+        # Row 0 must map to the top of the camera frame so the rendered image
+        # matches the ImagePositionPatient/column-direction metadata written
+        # below (which anchor the image at top_left).
+        pixel_v = 1.0 - (np.arange(row_start, row_end, dtype=np.float32) + 0.5) / float(detector_height)
         uu, vv = np.meshgrid(pixel_u, pixel_v, indexing='xy')
 
         bottom_edge = local_bottom_left[None, None, :] + (local_bottom_right - local_bottom_left)[None, None, :] * uu[:, :, None]

@@ -226,6 +226,9 @@ def export_rtstruct_to_dicom(
     series_instance_uid: Optional[str] = None,
     series_number: int = 1,
     phase_index: Optional[int] = None,
+    referenced_ct_series_instance_uid: Optional[str] = None,
+    referenced_ct_sop_class_uid: Optional[str] = None,
+    referenced_ct_sop_instance_uids: Optional[Sequence[str]] = None,
 ) -> dict[str, str]:
     """Write an RT Structure Set DICOM file for the supplied mesh objects.
 
@@ -363,7 +366,28 @@ def export_rtstruct_to_dicom(
         rt_ref_study = Dataset()
         rt_ref_study.ReferencedSOPClassUID = "1.2.840.10008.3.1.2.3.2"  # RT Study
         rt_ref_study.ReferencedSOPInstanceUID = study_instance_uid
-        rt_ref_study.RTReferencedSeriesSequence = []
+
+        # Populate RTReferencedSeriesSequence with the co-exported CT series
+        # (if provided) so downstream TPS tools can trace the structure set
+        # back to the images it was drawn on.  ContourImageSequence inside
+        # requires the per-slice SOP Instance UIDs of that CT series.
+        rt_ref_series_sequence: list = []
+        if (
+            referenced_ct_series_instance_uid
+            and referenced_ct_sop_instance_uids
+            and referenced_ct_sop_class_uid
+        ):
+            rt_ref_series = Dataset()
+            rt_ref_series.SeriesInstanceUID = referenced_ct_series_instance_uid
+            contour_image_sequence: list = []
+            for sop_uid in referenced_ct_sop_instance_uids:
+                img_item = Dataset()
+                img_item.ReferencedSOPClassUID = referenced_ct_sop_class_uid
+                img_item.ReferencedSOPInstanceUID = sop_uid
+                contour_image_sequence.append(img_item)
+            rt_ref_series.ContourImageSequence = contour_image_sequence
+            rt_ref_series_sequence.append(rt_ref_series)
+        rt_ref_study.RTReferencedSeriesSequence = rt_ref_series_sequence
         ref_for_seq.RTReferencedStudySequence = [rt_ref_study]
         ds.ReferencedFrameOfReferenceSequence = [ref_for_seq]
 
@@ -378,6 +402,22 @@ def export_rtstruct_to_dicom(
             roi_sequence.append(roi_item)
         ds.StructureSetROISequence = roi_sequence
 
+        # Build a lookup from Z plane → referenced CT SOP Instance UID so we
+        # can attach a ContourImageSequence to every emitted contour.
+        ct_uids_by_slice: list[str] = (
+            list(referenced_ct_sop_instance_uids)
+            if referenced_ct_sop_instance_uids is not None
+            else []
+        )
+
+        def _referenced_ct_sop_uid_for_z(z_m: float) -> Optional[str]:
+            if not ct_uids_by_slice or vz_m <= 0.0:
+                return None
+            idx = int(round((float(z_m) - bbox_min_z_m) / vz_m - 0.5))
+            if 0 <= idx < len(ct_uids_by_slice):
+                return ct_uids_by_slice[idx]
+            return None
+
         # --- ROI Contour Sequence ---
         roi_contour_sequence = []
         for roi_number, (obj, contours_by_z) in enumerate(
@@ -391,6 +431,7 @@ def export_rtstruct_to_dicom(
 
             contour_sequence = []
             for z_m, loops in sorted(contours_by_z.items()):
+                ref_sop_uid = _referenced_ct_sop_uid_for_z(z_m)
                 for loop in loops:
                     if len(loop) < 3:
                         continue
@@ -405,6 +446,11 @@ def export_rtstruct_to_dicom(
                     contour_item.ContourGeometricType = "CLOSED_PLANAR"
                     contour_item.NumberOfContourPoints = len(loop)
                     contour_item.ContourData = contour_data
+                    if ref_sop_uid and referenced_ct_sop_class_uid:
+                        img_ref = Dataset()
+                        img_ref.ReferencedSOPClassUID = referenced_ct_sop_class_uid
+                        img_ref.ReferencedSOPInstanceUID = ref_sop_uid
+                        contour_item.ContourImageSequence = [img_ref]
                     contour_sequence.append(contour_item)
 
             roi_contour_item.ContourSequence = contour_sequence
