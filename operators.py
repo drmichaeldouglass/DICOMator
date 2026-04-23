@@ -141,6 +141,7 @@ def _mesh_bounds_for_objects(
 
     min_x = min_y = min_z = float('inf')
     max_x = max_y = max_z = float('-inf')
+    found_vertex = False
 
     for obj in objects:
         if apply_modifiers and depsgraph is not None:
@@ -155,6 +156,7 @@ def _mesh_bounds_for_objects(
                     max_y = max(max_y, world_vertex.y)
                     min_z = min(min_z, world_vertex.z)
                     max_z = max(max_z, world_vertex.z)
+                    found_vertex = True
             finally:
                 obj_eval.to_mesh_clear()
         else:
@@ -166,7 +168,10 @@ def _mesh_bounds_for_objects(
                 max_y = max(max_y, world_corner.y)
                 min_z = min(min_z, world_corner.z)
                 max_z = max(max_z, world_corner.z)
+                found_vertex = True
 
+    if not found_vertex:
+        raise ValueError("No valid mesh geometry found while estimating bounds")
     return min_x, max_x, min_y, max_y, min_z, max_z
 
 

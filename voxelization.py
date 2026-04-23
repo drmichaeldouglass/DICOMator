@@ -21,7 +21,12 @@ VectorLike = Sequence[float]
 VoxelSize = Sequence[float]
 
 
-def _bvh_from_object(obj: Object, depsgraph: Optional[bpy.types.Depsgraph] = None, *, apply_modifiers: bool = False) -> BVHTree:
+def _bvh_from_object(
+    obj: Object,
+    depsgraph: Optional[bpy.types.Depsgraph] = None,
+    *,
+    apply_modifiers: bool = False,
+) -> BVHTree | None:
     """Build a BVH tree in world space for ``obj``."""
     if apply_modifiers and depsgraph is not None:
         obj_eval = obj.evaluated_get(depsgraph)
@@ -35,6 +40,8 @@ def _bvh_from_object(obj: Object, depsgraph: Optional[bpy.types.Depsgraph] = Non
         mesh = obj.data
         verts_world = [obj.matrix_world @ vert.co for vert in mesh.vertices]
         polygons = [list(poly.vertices) for poly in mesh.polygons]
+    if not verts_world or not polygons:
+        return None
     return BVHTree.FromPolygons(verts_world, polygons)
 
 
@@ -204,9 +211,14 @@ def voxelize_objects_to_hu(
     object_data: list[tuple[str, BVHTree, np.int16]] = []
     for obj in sorted_objects:
         bvh = _bvh_from_object(obj, depsgraph=depsgraph, apply_modifiers=apply_modifiers)
+        if bvh is None:
+            print(f"Skipping HU voxelization for '{obj.name}': mesh has no faces.")
+            continue
         hu_value = float(getattr(obj, 'dicomator_hu', DEFAULT_DENSITY))
         hu_value = max(MIN_HU_VALUE, min(MAX_HU_VALUE, hu_value))
         object_data.append((obj.name, bvh, np.int16(hu_value)))
+    if not object_data:
+        raise ValueError("No voxelizable objects provided (all selected meshes had zero faces)")
 
     total_columns = width * height
     processed_columns = 0
@@ -246,6 +258,8 @@ def voxelize_objects_to_hu(
                 print(f"  processed columns: {processed_columns}/{total_columns} ({(processed_columns/total_columns)*100:.1f}%)")
 
     print("Voxelization complete (multi-object HU grid).")
+    if progress_callback:
+        progress_callback(total_columns, total_columns)
     return hu_array, origin, (width, height, depth)
 
 
@@ -339,9 +353,14 @@ def voxelize_objects_to_dose(
     object_data: list[tuple[str, BVHTree, float]] = []
     for obj in sorted_objects:
         bvh = _bvh_from_object(obj, depsgraph=depsgraph, apply_modifiers=apply_modifiers)
+        if bvh is None:
+            print(f"Skipping dose voxelization for '{obj.name}': mesh has no faces.")
+            continue
         # Clamp dose to non-negative values; negative dose has no physical meaning.
         dose_value = max(0.0, float(getattr(obj, "dicomator_dose", 0.0)))
         object_data.append((obj.name, bvh, dose_value))
+    if not object_data:
+        raise ValueError("No voxelizable objects provided (all selected meshes had zero faces)")
 
     total_columns = width * height
     processed_columns = 0
@@ -378,6 +397,8 @@ def voxelize_objects_to_dose(
                 print(f"  processed columns: {processed_columns}/{total_columns} ({(processed_columns/total_columns)*100:.1f}%)")
 
     print("Dose voxelization complete.")
+    if progress_callback:
+        progress_callback(total_columns, total_columns)
     return dose_array, origin, (width, height, depth)
 
 
