@@ -7,7 +7,6 @@ from .constants import (
     DOSE_SUMMATION_TYPE_ITEMS,
     DOSE_TYPE_ITEMS,
     IMAGING_MODALITY_ITEMS,
-    OUTPUT_MODE_ITEMS,
     get_material_intensity,
 )
 
@@ -53,11 +52,25 @@ def update_object_material(self, context: bpy.types.Context) -> None:
 class DICOMatorProperties(bpy.types.PropertyGroup):
     """Properties exposed in the DICOMator UI."""
 
-    output_mode: bpy.props.EnumProperty(
-        name="Reconstruction",
-        description="Choose whether to export a synthetic volume or a digital reconstructed radiograph",
-        items=OUTPUT_MODE_ITEMS,
-        default=OUTPUT_MODE_ITEMS[0][0],
+    export_image_series: bpy.props.BoolProperty(
+        name="Image Series",
+        description="Export image-type meshes as a CT or MR DICOM image series",
+        default=True,
+    )
+    export_drr: bpy.props.BoolProperty(
+        name="DRR",
+        description="Export image-type meshes as a digitally reconstructed radiograph from the active camera",
+        default=False,
+    )
+    export_rtdose: bpy.props.BoolProperty(
+        name="RT Dose",
+        description="Export dose-type meshes as an RT Dose DICOM object",
+        default=False,
+    )
+    export_rtstruct: bpy.props.BoolProperty(
+        name="RT Structure",
+        description="Export structure-type meshes as an RT Structure Set DICOM object",
+        default=False,
     )
 
     patient_name: bpy.props.StringProperty(
@@ -170,7 +183,7 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
     series_description: bpy.props.StringProperty(
         name="Series Description",
         description="Description for the DICOM series",
-        default="CT Series from DICOMator",
+        default="DICOMator Export",
     )
     enable_noise: bpy.props.BoolProperty(
         name="Add Gaussian Noise",

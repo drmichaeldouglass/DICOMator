@@ -20,8 +20,8 @@ def _get_generator(rng: GeneratorLike) -> np.random.Generator:
 def _moving_average_along_axis(array: np.ndarray, kernel_size: int, axis: int) -> np.ndarray:
     """Apply a 1D moving average with ``kernel_size`` along ``axis``.
 
-    Reimplemented to use 1D convolution (mode='same') so the output length
-    along ``axis`` always matches the input length and avoids off-by-one bugs.
+    Uses edge-padded 1D convolution so the output length along ``axis`` always
+    matches the input length and avoids off-by-one bugs.
     """
     if kernel_size <= 1:
         return array
@@ -29,18 +29,25 @@ def _moving_average_along_axis(array: np.ndarray, kernel_size: int, axis: int) -
     if k < 1:
         return array
 
-    # Ensure float computation and build normalized kernel.
     arr = array.astype(np.float32, copy=False)
     kernel = np.ones(k, dtype=np.float32) / float(k)
+    return _convolve_along_axis(arr, kernel, axis)
 
-    # Move the smoothing axis to the last dimension so we can convolve each 1D vector
-    # independently and preserve the shape using mode='same'.
+
+def _convolve_along_axis(array: np.ndarray, kernel: np.ndarray, axis: int) -> np.ndarray:
+    """Convolve ``array`` with a 1D kernel along one axis using edge padding."""
+
+    arr = array.astype(np.float32, copy=False)
+    kernel = kernel.astype(np.float32, copy=False)
+    if kernel.size <= 1:
+        return arr
+
+    pad = int(kernel.size // 2)
     moved = np.moveaxis(arr, axis, -1)
 
-    # Convolve along the last axis for every subarray.
-    # Using np.apply_along_axis keeps the original shape (mode='same').
     def _conv_row(v: np.ndarray) -> np.ndarray:
-        return np.convolve(v, kernel, mode="same")
+        padded = np.pad(v, (pad, pad), mode="edge")
+        return np.convolve(padded, kernel, mode="valid")
 
     smoothed = np.apply_along_axis(_conv_row, -1, moved)
     if smoothed.shape != moved.shape:
@@ -49,7 +56,33 @@ def _moving_average_along_axis(array: np.ndarray, kernel_size: int, axis: int) -
     return np.moveaxis(smoothed, -1, axis)
 
 
-# New helper: ensure an array matches a target shape by center-cropping or edge-padding.
+def _gaussian_kernel(kernel_size: int, sigma: float | None = None) -> np.ndarray:
+    """Return a normalized odd-length Gaussian kernel."""
+
+    if kernel_size <= 1:
+        return np.ones(1, dtype=np.float32)
+    if kernel_size % 2 == 0:
+        raise ValueError("kernel_size must be an odd integer >= 1")
+
+    radius = kernel_size // 2
+    if sigma is None:
+        sigma = max(0.5, float(kernel_size - 1) / 4.0)
+    coords = np.arange(-radius, radius + 1, dtype=np.float32)
+    kernel = np.exp(-0.5 * (coords / float(sigma)) ** 2)
+    kernel /= float(np.sum(kernel))
+    return kernel.astype(np.float32, copy=False)
+
+
+def _gaussian_blur(array: np.ndarray, kernel_size: int, sigma: float | None = None) -> np.ndarray:
+    """Apply a separable Gaussian blur to ``array``."""
+
+    kernel = _gaussian_kernel(kernel_size, sigma=sigma)
+    result = array.astype(np.float32, copy=False)
+    for axis in range(result.ndim):
+        result = _convolve_along_axis(result, kernel, axis)
+    return result
+
+
 def _ensure_shape_like(arr: np.ndarray, target_shape: tuple[int, ...]) -> np.ndarray:
     """Return a view/array with shape exactly equal to target_shape.
 
@@ -126,18 +159,18 @@ def apply_partial_volume_effect(
     iterations: int = 1,
     mix: float = 1.0,
 ) -> np.ndarray:
-    """Blur sharp object boundaries to approximate partial volume averaging.
+    """Blur sharp object boundaries to approximate scanner partial volume.
 
     Parameters
     ----------
     hu_array:
         Input HU volume.
     kernel_size:
-        Size of the moving-average kernel along each axis. Must be an odd
-        integer greater than or equal to 1.
+        Support of the scanner point-spread kernel. Must be an odd integer
+        greater than or equal to 1.
     iterations:
-        Number of times the smoothing pass is repeated. Higher values produce
-        a stronger blending between adjacent materials.
+        Number of point-spread passes. Higher values produce stronger blending
+        between adjacent materials.
     mix:
         Blend factor between the smoothed result and the original volume.
         ``mix=1`` keeps only the smoothed data, while ``mix=0`` returns the
@@ -158,10 +191,10 @@ def apply_partial_volume_effect(
     source = hu_array.astype(np.float32, copy=False)
     result = source.copy()
 
-    # Sequentially blur along each axis to mimic volumetric averaging.
+    # CT/MR partial volume is closer to a scanner point-spread function than a
+    # box average. A separable Gaussian is a lightweight approximation.
     for _ in range(iterations):
-        for axis in range(result.ndim):
-            result = _moving_average_along_axis(result, kernel_size, axis)
+        result = _gaussian_blur(result, kernel_size)
 
     if mix < 1.0:
         # Blend with the original data to retain some sharpness if requested.
@@ -215,34 +248,58 @@ def add_metal_artifacts(
     base_xx, base_yy = np.meshgrid(x_coords, y_coords, indexing="ij")
 
     for iz in range(depth):
-        source_mask = hu_array[:, :, iz] >= density_threshold
+        source_slice = hu_array[:, :, iz].astype(np.float32, copy=False)
+        source_mask = source_slice >= density_threshold
         if not np.any(source_mask):
             continue
 
-        points = np.argwhere(source_mask)
-        centroid_x = float(np.mean(x_coords[points[:, 0]]))
-        centroid_y = float(np.mean(y_coords[points[:, 1]]))
+        metal_excess = np.clip(source_slice - float(density_threshold), 0.0, None)
+        weights = metal_excess + source_mask.astype(np.float32)
+        weight_sum = float(np.sum(weights))
+        if weight_sum <= 0.0:
+            continue
 
-        # Express coordinates relative to the metal centroid to drive radial streaks.
+        centroid_x = float(np.sum(base_xx * weights) / weight_sum)
+        centroid_y = float(np.sum(base_yy * weights) / weight_sum)
+        metal_fraction = float(np.mean(source_mask))
+        mean_excess = float(np.mean(metal_excess[source_mask]))
+        source_strength = np.clip(mean_excess / 1200.0 + 10.0 * metal_fraction, 0.25, 3.0)
+
+        # Express coordinates relative to the metal centroid. This is an image-
+        # space approximation of projection paths crossing a high-attenuation
+        # object, producing photon-starvation shadows plus beam-hardening bands.
         rel_x = base_xx - centroid_x
         rel_y = base_yy - centroid_y
         radius = np.sqrt(rel_x**2 + rel_y**2) + 1e-3
 
         slice_artifact = np.zeros_like(result[:, :, iz], dtype=np.float32)
-        streak_count = int(num_streaks if num_streaks > 0 else max(6, points.shape[0] // 25))
+        metal_voxels = int(np.count_nonzero(source_mask))
+        streak_count = int(num_streaks if num_streaks > 0 else max(6, min(32, metal_voxels // 25)))
 
         for _ in range(streak_count):
             angle = generator.uniform(0.0, math.pi)
-            line = rel_x * math.cos(angle) + rel_y * math.sin(angle)
-            width_scale = generator.uniform(0.02, 0.08)
-            profile = np.exp(-falloff * np.abs(line) / width_scale)
-            modulation = np.cos(radius * generator.uniform(4.0, 9.0) + generator.uniform(-math.pi, math.pi))
-            decay = 1.0 / (1.0 + 6.0 * radius)
-            amplitude = generator.uniform(0.5, 1.0) * intensity * generator.choice([-1.0, 1.0])
-            slice_artifact += amplitude * profile * modulation * decay
+            cos_a = math.cos(angle)
+            sin_a = math.sin(angle)
+            parallel = rel_x * cos_a + rel_y * sin_a
+            perpendicular = -rel_x * sin_a + rel_y * cos_a
+            line_sigma = generator.uniform(0.018, 0.055) / max(0.5, float(falloff) / 6.0)
+            profile = np.exp(-0.5 * (perpendicular / line_sigma) ** 2)
+            envelope = 1.0 / (1.0 + 1.5 * np.abs(parallel) + 2.5 * radius)
+            phase = generator.uniform(-math.pi, math.pi)
+            banding = np.cos(8.0 * parallel + phase)
+            amplitude = generator.uniform(0.7, 1.2) * float(intensity) * float(source_strength)
 
-        # Limit extreme values and only keep streaks that extend beyond the metal
-        slice_artifact *= np.exp(-1.5 * radius)
+            starvation_shadow = -0.65 * profile * envelope
+            beam_hardening_band = 0.35 * profile * banding * envelope
+            slice_artifact += amplitude * (starvation_shadow + beam_hardening_band)
+
+        halo_kernel = max(3, min(21, (min(width, height) // 10) * 2 + 1))
+        halo = _gaussian_blur(source_mask.astype(np.float32), halo_kernel)
+        halo_max = float(np.max(halo))
+        if halo_max > 0.0:
+            halo /= halo_max
+            slice_artifact -= 0.12 * float(intensity) * float(source_strength) * halo
+
         result[:, :, iz] = np.clip(result[:, :, iz] + slice_artifact, MIN_HU_VALUE, MAX_HU_VALUE)
 
     return result.astype(np.int16, copy=False)
@@ -266,7 +323,7 @@ def add_ring_artifacts(
         Maximum amplitude in HU applied to the generated rings.
     ring_radius:
         Relative radius of the ring (0 = center, 1 = edge). When ``None``, a
-        random radius is chosen for the exported volume.
+        small random cluster of detector-channel rings is generated.
     jitter:
         Standard deviation of a low-amplitude speckle field mixed with the
         rings to avoid perfectly smooth structures.
@@ -279,7 +336,7 @@ def add_ring_artifacts(
         Volume containing ring artifacts as ``int16``.
     """
 
-    # Validate user-provided ring parameters. A single ring will be created.
+    # Validate user-provided ring parameters.
     if thickness <= 0.0:
         raise ValueError("thickness must be a positive number")
     if ring_radius is not None and not (0.0 <= ring_radius <= 1.0):
@@ -297,28 +354,33 @@ def add_ring_artifacts(
     depth = int(result.shape[2])
 
     r_idx, c_idx = np.indices((rows, cols), dtype=np.float32)
-    if cols > 1:
-        x = (c_idx / (cols - 1)) * 2.0 - 1.0
-    else:
-        x = c_idx * 0.0
-    if rows > 1:
-        y = (r_idx / (rows - 1)) * 2.0 - 1.0
-    else:
-        y = r_idx * 0.0
+    x = (c_idx / max(1, cols - 1)) * 2.0 - 1.0 if cols > 1 else c_idx * 0.0
+    y = (r_idx / max(1, rows - 1)) * 2.0 - 1.0 if rows > 1 else r_idx * 0.0
 
-    radius = np.sqrt(x**2 + y**2)
+    # A persistent detector-channel calibration error reconstructs as a signed
+    # ring. When no radius is specified, synthesize a small cluster of rings.
+    ring_specs: list[tuple[float, float]] = []
+    if ring_radius is None:
+        for _ in range(int(generator.integers(2, 5))):
+            ring_specs.append((float(generator.uniform(0.08, 0.95)), float(generator.choice([-1.0, 1.0]))))
+    else:
+        ring_specs.append((float(ring_radius), float(generator.choice([-1.0, 1.0]))))
 
-    # Build a single ring pattern. If the user did not specify a radius, pick
-    # a reasonable default location inside the detector area.
-    r0 = float(ring_radius) if ring_radius is not None else float(generator.uniform(0.05, 0.95))
+    center_x = float(generator.normal(0.0, 0.015))
+    center_y = float(generator.normal(0.0, 0.015))
+    radius = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
+
+    base_pattern = np.zeros((rows, cols), dtype=np.float32)
     t = float(thickness)
-    # Use the user-provided ring_intensity directly as the ring amplitude. This
-    # lets the caller precisely control how many HU the ring will add.
-    amplitude = float(ring_intensity)
+    for r0, sign in ring_specs:
+        channel_width = t * float(generator.uniform(0.75, 1.35))
+        amplitude = sign * float(ring_intensity) * float(generator.uniform(0.55, 1.0))
+        ring = np.exp(-0.5 * ((radius - r0) / channel_width) ** 2).astype(np.float32, copy=False)
+        base_pattern += amplitude * ring
 
-    base_pattern = amplitude * np.exp(-0.5 * ((radius - r0) / t) ** 2).astype(np.float32, copy=False)
-    # Slightly attenuate rings toward the edges to mimic typical detector falloff.
-    base_pattern *= np.exp(-0.5 * radius**2)
+    # Rings weaken near the edge because fewer reconstructed pixels sample the
+    # same faulty detector channel across the rotation.
+    base_pattern *= np.exp(-0.35 * radius**2)
 
     if jitter > 0.0:
         jitter_field = generator.normal(0.0, jitter, size=radius.shape).astype(np.float32, copy=False)
@@ -328,9 +390,8 @@ def add_ring_artifacts(
     # Apply the same base pattern to every slice, allowing small per-slice
     # scale/offset variations so the effect isn't perfectly identical slice-to-slice.
     for iz in range(depth):
-        # small per-slice modulation preserves the user-selected intensity while
-        # still producing realistic slice-to-slice variation
-        scale = generator.uniform(0.98, 1.02)
+        # Slow axial modulation mimics channel drift while preserving continuity.
+        scale = generator.uniform(0.97, 1.03)
         offset = float(generator.normal(0.0, abs(ring_intensity) * 0.01))
         slice_pattern = scale * base_pattern + offset
         if isinstance(jitter_field, np.ndarray):
@@ -364,8 +425,7 @@ def add_motion_artifact(
         Axis within each slice along which the motion blur is applied. ``0``
         blurs along the x-axis (first dimension), ``1`` along the y-axis.
     rng:
-        Accepted for API compatibility. The current implementation is
-        deterministic and does not use randomness.
+        Optional seed or generator for deterministic ghost strength variation.
 
     Returns
     -------
@@ -382,25 +442,31 @@ def add_motion_artifact(
 
     severity = float(np.clip(severity, 0.0, 1.0))
 
+    generator = _get_generator(rng)
     result = hu_array.astype(np.float32, copy=True)
     depth = result.shape[2]
+    half_width = blur_size // 2
+    offsets = np.arange(-half_width, half_width + 1, dtype=np.int32)
+    sigma = max(1.0, float(blur_size) / 4.0)
+    weights = np.exp(-0.5 * (offsets.astype(np.float32) / sigma) ** 2)
+    weights /= float(np.sum(weights))
+    ghost_shift = max(1, blur_size // 3)
 
     for iz in range(depth):
         slice_view = result[:, :, iz]
 
-        # Blur along the motion axis to emulate patient displacement.
-        blurred = _moving_average_along_axis(slice_view, blur_size, axis)
+        # Average several displaced positions. This better represents object
+        # motion during acquisition than a flat box blur.
+        blurred = np.zeros_like(slice_view, dtype=np.float32)
+        for offset, weight in zip(offsets, weights, strict=False):
+            blurred += float(weight) * np.roll(slice_view, int(offset), axis=axis)
 
-        # Ensure the blurred result has exactly the same shape as the source slice.
-        if blurred.shape != slice_view.shape:
-            blurred = _ensure_shape_like(blurred, slice_view.shape)
+        # Residual ghost edges approximate projection inconsistency.
+        ghost_weight = float(generator.uniform(0.15, 0.35))
+        ghost = 0.5 * np.roll(slice_view, ghost_shift, axis=axis)
+        ghost += 0.5 * np.roll(slice_view, -ghost_shift, axis=axis)
 
-        # Create a light ghosted duplicate shifted in the motion direction.
-        ghost = 0.5 * np.roll(slice_view, 1, axis=axis)
-        ghost += 0.5 * np.roll(slice_view, -1, axis=axis)
-
-        # Combine original, blurred and ghost components.
-        slice_view = (1.0 - severity) * slice_view + severity * (0.7 * blurred + 0.3 * ghost)
+        slice_view = (1.0 - severity) * slice_view + severity * ((1.0 - ghost_weight) * blurred + ghost_weight * ghost)
         result[:, :, iz] = slice_view
 
     result = np.clip(np.round(result), MIN_HU_VALUE, MAX_HU_VALUE)
@@ -408,15 +474,15 @@ def add_motion_artifact(
 
 
 def add_poisson_noise(hu_array: np.ndarray, scale: float = 150.0, rng: GeneratorLike = None) -> np.ndarray:
-    """Approximate quantum noise by sampling from a Poisson distribution.
+    """Approximate CT quantum noise from transmitted photon statistics.
 
     Parameters
     ----------
     hu_array:
         Input HU volume.
     scale:
-        Conversion factor from HU to pseudo photon counts. Larger values reduce
-        the amount of noise. ``scale <= 0`` disables the artifact.
+        Relative incident photon fluence. Larger values reduce the amount of
+        noise. ``scale <= 0`` disables the artifact.
     rng:
         Optional seed or generator for deterministic noise.
 
@@ -432,17 +498,20 @@ def add_poisson_noise(hu_array: np.ndarray, scale: float = 150.0, rng: Generator
     generator = _get_generator(rng)
     source = hu_array.astype(np.float32, copy=True)
 
-    # Shift to a strictly positive range to interpret HU as pseudo counts.
-    shifted = np.clip(source - MIN_HU_VALUE, 0.0, None)
+    # Convert HU to an approximate attenuation scale: air ~ 0, water ~ 1,
+    # cortical bone > 1. The exact path length is unknown post-reconstruction,
+    # so this models the local noise trend rather than a full projection.
+    relative_attenuation = np.clip((source + 1000.0) / 1000.0, 0.0, 4.0)
+    attenuation_coefficient = 0.35
+    incident_photons = max(1.0, float(scale)) * 100.0
+    expected_counts = incident_photons * np.exp(-attenuation_coefficient * relative_attenuation)
+    expected_counts = np.clip(expected_counts, 1.0, None)
 
-    counts = shifted / float(scale)
-
-    # Sample Poisson-distributed photon counts and transform back to HU.
-    noisy_counts = generator.poisson(counts).astype(np.float32, copy=False)
-    noisy = noisy_counts * float(scale) + MIN_HU_VALUE
-
-    mask_zero = shifted == 0.0
-    noisy[mask_zero] = source[mask_zero]
+    measured_counts = generator.poisson(expected_counts).astype(np.float32, copy=False)
+    measured_counts = np.clip(measured_counts, 1.0, None)
+    log_error = -np.log(measured_counts / expected_counts)
+    noise_hu = (1000.0 / attenuation_coefficient) * log_error
+    noisy = source + noise_hu
 
     noisy = np.clip(np.round(noisy), MIN_HU_VALUE, MAX_HU_VALUE)
     return noisy.astype(np.int16, copy=False)
@@ -483,26 +552,33 @@ def add_bias_field_shading(
     if source.size == 0:
         return intensity_array
 
-    field = generator.normal(0.0, 1.0, size=source.shape).astype(np.float32, copy=False)
+    axes = [np.linspace(-1.0, 1.0, size, dtype=np.float32) for size in source.shape]
+    coords = np.meshgrid(*axes, indexing="ij")
+    center = [float(generator.normal(0.0, 0.25)) for _ in source.shape]
+    coil_width = max(0.35, float(scale) * 1.5)
+    radius_sq = np.zeros(source.shape, dtype=np.float32)
+    for coord, center_value in zip(coords, center, strict=False):
+        radius_sq += (coord - center_value) ** 2
+    coil_field = np.exp(-0.5 * radius_sq / (coil_width**2)).astype(np.float32, copy=False)
 
-    # Smooth the random field along each axis to produce a gentle bias pattern.
+    random_field = generator.normal(0.0, 1.0, size=source.shape).astype(np.float32, copy=False)
     for axis, axis_len in enumerate(source.shape):
         window = max(3, int(round(scale * max(1, axis_len))))
         if window % 2 == 0:
             window += 1
-        field = _moving_average_along_axis(field, window, axis)
+        random_field = _moving_average_along_axis(random_field, window, axis)
 
+    field = 0.75 * coil_field + 0.25 * random_field
     field -= float(np.mean(field))
     max_abs = float(np.max(np.abs(field)))
     if max_abs > 0.0:
         field /= max_abs
-    bias = 1.0 + float(strength) * field
+    bias = np.clip(1.0 + float(strength) * field, 0.05, None)
 
     biased = source * bias
-    min_val = float(np.min(source))
-    max_val = float(np.max(source))
-    if max_val > min_val:
-        biased = np.clip(biased, min_val, max_val)
+    if np.issubdtype(intensity_array.dtype, np.integer):
+        info = np.iinfo(intensity_array.dtype)
+        biased = np.clip(np.round(biased), info.min, info.max)
     return biased.astype(intensity_array.dtype, copy=False)
 
 

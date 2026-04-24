@@ -1,7 +1,7 @@
 # DICOMator Contributor Notes
 
 ## Repository Overview
-- **Purpose:** Blender 4.2+ add-on that voxelizes mesh objects and exports them as CT-style DICOM series, optionally layering synthetic artifacts.
+- **Purpose:** Blender 5.1.1+ add-on that voxelizes mesh objects and exports them as CT-style DICOM series, optionally layering synthetic artifacts, and can generate digitally reconstructed radiographs (DRRs) and synthetic radiotherapy data (RT-DOSE and RT-STRUCT).
 - **Key modules:**
   - `__init__.py` – Blender registration entry point and exported API.
   - `properties.py` – `bpy.types.PropertyGroup` definitions backing the add-on UI.
@@ -10,11 +10,12 @@
   - `artifacts.py` – Synthetic artifact generators (noise, streaks, rings, partial volume, motion). Artifacts should be grounded by physical models where possible. 
   - `dicom_export.py` – Writes voxel grids to DICOM slices via pydicom when available.
   - `constants.py` – Core HU constants and optional imports (pydicom, Dataset helpers).
-  - `utils.py` – Lightweight helpers for property access and UI refresh.
-  - `download_wheels.py` / `wheels/` – Optional vendor wheels for Blender’s bundled Python.
+  - `utils.py` – Lightweight helpers for property access and UI refresh.  - `drr.py` – Digitally Reconstructed Radiograph (DRR) generator; performs ray-casting through the voxel HU grid to simulate planar X-ray projections.
+  - `rtdose_export.py` – Exports a synthetic 3D dose distribution as an RT-DOSE DICOM object via pydicom.
+  - `rtstruct_export.py` – Exports mesh-derived contours as an RT-STRUCT DICOM object (Region of Interest sequences) via pydicom.  - `download_wheels.py` / `wheels/` – Optional vendor wheels for Blender’s bundled Python.
 
 ## Coding Guidelines
-- Target **Python 3.11** (matches Blender 4.2 runtime).
+- Target **Python 3.13** (matches Blender 5.1.1 runtime).
 - Follow **PEP 8** conventions: 4-space indentation, descriptive naming, and module-level docstrings. Keep public helpers exported through `__all__` lists when the surrounding module already uses them.
 - Prefer explicit type hints (`-> None`, concrete collection types) and keep docstrings concise but informative. Use f-strings for string interpolation.
 - Blender-specific code (`bpy`, `mathutils`) should remain importable without running inside Blender. Avoid executing Blender ops at import time; confine them to functions/operators.

@@ -1,12 +1,14 @@
 # DICOMator
 
-Blender add-on that converts selected mesh objects into DICOM outputs for either synthetic CT/MR image series or camera-based digital reconstructed radiographs (DRRs). It voxelizes the active mesh selection directly into modality-appropriate intensities, supports single-phase or 4D acquisitions, and layers in synthetic artifacts tailored to the chosen modality for training or visualization workflows.
+Blender add-on that converts selected mesh objects into DICOM outputs for synthetic CT/MR image series, camera-based digitally reconstructed radiographs (DRRs), RT Dose grids, and RT Structure Sets. It voxelizes the active mesh selection directly into modality-appropriate intensities, supports single-phase or 4D acquisitions, and layers in synthetic artifacts tailored to the chosen modality for training or visualization workflows.
 
 ## Features
 
-- **Per-object Hounsfield Units (HU)**
-  - Set HU on each mesh (Object property `HU` via the Per-Object HU panel)
-  - Overlapping meshes resolve deterministically by mesh name; alphabetically last meshes win when voxels coincide
+- **Per-object DICOM type and intensities**
+  - Each selected mesh is tagged as **Image**, **RT Dose**, or **RT Structure** via the Objects panel
+  - Image objects: set HU/intensity value or pick a tissue preset; overlapping meshes resolve by alphabetical name order
+  - RT Dose objects: assign an absorbed dose value (Gy) per mesh; voxels within the mesh receive that dose
+  - RT Structure objects: assign an ROI type (GTV, CTV, PTV, OAR, External, Other); contours are extracted at each CT slice plane
 - **Tissue intensity presets**
   - Choose CT, T1 MR, or T2 MR modalities and assign tissue presets from a curated table
   - Selected presets automatically populate per-object intensities while still allowing manual overrides
@@ -15,7 +17,7 @@ Blender add-on that converts selected mesh objects into DICOM outputs for either
   - One `SeriesInstanceUID` per phase; phases are written as separate series with temporal DICOM tags (`NumberOfTemporalPositions`, `TemporalPositionIndex`, `TemporalPositionIdentifier`)
   - Timeline advances during 4D export and a fixed padded bounding box keeps grids aligned between phases
 - **Camera-based DRR generation**
-  - Switch the reconstruction mode from synthetic volume export to DRR
+  - Enable DRR output alongside, or instead of, the image series output
   - The DRR is generated from the active scene camera using a Beer-Lambert projection through the voxelized HU volume
   - Detector size follows the Blender render resolution with an optional DRR resolution scale
 - **Voxelization control**
@@ -23,8 +25,8 @@ Blender add-on that converts selected mesh objects into DICOM outputs for either
   - Optional evaluation of modifiers/shape keys/armatures during voxelization
   - BVH-based +Z column fill for solid voxelization with consistent grid dimensions
 - **Synthetic artifact suite**
-  - CT modality exposes partial volume blur, metal streaks, ring artifacts, motion blur, Gaussian noise, and Poisson noise
-  - MRI modalities expose Gaussian noise, coil bias-field shading, and motion blur tuned for MR appearance
+  - CT modality exposes Gaussian noise, scanner point-spread partial volume, projection-like metal streaks, detector-channel rings, motion blur, and quantum noise
+  - MRI modalities expose Gaussian noise, coil-shaped bias-field shading, and motion blur tuned for MR appearance
   - Artifact order matches the UI and adapts per modality so effects apply consistently
 - **Patient and orientation metadata**
   - Patient Name, MRN (Patient ID), Sex, and Patient Position (HFS/FFS/HFP/FFP/HFDR/HFDL/FFDR/FFDL)
@@ -33,28 +35,37 @@ Blender add-on that converts selected mesh objects into DICOM outputs for either
   - Accepts Blender-relative paths starting with `//` (resolved relative to the `.blend` file or current working directory)
   - Defaults to `//DICOM_Export` so a new install starts with a portable export location instead of an OS-specific absolute path
   - Progress bar feedback for voxelization and slice writing
+- **RT Dose export**
+  - Mesh objects tagged as RT Dose are voxelized and written as a single multi-frame DICOM RT Dose file (`RTDoseStorage`)
+  - Dose values (Gy) are encoded as uint32 scaled by a `DoseGridScaling` factor computed from the peak dose in the grid
+  - Configurable `DoseType` (Physical / Effective) and `DoseSummationType` (Plan / Fraction / Beam)
+  - RT Dose, image, DRR, and RT Structure exports share the same Study Instance UID and Frame of Reference UID when enabled together
+- **RT Structure Set export**
+  - Mesh objects tagged as RT Structure are sliced at each CT Z-plane using bmesh bisection
+  - Closed planar contours are extracted from cut edges and written as a DICOM RT Structure Set (`RTStructureSetStorage`)
+  - ROI display colour is read from the object's first material diffuse colour, or a clinical-style palette is used as a fallback
+  - Supports ROI types GTV, CTV, PTV, OAR, External, and Other
 - **Selection insights**
   - Live estimates of grid dimensions, voxel counts, and approximate memory usage before export
 
 ## Requirements
 
-- Blender 4.2+
+- Blender 5.1.1+ (Python 3.13 runtime)
 - NumPy (bundled with Blender, used for grid operations)
-- pydicom (required for DICOM export; the add-on warns and disables export if missing)
+- pydicom 3.0.1+ (required for DICOM export; vendored in `wheels/`; the add-on warns and disables export if missing)
 - Optional helper wheels
   - Run `download_wheels.py` to download a Blender-targeted `pydicom` wheel into `./wheels` (defaults to Blender 5.1 / Python 3.13 tags, overrideable via environment variables)
 
-## Blender 5.1 compatibility review
+## Blender 5.1.1 compatibility
 
-- Reviewed against the Blender 5.1 Python API changes listed in the release notes shared in this issue. The add-on does **not** call any of the renamed VSE strip properties, removed brush stroke flags, `sculpt.sample_color`, deprecated `UILayout.template_list(columns=...)`, GPU framebuffer read helpers, or the new exit/cachedir APIs, so no Blender 5.1 API breakage was found in those areas.
-- The add-on has **no OpenVDB dependency**. Voxelization is performed with Blender mesh evaluation, `mathutils.bvhtree.BVHTree`, and NumPy arrays, so the OpenVDB 13.x update does not affect the current code path.
-- NumPy 2.x compatibility was tightened by replacing the direct `np.array(..., copy=False)` conversion used during DICOM export with `np.asarray(...)`, which avoids the stricter copy semantics introduced in NumPy 2.0+.
-- Extension packaging was cleaned up so the manifest only advertises the vendored `pydicom` wheel that the add-on actually uses. The previous manifest listed SciPy and scikit-image wheels that are not required by the codebase and were not present in the repository.
-- The repository now vendors `pydicom 3.0.1` (`py3-none-any`), which requires Python 3.10+ and is compatible with NumPy 2.x and Python 3.13, matching Blender 5.1's runtime.
+- Targets the Blender 5.1.1 Python 3.13 runtime (VFX Platform 2026).
+- The add-on has **no OpenVDB dependency**. Voxelization is performed with Blender mesh evaluation, `mathutils.bvhtree.BVHTree`, and NumPy arrays.
+- NumPy 2.x compatibility is maintained by using `np.asarray(...)` rather than `np.array(..., copy=False)` throughout.
+- Extension packaging advertises only the vendored `pydicom 3.0.1` (`py3-none-any`) wheel, which requires Python 3.10+ and is compatible with NumPy 2.x and Python 3.13.
 
 ## Installation
 
-Blender 4.2+ uses the **Extensions** workflow for add-ons.
+Blender 5.1.1 uses the **Extensions** workflow for add-ons.
 
 1. Create an extension zip from this repository root (the zip must include `blender_manifest.toml` at the top level).
 2. In Blender, open **Edit → Preferences → Extensions**.
@@ -75,30 +86,34 @@ Dependency note:
 
 1. Select one or more mesh objects in the 3D Viewport.
 2. In **Sidebar → DICOMator**, configure the panels:
-   - **Selection Info** – Inspect selection size, estimated grid resolution, voxel count, and memory. Guardrails warn when exceeding 2,000 voxels per axis or 100M total voxels.
-     - When DRR mode is active, the panel also shows the active camera and estimated detector pixel dimensions.
-   - **Per-Object HU** – Assign HU values or pick modality-aware tissue presets for each selected mesh. When meshes overlap, alphabetical ordering of object names decides the winning intensity (last name wins).
-   - **Patient Information** – Set patient name, MRN, and sex.
-   - **Image Orientation** – Choose the Patient Position tag applied to the DICOM slices.
-   - **Export Settings**
-     - Choose **Reconstruction**:
-       - **Synthetic Volume** – writes CT or MR slices according to the selected imaging modality
-       - **DRR** – writes a camera-based projection image from the active scene camera
+   - The main **DICOMator** panel shows the selected object mix, output checkboxes, and export button.
+   - **Objects** – For each selected mesh, choose its **DICOM Type**:
+     - *Image*: assign HU/intensity values or pick modality-aware tissue presets. When meshes overlap, alphabetical ordering of object names decides the winning intensity (last name wins).
+     - *RT Dose*: assign an absorbed dose in Gy. Voxels within the mesh receive that dose value when the RT Dose grid is built.
+     - *RT Structure*: assign an ROI type (GTV, CTV, PTV, OAR, External, Other). The object's material diffuse colour is used as the ROI display colour in the structure set; a clinical-style palette is used if no material is assigned.
+   - Enable the desired outputs in the main panel:
+     - **Image** – writes CT or MR slices from Image meshes
+     - **DRR** – writes a camera-based projection from Image meshes
+     - **Dose** – writes RT Dose from RT Dose meshes
+     - **Structures** – writes RT Structure Set from RT Structure meshes
+   - **Export**
      - Configure **Lateral (mm)** and **Axial (mm)** voxel spacing
      - Toggle **Apply Modifiers/Deformations** to evaluate modifiers, armatures, and shape keys during voxelization
-     - In DRR mode, set **DRR Resolution Scale** to scale the Blender render resolution used for the projection detector
+     - When DRR is enabled, set **DRR Resolution Scale** to scale the Blender render resolution used for the projection detector
+     - When any RT Dose mesh is selected, dose settings appear for **Dose Type** (Physical / Effective) and **Dose Summation Type** (Plan / Fraction / Beam)
      - Choose an **Export Directory** (supports `//` relative paths and defaults to `//DICOM_Export`)
      - Toggle **Export 4D** to export multiple frames
        - Use the timeline range or set a custom `Start`/`End`/`Frame Step`
-     - Enter a **Series Description** (used directly or extended per phase)
-   - **Artifact Controls** – Available for synthetic volume export only. The panel title changes with the modality:
-     - *CT*: Gaussian noise, partial volume blur, metal streaks, ring artifacts, motion blur, and Poisson noise
-       - Ring artifacts can use either a fixed relative radius or a randomized radius per export
-     - *MRI (T1/T2)*: Gaussian noise (intensity-scaled), low-frequency coil bias-field shading, and motion blur
-3. Click **Export to DICOM** or **Export DRR**.
+   - **Series** – Set the series description, patient name, MRN, sex, and patient position in one place.
+   - **Estimate** – Inspect selection size, estimated grid resolution, voxel count, memory, and DRR detector dimensions.
+   - **Artifacts** – Optional and collapsed by default for Image output:
+     - *CT*: Gaussian noise, partial volume, metal streaks, rings, motion, and quantum noise
+     - *MRI (T1/T2)*: Gaussian noise, coil bias-field shading, and motion
+3. Click **Export DICOM**.
    - For single-phase exports the mesh selection is voxelized once and written directly in HU.
    - For 4D exports the timeline advances through the configured frame range, re-voxelizing each phase inside a fixed padded bounding box so every phase shares identical grid dimensions. Each phase receives its own Series Instance UID and the series description is suffixed with the phase number and percent completion.
-   - In DRR mode, the voxelized HU volume is projected from the active camera into a single DICOM secondary-capture image per phase. If MRI presets are selected, the export still works, but CT presets are recommended because the DRR attenuation model assumes HU-like values.
+   - When DRR is enabled, the voxelized HU volume is projected from the active camera into a single DICOM secondary-capture image per phase. CT presets are recommended because the DRR attenuation model assumes HU-like values.
+   - When Dose or Structures are enabled, matching per-object meshes are exported alongside the image/DRR outputs in the same output directory, all sharing the same Study Instance UID and Frame of Reference UID.
 
 Notes:
 - During 4D export the timeline visibly advances; keep animation drivers and dependencies evaluated.
@@ -107,7 +122,7 @@ Notes:
 
 ## Output details
 
-- **Synthetic Volume mode**
+- **Image Series output**
   - Modality: CT (`CTImageStorage`) or MR (`MRImageStorage`) depending on the selected imaging modality
   - Data type: int16 signed (direct HU/intensity values)
   - Window: CT exports default to Center 40 / Width 400; MR exports use Center 128 / Width 256
@@ -116,7 +131,19 @@ Notes:
     - `SliceThickness = SpacingBetweenSlices = voxel_size_mm_z`
     - `ImageOrientationPatient = [1,0,0, 0,1,0]` (axial, aligned to world axes)
     - `ImagePositionPatient` derived from the padded world-space bounding box origin
-- **DRR mode**
+- **RT Dose output**
+  - Storage class: `RTDoseStorage` (SOP class 1.2.840.10008.5.1.4.1.1.481.2)
+  - Data type: uint32 multi-frame image scaled by `DoseGridScaling` (Gy/count); maximum dose maps to the full uint32 range
+  - Grid dimensions and spatial coordinates match the CT grid exactly, ensuring voxel-to-voxel correspondence
+  - `DoseType`, `DoseSummationType`, and `DoseUnits = GY` are set from the RT Dose Settings panel
+  - Shares `StudyInstanceUID` and `FrameOfReferenceUID` with co-exported image, DRR, and structure outputs
+- **RT Structure Set output**
+  - Storage class: `RTStructureSetStorage` (SOP class 1.2.840.10008.5.1.4.1.1.481.3)
+  - Contours generated by bisecting each structure mesh at every CT Z-plane using bmesh operations
+  - Only closed planar loops with three or more points are written; open or degenerate edge chains are discarded
+  - Each ROI's colour is taken from the object's material diffuse colour (0–255 RGB); a clinical-style palette provides fallback colours
+  - References the co-exported image series when Image output is enabled
+- **DRR output**
   - Storage class: Secondary Capture (`SecondaryCaptureImageStorage`) with `ImageType = DERIVED\\PRIMARY\\DRR`
   - Data type: uint16 monochrome projection image
   - Geometry:
@@ -149,10 +176,12 @@ Notes:
 ## Known limitations
 
 - Voxelization is axis-aligned and uses +Z column fills; only mesh geometry is sampled (materials/textures are ignored).
-- DRR generation currently projects the voxelized volume rather than the original triangle mesh, so image sharpness depends on the chosen voxel spacing.
+- DRR generation projects the voxelized volume rather than the original triangle mesh, so image sharpness depends on the chosen voxel spacing.
 - Modifier/armature evaluation is optional but increases memory/time usage; complex rigs may still require baking.
 - Output orientation is fixed to axial slices aligned with Blender world axes.
-- DRR export requires an active scene camera and currently uses the existing HU grid without the synthetic CT/MR artifact stack.
+- DRR export requires an active scene camera and uses image-type meshes without the CT/MR artifact stack.
+- RT Structure Set contour extraction is performed per-slice using planar bisection; very thin or highly curved structures may produce incomplete contours at coarse voxel spacings.
+- Each mesh contributes to exactly one DICOM object type; use duplicate meshes if the same geometry should be exported as multiple object types.
 - Only the modality-specific artifacts listed above are available; additional acquisition effects are not modeled in this release.
 
 ## Troubleshooting
@@ -167,6 +196,10 @@ Notes:
   - Choose a folder with write permissions; blank export paths are rejected, and for `//` paths, save your `.blend` so the relative path resolves.
 - **Artifacts look too strong/weak**
   - Adjust intensity/severity controls or disable individual artifact toggles to isolate effects.
+- **RT Structure contours missing or incomplete**
+  - Ensure structure meshes are closed (manifold) and intersect the CT grid Z-planes. Increase axial resolution (decrease voxel spacing) to capture thin structures.
+- **RT Dose grid is all zeros**
+  - Verify that the mesh objects intended as dose volumes have their DICOM Type set to *RT Dose* and that a non-zero Dose (Gy) value is assigned in the Objects panel.
 
 ## License
 

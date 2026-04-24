@@ -21,8 +21,6 @@ from .artifacts import (
 from .constants import (
     MODALITY_CT,
     MRI_MODALITIES,
-    OUTPUT_MODE_DRR,
-    OUTPUT_MODE_VOLUME,
     ensure_pydicom_available,
     generate_uid,
 )
@@ -261,17 +259,14 @@ def _frame_sequence(context: bpy.types.Context, props) -> list[int]:
     return list(range(start, end + 1, step))
 
 
-def _series_description(base_description: str, output_mode: str) -> str:
+def _series_description(base_description: str) -> str:
     """Return a series description appropriate for the requested output mode."""
 
-    description = str(base_description or "DICOMator Export").strip() or "DICOMator Export"
-    if output_mode == OUTPUT_MODE_DRR and "DRR" not in description.upper():
-        return f"{description} - DRR"
-    return description
+    return str(base_description or "DICOMator Export").strip() or "DICOMator Export"
 
 
 class MESH_OT_export_dicom(Operator):
-    """Export selected meshes to synthetic DICOM volumes or camera-based DRRs."""
+    """Export selected meshes to enabled DICOM outputs."""
 
     bl_idname = "mesh.export_dicom"
     bl_label = "Export to DICOM"
@@ -329,15 +324,36 @@ class MESH_OT_export_dicom(Operator):
             self.report({'ERROR'}, f"Output directory is not writable: {output_dir}")
             return {'CANCELLED'}
 
-        output_mode = getattr(props, "output_mode", OUTPUT_MODE_VOLUME)
-        camera_obj = context.scene.camera if output_mode == OUTPUT_MODE_DRR else None
-        if output_mode == OUTPUT_MODE_DRR and (camera_obj is None or camera_obj.type != 'CAMERA'):
-            self.report({'ERROR'}, "Set an active scene camera before exporting a DRR")
+        export_image_series = bool(getattr(props, "export_image_series", True))
+        export_drr = bool(getattr(props, "export_drr", False))
+        export_rtdose = bool(getattr(props, "export_rtdose", False))
+        export_rtstruct = bool(getattr(props, "export_rtstruct", False))
+
+        if not (export_image_series or export_drr or export_rtdose or export_rtstruct):
+            self.report({'ERROR'}, "Enable at least one DICOM output")
             return {'CANCELLED'}
 
-        # DRR is only valid when there are CT objects.
-        if output_mode == OUTPUT_MODE_DRR and not ct_objects:
-            self.report({'ERROR'}, "DRR export requires at least one CT-type mesh to be selected")
+        if (export_image_series or export_drr) and not ct_objects:
+            self.report({'ERROR'}, "Image Series and DRR exports require at least one image-type mesh")
+            return {'CANCELLED'}
+        if export_rtdose and not dose_objects:
+            self.report({'ERROR'}, "RT Dose export requires at least one RT Dose mesh")
+            return {'CANCELLED'}
+        if export_rtstruct and not struct_objects:
+            self.report({'ERROR'}, "RT Structure export requires at least one RT Structure mesh")
+            return {'CANCELLED'}
+
+        export_objects = []
+        if export_image_series or export_drr:
+            export_objects.extend(ct_objects)
+        if export_rtdose:
+            export_objects.extend(dose_objects)
+        if export_rtstruct:
+            export_objects.extend(struct_objects)
+
+        camera_obj = context.scene.camera if export_drr else None
+        if export_drr and (camera_obj is None or camera_obj.type != 'CAMERA'):
+            self.report({'ERROR'}, "Set an active scene camera before exporting a DRR")
             return {'CANCELLED'}
 
         lateral_mm = get_float_prop(props, "lateral_resolution_mm", get_float_prop(props, "grid_resolution", 2.0))
@@ -353,7 +369,7 @@ class MESH_OT_export_dicom(Operator):
 
         modality_key = getattr(props, "imaging_modality", MODALITY_CT)
         dicom_modality = "MR" if modality_key in MRI_MODALITIES else "CT"
-        if output_mode == OUTPUT_MODE_DRR and modality_key in MRI_MODALITIES:
+        if export_drr and modality_key in MRI_MODALITIES:
             self.report({'WARNING'}, "DRR uses current intensities as attenuation. CT modality presets are recommended.")
 
         try:
@@ -367,13 +383,13 @@ class MESH_OT_export_dicom(Operator):
 
         try:
             # ------------------------------------------------------------------
-            # Compute a UNIFIED bounding box across ALL selected objects
-            # (CT ∪ RTDOSE ∪ RTSTRUCT) so that all exported files share the
+            # Compute a UNIFIED bounding box across enabled export objects
+            # (CT + RTDOSE + RTSTRUCT as requested) so exported files share the
             # same coordinate space and FrameOfReferenceUID is meaningful.
             # ------------------------------------------------------------------
             bounds = _bounds_across_frames(
                 context,
-                selected_meshes,  # all types together for the unified bbox
+                export_objects,
                 frames,
                 apply_modifiers=apply_modifiers,
             )
@@ -399,10 +415,10 @@ class MESH_OT_export_dicom(Operator):
                 )
 
             num_phases = len(frames)
-            series_description_base = _series_description(props.series_description, output_mode)
+            series_description_base = _series_description(props.series_description)
 
-            # Generate study-level UIDs once — shared across CT, RTDOSE, RTSTRUCT
-            # so that all files belong to the same study and frame of reference.
+            # Generate study-level UIDs once so enabled outputs belong to one
+            # study and frame of reference.
             study_uid = generate_uid()
             frame_of_ref_uid = generate_uid()
             saved_frame = context.scene.frame_current
@@ -415,11 +431,13 @@ class MESH_OT_export_dicom(Operator):
 
             # Build a human-readable list of active export types for reporting.
             active_types: list[str] = []
-            if ct_objects:
-                active_types.append("CT" if output_mode == OUTPUT_MODE_VOLUME else "DRR")
-            if dose_objects:
+            if export_image_series:
+                active_types.append(dicom_modality)
+            if export_drr:
+                active_types.append("DRR")
+            if export_rtdose:
                 active_types.append("RT Dose")
-            if struct_objects:
+            if export_rtstruct:
                 active_types.append("RT Structure")
             types_label = " + ".join(active_types)
 
@@ -429,7 +447,7 @@ class MESH_OT_export_dicom(Operator):
                     f"Exporting {num_phases} phase(s) [{types_label}] "
                     f"lateral {lateral_mm}mm / axial {axial_mm}mm. "
                     f"Grid: {estimated_width}x{estimated_height}x{estimated_depth}. "
-                    f"Shared StudyUID: {study_uid[:12]}… ForUID: {frame_of_ref_uid[:12]}…"
+                    f"Shared StudyUID: {study_uid[:12]}... ForUID: {frame_of_ref_uid[:12]}..."
                 ),
             )
 
@@ -454,21 +472,19 @@ class MESH_OT_export_dicom(Operator):
                         percent = (phase_index / num_phases) * 100.0
                         phase_description = f"{series_description_base} - Phase {phase_index} ({percent:.1f}%)"
 
-                    # Reset the per-phase references collected from the CT
-                    # export; RT Struct will use them only if the CT path ran
-                    # in VOLUME mode this phase.
+                    # Reset the per-phase references collected from image
+                    # export; RT Struct uses them when an image series is
+                    # exported in the same phase.
                     ct_series_uid_for_struct = None
                     ct_sop_class_uid_for_struct = None
                     ct_sop_instance_uids_for_struct = []
 
                     # ----------------------------------------------------------
-                    # CT / DRR export
+                    # Image Series / DRR export from image-type meshes
                     # ----------------------------------------------------------
-                    if ct_objects:
+                    if ct_objects and (export_image_series or export_drr):
                         t_start = phase_start + slot * type_span
-                        voxel_progress = _make_progress_callback(context, t_start, t_start + type_span * 0.55)
-                        write_progress = _make_progress_callback(context, t_start + type_span * 0.55, t_start + type_span)
-                        slot += 1
+                        voxel_progress = _make_progress_callback(context, t_start, t_start + type_span * 0.45)
 
                         hu_array, origin, _dimensions = voxelize_objects_to_hu(
                             ct_objects,
@@ -480,45 +496,11 @@ class MESH_OT_export_dicom(Operator):
                             depsgraph=depsgraph,
                         )
 
-                        ct_series_uid = generate_uid()
-
-                        if output_mode == OUTPUT_MODE_DRR:
-                            projection_image, projection_metadata = generate_drr_from_hu_volume(
-                                hu_array,
-                                voxel_size_m,
-                                origin,
-                                context.scene,
-                                camera_obj,
-                                resolution_scale=get_float_prop(props, "drr_resolution_scale", 1.0),
-                                progress_callback=write_progress,
-                            )
-                            filename = (
-                                f"Phase_{phase_index:03d}_DRR.dcm"
-                                if num_phases > 1 else
-                                "DRR_Image_0001.dcm"
-                            )
-                            result = export_projection_to_dicom(
-                                projection_image,
-                                output_dir,
-                                filename=filename,
-                                patient_name=props.patient_name,
-                                patient_id=props.patient_id,
-                                patient_sex=props.patient_sex,
-                                patient_position=props.patient_position,
-                                series_description=phase_description,
-                                pixel_spacing_mm=projection_metadata.get("pixel_spacing_mm"),
-                                image_position_patient=projection_metadata.get("image_position_patient"),
-                                image_orientation_patient=projection_metadata.get("image_orientation_patient"),
-                                study_instance_uid=study_uid,
-                                frame_of_reference_uid=frame_of_ref_uid,
-                                series_instance_uid=ct_series_uid,
-                                series_number=phase_index,
-                                instance_number=1,
-                                number_of_temporal_positions=num_phases if num_phases > 1 else None,
-                                temporal_position_index=phase_index if num_phases > 1 else None,
-                                temporal_position_identifier=phase_index if num_phases > 1 else None,
-                            )
-                        else:
+                        if export_image_series:
+                            write_start = phase_start + slot * type_span
+                            write_progress = _make_progress_callback(context, write_start + type_span * 0.45, write_start + type_span)
+                            slot += 1
+                            image_series_uid = generate_uid()
                             hu_array_to_export = _apply_configured_artifacts(hu_array, props)
                             result = export_voxel_grid_to_dicom(
                                 hu_array_to_export,
@@ -535,26 +517,74 @@ class MESH_OT_export_dicom(Operator):
                                 dicom_modality=dicom_modality,
                                 study_instance_uid=study_uid,
                                 frame_of_reference_uid=frame_of_ref_uid,
-                                series_instance_uid=ct_series_uid,
+                                series_instance_uid=image_series_uid,
                                 series_number=phase_index,
                                 number_of_temporal_positions=num_phases if num_phases > 1 else None,
                                 temporal_position_index=phase_index if num_phases > 1 else None,
                                 temporal_position_identifier=phase_index if num_phases > 1 else None,
                                 phase_index=phase_index if num_phases > 1 else None,
                             )
+                            if 'error' in result:
+                                self.report({'ERROR'}, result['error'])
+                                return {'CANCELLED'}
+
                             # Capture references for RTStruct to link back.
-                            ct_series_uid_for_struct = ct_series_uid
+                            ct_series_uid_for_struct = image_series_uid
                             ct_sop_class_uid_for_struct = result.get('sop_class_uid')
                             ct_sop_instance_uids_for_struct = list(result.get('sop_instance_uids') or [])
 
-                        if 'error' in result:
-                            self.report({'ERROR'}, result['error'])
-                            return {'CANCELLED'}
+                        if export_drr:
+                            write_start = phase_start + slot * type_span
+                            progress_start = write_start if export_image_series else write_start + type_span * 0.45
+                            write_progress = _make_progress_callback(context, progress_start, write_start + type_span)
+                            slot += 1
+                            drr_series_uid = generate_uid()
+                            projection_image, projection_metadata = generate_drr_from_hu_volume(
+                                hu_array,
+                                voxel_size_m,
+                                origin,
+                                context.scene,
+                                camera_obj,
+                                resolution_scale=get_float_prop(props, "drr_resolution_scale", 1.0),
+                                progress_callback=write_progress,
+                            )
+                            filename = (
+                                f"Phase_{phase_index:03d}_DRR.dcm"
+                                if num_phases > 1 else
+                                "DRR_Image_0001.dcm"
+                            )
+                            drr_description = phase_description
+                            if "DRR" not in drr_description.upper():
+                                drr_description = f"{drr_description} - DRR"
+                            result = export_projection_to_dicom(
+                                projection_image,
+                                output_dir,
+                                filename=filename,
+                                patient_name=props.patient_name,
+                                patient_id=props.patient_id,
+                                patient_sex=props.patient_sex,
+                                patient_position=props.patient_position,
+                                series_description=drr_description,
+                                pixel_spacing_mm=projection_metadata.get("pixel_spacing_mm"),
+                                image_position_patient=projection_metadata.get("image_position_patient"),
+                                image_orientation_patient=projection_metadata.get("image_orientation_patient"),
+                                study_instance_uid=study_uid,
+                                frame_of_reference_uid=frame_of_ref_uid,
+                                series_instance_uid=drr_series_uid,
+                                series_number=phase_index + (len(frames) if export_image_series else 0),
+                                instance_number=1,
+                                number_of_temporal_positions=num_phases if num_phases > 1 else None,
+                                temporal_position_index=phase_index if num_phases > 1 else None,
+                                temporal_position_identifier=phase_index if num_phases > 1 else None,
+                            )
+                            if 'error' in result:
+                                self.report({'ERROR'}, result['error'])
+                                return {'CANCELLED'}
 
                     # ----------------------------------------------------------
                     # RT Dose export
                     # ----------------------------------------------------------
-                    if dose_objects:
+                    if export_rtdose and dose_objects:
                         t_start = phase_start + slot * type_span
                         dose_voxel_progress = _make_progress_callback(context, t_start, t_start + type_span * 0.55)
                         slot += 1
@@ -588,7 +618,7 @@ class MESH_OT_export_dicom(Operator):
                             study_instance_uid=study_uid,
                             frame_of_reference_uid=frame_of_ref_uid,
                             series_instance_uid=dose_series_uid,
-                            series_number=phase_index + (len(frames) if ct_objects else 0),
+                            series_number=phase_index + len(frames) * (int(export_image_series) + int(export_drr)),
                             phase_index=phase_index if num_phases > 1 else None,
                         )
 
@@ -599,7 +629,7 @@ class MESH_OT_export_dicom(Operator):
                     # ----------------------------------------------------------
                     # RT Structure Set export
                     # ----------------------------------------------------------
-                    if struct_objects:
+                    if export_rtstruct and struct_objects:
                         t_start = phase_start + slot * type_span
                         slot += 1
 
@@ -623,7 +653,9 @@ class MESH_OT_export_dicom(Operator):
                             study_instance_uid=study_uid,
                             frame_of_reference_uid=frame_of_ref_uid,
                             series_instance_uid=struct_series_uid,
-                            series_number=phase_index + (len(frames) if ct_objects else 0) + (len(frames) if dose_objects else 0),
+                            series_number=phase_index + len(frames) * (
+                                int(export_image_series) + int(export_drr) + int(export_rtdose)
+                            ),
                             phase_index=phase_index if num_phases > 1 else None,
                             referenced_ct_series_instance_uid=ct_series_uid_for_struct,
                             referenced_ct_sop_class_uid=ct_sop_class_uid_for_struct,

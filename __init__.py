@@ -1,8 +1,32 @@
 """Blender entry point for the DICOMator add-on."""
 from __future__ import annotations
 
+import importlib
+import sys
+
 import bpy
 from bpy.props import EnumProperty, FloatProperty, PointerProperty
+
+if "bpy" in locals():
+    # Blender keeps add-on submodules alive across disable/enable cycles.
+    # Reload them before named imports so newly added panel/operator classes
+    # are visible without restarting Blender.
+    for _module_name in (
+        "constants",
+        "utils",
+        "artifacts",
+        "dicom_export",
+        "drr",
+        "rtdose_export",
+        "rtstruct_export",
+        "voxelization",
+        "properties",
+        "operators",
+        "panels",
+    ):
+        _qualified_name = f"{__name__}.{_module_name}"
+        if _qualified_name in sys.modules:
+            importlib.reload(sys.modules[_qualified_name])
 
 from .artifacts import (
     add_gaussian_noise,
@@ -19,8 +43,8 @@ from .operators import MESH_OT_export_dicom
 from .rtdose_export import export_rtdose_to_dicom
 from .rtstruct_export import export_rtstruct_to_dicom
 from .panels import (
+    VIEW3D_PT_dicomator_artifacts,
     VIEW3D_PT_dicomator_export_settings,
-    VIEW3D_PT_dicomator_orientation,
     VIEW3D_PT_dicomator_panel,
     VIEW3D_PT_dicomator_patient_info,
     VIEW3D_PT_dicomator_per_object_hu,
@@ -45,11 +69,11 @@ classes = (
     DICOMatorProperties,
     MESH_OT_export_dicom,
     VIEW3D_PT_dicomator_panel,
-    VIEW3D_PT_dicomator_selection_info,
     VIEW3D_PT_dicomator_per_object_hu,
-    VIEW3D_PT_dicomator_patient_info,
-    VIEW3D_PT_dicomator_orientation,
     VIEW3D_PT_dicomator_export_settings,
+    VIEW3D_PT_dicomator_artifacts,
+    VIEW3D_PT_dicomator_patient_info,
+    VIEW3D_PT_dicomator_selection_info,
 )
 
 
@@ -83,7 +107,7 @@ def register() -> None:  # pragma: no cover - Blender registration
     if not hasattr(bpy.types.Object, "dicomator_object_type"):
         bpy.types.Object.dicomator_object_type = EnumProperty(
             name="DICOM Object Type",
-            description="Specifies how this mesh will be exported: as a CT volume, RT Dose grid, or RT Structure Set contour",
+            description="Specifies whether this mesh contributes to image, RT Dose, or RT Structure exports",
             items=DICOM_OBJECT_TYPE_ITEMS,
             default="CT",
         )

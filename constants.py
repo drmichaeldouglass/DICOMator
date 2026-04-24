@@ -18,8 +18,6 @@ MIN_HU_VALUE = -1024    # Min HU (typical CT lower bound)
 MODALITY_CT = "CT"
 MODALITY_MRI_T1 = "MRI_T1"
 MODALITY_MRI_T2 = "MRI_T2"
-OUTPUT_MODE_VOLUME = "VOLUME"
-OUTPUT_MODE_DRR = "DRR"
 
 MRI_MODALITIES = {MODALITY_MRI_T1, MODALITY_MRI_T2}
 
@@ -27,11 +25,6 @@ IMAGING_MODALITY_ITEMS = [
     (MODALITY_CT, "CT", "Assign CT Hounsfield Units"),
     (MODALITY_MRI_T1, "T1 MR", "Assign intensities for T1-weighted MRI"),
     (MODALITY_MRI_T2, "T2 MR", "Assign intensities for T2-weighted MRI"),
-]
-
-OUTPUT_MODE_ITEMS = [
-    (OUTPUT_MODE_VOLUME, "Synthetic Volume", "Export a voxelized CT or MR image series"),
-    (OUTPUT_MODE_DRR, "DRR", "Export a digital reconstructed radiograph from the active camera"),
 ]
 
 # Tissue/material presets with representative intensities for each modality.
@@ -175,7 +168,7 @@ RTDOSE_SOP_CLASS = "1.2.840.10008.5.1.4.1.1.481.2"
 # ---------------------------------------------------------------------------
 
 DICOM_OBJECT_TYPE_ITEMS = [
-    ("CT", "CT Volume", "Voxelize and export as a CT image series"),
+    ("CT", "Image", "Contribute to CT/MR image series and DRR exports"),
     ("RTDOSE", "RT Dose", "Voxelize and export as an RT Dose grid (Gy)"),
     ("RTSTRUCT", "RT Structure", "Export surface contours as an RT Structure Set"),
 ]
@@ -290,11 +283,8 @@ __all__ = [
     "MODALITY_CT",
     "MODALITY_MRI_T1",
     "MODALITY_MRI_T2",
-    "OUTPUT_MODE_VOLUME",
-    "OUTPUT_MODE_DRR",
     "MRI_MODALITIES",
     "IMAGING_MODALITY_ITEMS",
-    "OUTPUT_MODE_ITEMS",
     "MATERIAL_INTENSITIES",
     "MATERIAL_ITEMS",
     "get_material_intensity",
