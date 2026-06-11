@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 import math
-from typing import Callable, Optional, Sequence
+from typing import Callable, Generator, Optional, Sequence
 
 import bpy
 import numpy as np
 from mathutils import Vector
 
 ProgressCallback = Optional[Callable[[int, int], None]]
+DRRResult = tuple[np.ndarray, dict[str, object]]
+DRRGenerator = Generator[tuple[int, int], None, DRRResult]
 
 
 def resolve_drr_detector_size(scene: bpy.types.Scene, resolution_scale: float = 1.0) -> tuple[int, int]:
@@ -59,11 +61,19 @@ def _ray_box_intersections(
     return entry, exit_, valid
 
 
-def _normalize_projection(line_integrals: np.ndarray) -> np.ndarray:
-    """Map line integrals into a 16-bit display-ready DRR image."""
+def _normalize_projection(line_integrals: np.ndarray, fixed: bool = False) -> np.ndarray:
+    """Map line integrals into a 16-bit display-ready DRR image.
+
+    When ``fixed`` is True the physical absorption fraction ``1 - exp(-L)``
+    is mapped directly onto the uint16 range without percentile stretching,
+    so intensities stay comparable across 4D phases.
+    """
 
     transmission = np.exp(-line_integrals.astype(np.float32, copy=False))
     radiograph = 1.0 - transmission
+
+    if fixed:
+        return np.round(np.clip(radiograph, 0.0, 1.0) * 65535.0).astype(np.uint16, copy=False)
 
     if not np.any(radiograph > 0.0):
         return np.zeros(radiograph.shape, dtype=np.uint16)
@@ -88,8 +98,41 @@ def generate_drr_from_hu_volume(
     *,
     resolution_scale: float = 1.0,
     progress_callback: ProgressCallback = None,
-) -> tuple[np.ndarray, dict[str, object]]:
-    """Project ``hu_volume`` into a DRR using the active camera geometry."""
+    fixed_normalization: bool = False,
+) -> DRRResult:
+    """Project ``hu_volume`` into a DRR using the active camera geometry.
+
+    Blocking wrapper around :func:`generate_drr_from_hu_volume_iter`.
+    """
+    generator = generate_drr_from_hu_volume_iter(
+        hu_volume,
+        voxel_size,
+        origin,
+        scene,
+        camera_obj,
+        resolution_scale=resolution_scale,
+        fixed_normalization=fixed_normalization,
+    )
+    while True:
+        try:
+            current, total = next(generator)
+        except StopIteration as stop:
+            return stop.value
+        if progress_callback:
+            progress_callback(current, total)
+
+
+def generate_drr_from_hu_volume_iter(
+    hu_volume: np.ndarray,
+    voxel_size: Sequence[float] | float,
+    origin: Vector,
+    scene: bpy.types.Scene,
+    camera_obj: bpy.types.Object,
+    *,
+    resolution_scale: float = 1.0,
+    fixed_normalization: bool = False,
+) -> DRRGenerator:
+    """Generator variant: yields ``(rows_done, total_rows)`` per detector chunk."""
 
     if camera_obj is None or camera_obj.type != 'CAMERA':
         raise ValueError("Scene must have an active camera for DRR export")
@@ -199,10 +242,9 @@ def generate_drr_from_hu_volume(
 
         line_integrals[row_start:row_end, :] = chunk_integrals.reshape(row_end - row_start, detector_width)
 
-        if progress_callback is not None:
-            progress_callback(row_end, detector_height)
+        yield row_end, detector_height
 
-    projection_image = _normalize_projection(line_integrals)
+    projection_image = _normalize_projection(line_integrals, fixed=fixed_normalization)
 
     detector_origin_world = camera_obj.matrix_world @ top_left
     row_direction_world = (camera_obj.matrix_world.to_3x3() @ (top_right - top_left)).normalized()
@@ -231,4 +273,8 @@ def generate_drr_from_hu_volume(
     return projection_image, metadata
 
 
-__all__ = ["generate_drr_from_hu_volume", "resolve_drr_detector_size"]
+__all__ = [
+    "generate_drr_from_hu_volume",
+    "generate_drr_from_hu_volume_iter",
+    "resolve_drr_detector_size",
+]

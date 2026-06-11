@@ -163,6 +163,9 @@ RTSTRUCT_SOP_CLASS = "1.2.840.10008.5.1.4.1.1.481.3"
 #: SOP Class UID for RT Dose (DICOM PS3.4 B.5)
 RTDOSE_SOP_CLASS = "1.2.840.10008.5.1.4.1.1.481.2"
 
+#: SOP Class UID for RT Plan (DICOM PS3.4 B.5)
+RTPLAN_SOP_CLASS = "1.2.840.10008.5.1.4.1.1.481.5"
+
 # ---------------------------------------------------------------------------
 # Per-object DICOM type items (used as EnumProperty items on bpy.types.Object)
 # ---------------------------------------------------------------------------
@@ -230,13 +233,24 @@ def ensure_pydicom_available() -> bool:
     # (e.g. data/urls.json), which fails when the module lives inside a zip.
     # Extract the wheel to a real directory alongside the wheel file so that
     # normal filesystem I/O works correctly.
+    #
+    # Extraction is strictly best-effort: the extension directory may be
+    # read-only (system-wide installs), the archive may be corrupt, or two
+    # Blender instances may race on the same directory. Blender >= 4.2
+    # normally installs manifest-declared wheels itself, so on any failure we
+    # fall through to the plain import below instead of breaking add-on
+    # registration.
     _wheels_dir = Path(__file__).parent / "wheels"
     if _wheels_dir.is_dir():
         for _whl in _wheels_dir.glob("pydicom*.whl"):
             _extract_dir = _whl.parent / (_whl.stem + "_extracted")
-            if not _extract_dir.is_dir():
-                with zipfile.ZipFile(_whl) as _zf:
-                    _zf.extractall(_extract_dir)
+            try:
+                if not _extract_dir.is_dir():
+                    with zipfile.ZipFile(_whl) as _zf:
+                        _zf.extractall(_extract_dir)
+            except Exception:
+                LOGGER.warning("Could not extract bundled wheel %s", _whl, exc_info=True)
+                continue
             _extract_str = str(_extract_dir)
             if _extract_str not in sys.path:
                 sys.path.insert(0, _extract_str)
@@ -290,6 +304,7 @@ __all__ = [
     "get_material_intensity",
     "RTSTRUCT_SOP_CLASS",
     "RTDOSE_SOP_CLASS",
+    "RTPLAN_SOP_CLASS",
     "DICOM_OBJECT_TYPE_ITEMS",
     "ROI_TYPE_ITEMS",
     "DOSE_TYPE_ITEMS",

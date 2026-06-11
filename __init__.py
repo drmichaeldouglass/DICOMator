@@ -7,26 +7,26 @@ import sys
 import bpy
 from bpy.props import EnumProperty, FloatProperty, PointerProperty
 
-if "bpy" in locals():
-    # Blender keeps add-on submodules alive across disable/enable cycles.
-    # Reload them before named imports so newly added panel/operator classes
-    # are visible without restarting Blender.
-    for _module_name in (
-        "constants",
-        "utils",
-        "artifacts",
-        "dicom_export",
-        "drr",
-        "rtdose_export",
-        "rtstruct_export",
-        "voxelization",
-        "properties",
-        "operators",
-        "panels",
-    ):
-        _qualified_name = f"{__name__}.{_module_name}"
-        if _qualified_name in sys.modules:
-            importlib.reload(sys.modules[_qualified_name])
+# Blender keeps add-on submodules alive in sys.modules across disable/enable
+# cycles. Reload any that are already present (a no-op on first load) before
+# the named imports below so newly added panel/operator classes are visible
+# without restarting Blender.
+for _module_name in (
+    "constants",
+    "utils",
+    "artifacts",
+    "dicom_export",
+    "drr",
+    "rtdose_export",
+    "rtstruct_export",
+    "voxelization",
+    "properties",
+    "operators",
+    "panels",
+):
+    _qualified_name = f"{__name__}.{_module_name}"
+    if _qualified_name in sys.modules:
+        importlib.reload(sys.modules[_qualified_name])
 
 from .artifacts import (
     add_gaussian_noise,
@@ -56,7 +56,7 @@ from .voxelization import voxelize_mesh, voxelize_objects_to_dose, voxelize_obje
 bl_info = {
     "name": "DICOMator",
     "author": "Michael Douglass",
-    "version": (3, 1, 1),
+    "version": (3, 2, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > DICOMator",
     "description": "Converts mesh objects into synthetic CT/MR series or camera-based DRR DICOM images",
