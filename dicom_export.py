@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
-from typing import Callable, Optional, Sequence
+from typing import Callable, Generator, Optional, Sequence
 
 import numpy as np
 from mathutils import Vector
@@ -17,9 +17,34 @@ from .constants import (
 )
 
 SliceProgressCallback = Optional[Callable[[int, int], None]]
+ExportGenerator = Generator[tuple[int, int], None, dict]
 
 
 def export_voxel_grid_to_dicom(
+    voxel_grid: np.ndarray,
+    voxel_size: Sequence[float] | float,
+    output_dir: str,
+    bbox_min: Vector,
+    *,
+    progress_callback: SliceProgressCallback = None,
+    **kwargs,
+) -> dict[str, str]:
+    """Export ``voxel_grid`` to a folder of DICOM slices.
+
+    Blocking wrapper around :func:`export_voxel_grid_to_dicom_iter`; see that
+    function for the keyword arguments.
+    """
+    generator = export_voxel_grid_to_dicom_iter(voxel_grid, voxel_size, output_dir, bbox_min, **kwargs)
+    while True:
+        try:
+            current, total = next(generator)
+        except StopIteration as stop:
+            return stop.value
+        if progress_callback:
+            progress_callback(current, total)
+
+
+def export_voxel_grid_to_dicom_iter(
     voxel_grid: np.ndarray,
     voxel_size: Sequence[float] | float,
     output_dir: str,
@@ -29,7 +54,6 @@ def export_voxel_grid_to_dicom(
     patient_id: str = "12345678",
     patient_sex: str = "M",
     series_description: str = "CT Series from DICOMator",
-    progress_callback: SliceProgressCallback = None,
     direct_hu: bool = False,
     patient_position: str = "HFS",
     dicom_modality: str = "CT",
@@ -41,8 +65,12 @@ def export_voxel_grid_to_dicom(
     number_of_temporal_positions: Optional[int] = None,
     phase_index: Optional[int] = None,
     temporal_position_index: Optional[int] = None,
-) -> dict[str, str]:
-    """Export ``voxel_grid`` to a folder of DICOM slices."""
+) -> ExportGenerator:
+    """Export ``voxel_grid`` to DICOM slices, yielding per-slice progress.
+
+    Yields ``(slices_written, total_slices)`` after each slice and returns the
+    result dict (``{'success': ...}`` or ``{'error': ...}``).
+    """
     if not shared_constants.ensure_pydicom_available():
         return {'error': 'pydicom not available'}
 
@@ -140,6 +168,17 @@ def export_voxel_grid_to_dicom(
                 dataset.TemporalPositionIdentifier = int(temporal_position_identifier)
 
             dataset.Modality = modality
+            if modality == "MR":
+                # MR Image module (PS3.3 C.8.3.1) Type 1/2 attributes with
+                # plausible spin-echo defaults so files pass IOD validation.
+                dataset.ScanningSequence = 'SE'
+                dataset.SequenceVariant = 'NONE'
+                dataset.ScanOptions = ''
+                dataset.MRAcquisitionType = '3D'
+                dataset.RepetitionTime = '500'
+                dataset.EchoTime = '15'
+                dataset.EchoTrainLength = '1'
+                dataset.MagneticFieldStrength = '1.5'
             dataset.Manufacturer = 'DICOMator'
             dataset.InstitutionName = 'Virtual Hospital'
             dataset.StationName = 'Blender'
@@ -175,8 +214,11 @@ def export_voxel_grid_to_dicom(
             dataset.BitsStored = 16
             dataset.HighBit = 15
             dataset.PixelRepresentation = 1
-            dataset.RescaleIntercept = 0.0
-            dataset.RescaleSlope = 1.0
+            if modality == "CT":
+                # Rescale attributes belong to the CT Image module; the MR
+                # Image IOD does not include them.
+                dataset.RescaleIntercept = 0.0
+                dataset.RescaleSlope = 1.0
             if modality == "MR":
                 dataset.WindowCenter = 128
                 dataset.WindowWidth = 256
@@ -190,12 +232,9 @@ def export_voxel_grid_to_dicom(
             else:
                 filename = os.path.join(output_dir, f"{modality}_Slice_{index + 1:04d}.dcm")
 
-            dataset.is_little_endian = True
-            dataset.is_implicit_VR = False
-            dataset.save_as(filename)
+            dataset.save_as(filename, enforce_file_format=True)
 
-            if progress_callback:
-                progress_callback(index + 1, num_slices)
+            yield index + 1, num_slices
         except Exception as exc:  # pragma: no cover - Blender runtime feedback
             print(f"Error saving DICOM file for slice {index + 1}: {exc}")
             return {'error': f"Error saving DICOM file for slice {index + 1}: {exc}"}
@@ -337,13 +376,15 @@ def export_projection_to_dicom(
         dataset.PixelData = image_2d.tobytes()
 
         output_path = os.path.join(output_dir, filename)
-        dataset.is_little_endian = True
-        dataset.is_implicit_VR = False
-        dataset.save_as(output_path)
+        dataset.save_as(output_path, enforce_file_format=True)
     except Exception as exc:  # pragma: no cover - Blender runtime feedback
         return {'error': f"Error saving DRR DICOM file: {exc}"}
 
     return {'success': f"Successfully exported DRR image to {output_dir}"}
 
 
-__all__ = ["export_projection_to_dicom", "export_voxel_grid_to_dicom"]
+__all__ = [
+    "export_projection_to_dicom",
+    "export_voxel_grid_to_dicom",
+    "export_voxel_grid_to_dicom_iter",
+]

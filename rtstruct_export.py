@@ -29,11 +29,10 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
-from typing import Optional, Sequence
+from typing import Generator, Optional, Sequence
 
 import bmesh
 import bpy
-import numpy as np
 
 from . import constants as shared_constants
 from .constants import RTSTRUCT_SOP_CLASS
@@ -77,8 +76,11 @@ def _walk_loops(cut_edges: list) -> list[list[tuple[float, float, float]]]:
     """Convert a set of BMEdge objects from a bisect into ordered closed loops.
 
     Each loop is returned as a list of ``(x, y, z)`` float tuples in Blender
-    world-space metres.  Only loops with three or more points are returned
-    (degenerate single-edge intersections are discarded).
+    world-space metres.  Only loops that actually close back on their start
+    vertex with three or more points are returned; open edge chains (from
+    non-watertight meshes) and degenerate single-edge intersections are
+    discarded, since emitting them as ``CLOSED_PLANAR`` contours would be
+    incorrect.
 
     The walk uses vertex object-identity comparisons, which are valid while
     the bmesh remains alive.
@@ -102,6 +104,7 @@ def _walk_loops(cut_edges: list) -> list[list[tuple[float, float, float]]]:
         unvisited.discard(start)
         prev = None
         current = start
+        closed = False
 
         while True:
             # Prefer vertices not yet visited; stop if we reach the start
@@ -112,6 +115,7 @@ def _walk_loops(cut_edges: list) -> list[list[tuple[float, float, float]]]:
             nxt = neighbors[0]
             if nxt is start and len(loop_verts) >= 3:
                 # Successfully closed the loop.
+                closed = True
                 break
             if nxt not in unvisited:
                 # Either reached a dead end or a vertex belonging to another
@@ -122,10 +126,63 @@ def _walk_loops(cut_edges: list) -> list[list[tuple[float, float, float]]]:
             prev = current
             current = nxt
 
-        if len(loop_verts) >= 3:
+        if closed and len(loop_verts) >= 3:
             loops.append([(float(v.co.x), float(v.co.y), float(v.co.z)) for v in loop_verts])
 
     return loops
+
+
+def _world_bmesh(
+    obj: bpy.types.Object,
+    depsgraph: bpy.types.Depsgraph,
+    *,
+    apply_modifiers: bool,
+) -> bmesh.types.BMesh:
+    """Return a new world-space bmesh for ``obj`` (caller must ``free()``)."""
+    if apply_modifiers and depsgraph is not None:
+        obj_eval = obj.evaluated_get(depsgraph)
+        mesh_data = obj_eval.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
+        world_matrix = obj_eval.matrix_world
+    else:
+        obj_eval = None
+        mesh_data = obj.data
+        world_matrix = obj.matrix_world
+
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(mesh_data)
+        bm.transform(world_matrix)
+    except Exception:
+        bm.free()
+        raise
+    finally:
+        if obj_eval is not None:
+            obj_eval.to_mesh_clear()
+    return bm
+
+
+def _slice_plane(bm_base: bmesh.types.BMesh, z_m: float) -> list[list[tuple[float, float, float]]]:
+    """Bisect ``bm_base`` at world-space height ``z_m`` and return its loops."""
+    bm_slice = bm_base.copy()
+    try:
+        bm_slice.verts.ensure_lookup_table()
+        bm_slice.edges.ensure_lookup_table()
+        bm_slice.faces.ensure_lookup_table()
+
+        geom_all = list(bm_slice.verts) + list(bm_slice.edges) + list(bm_slice.faces)
+        result = bmesh.ops.bisect_plane(
+            bm_slice,
+            geom=geom_all,
+            dist=1e-5,
+            plane_co=(0.0, 0.0, float(z_m)),
+            plane_no=(0.0, 0.0, 1.0),
+            clear_outer=False,
+            clear_inner=False,
+        )
+        cut_edges = [elem for elem in result["geom_cut"] if isinstance(elem, bmesh.types.BMEdge)]
+        return _walk_loops(cut_edges)
+    finally:
+        bm_slice.free()
 
 
 def extract_contours_from_mesh(
@@ -161,53 +218,42 @@ def extract_contours_from_mesh(
         The caller is responsible for converting positions to millimetres
         when writing DICOM attributes.
     """
-    if apply_modifiers and depsgraph is not None:
-        obj_eval = obj.evaluated_get(depsgraph)
-        mesh_data = obj_eval.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
-        world_matrix = obj_eval.matrix_world
-    else:
-        mesh_data = obj.data
-        world_matrix = obj.matrix_world
-
     # Build a single base bmesh in world space to avoid repeated transforms.
-    bm_base = bmesh.new()
-    bm_base.from_mesh(mesh_data)
-    bm_base.transform(world_matrix)
-
-    # Release the temporary evaluated mesh now that we have the bmesh.
-    if apply_modifiers and depsgraph is not None:
-        obj_eval.to_mesh_clear()
-
-    contours: dict[float, list[list[tuple[float, float, float]]]] = {}
-
-    for z_m in z_positions_m:
-        bm_slice = bm_base.copy()
-        bm_slice.verts.ensure_lookup_table()
-        bm_slice.edges.ensure_lookup_table()
-        bm_slice.faces.ensure_lookup_table()
-
-        geom_all = list(bm_slice.verts) + list(bm_slice.edges) + list(bm_slice.faces)
-        result = bmesh.ops.bisect_plane(
-            bm_slice,
-            geom=geom_all,
-            dist=1e-5,
-            plane_co=(0.0, 0.0, float(z_m)),
-            plane_no=(0.0, 0.0, 1.0),
-            clear_outer=False,
-            clear_inner=False,
-        )
-
-        cut_edges = [elem for elem in result["geom_cut"] if isinstance(elem, bmesh.types.BMEdge)]
-        loops = _walk_loops(cut_edges)
-
-        contours[float(z_m)] = loops
-        bm_slice.free()
-
-    bm_base.free()
+    bm_base = _world_bmesh(obj, depsgraph, apply_modifiers=apply_modifiers)
+    try:
+        contours: dict[float, list[list[tuple[float, float, float]]]] = {}
+        for z_m in z_positions_m:
+            contours[float(z_m)] = _slice_plane(bm_base, z_m)
+    finally:
+        bm_base.free()
     return contours
 
 
 def export_rtstruct_to_dicom(
+    objects: Sequence[bpy.types.Object],
+    bbox_min: "mathutils.Vector",  # noqa: F821 – mathutils present in Blender
+    voxel_size: Sequence[float] | float,
+    n_slices: int,
+    output_dir: str,
+    depsgraph: bpy.types.Depsgraph,
+    **kwargs,
+) -> dict[str, str]:
+    """Write an RT Structure Set DICOM file for the supplied mesh objects.
+
+    Blocking wrapper around :func:`export_rtstruct_to_dicom_iter`; see that
+    function for parameter documentation.
+    """
+    generator = export_rtstruct_to_dicom_iter(
+        objects, bbox_min, voxel_size, n_slices, output_dir, depsgraph, **kwargs
+    )
+    while True:
+        try:
+            next(generator)
+        except StopIteration as stop:
+            return stop.value
+
+
+def export_rtstruct_to_dicom_iter(
     objects: Sequence[bpy.types.Object],
     bbox_min: "mathutils.Vector",  # noqa: F821 – mathutils present in Blender
     voxel_size: Sequence[float] | float,
@@ -229,8 +275,11 @@ def export_rtstruct_to_dicom(
     referenced_ct_series_instance_uid: Optional[str] = None,
     referenced_ct_sop_class_uid: Optional[str] = None,
     referenced_ct_sop_instance_uids: Optional[Sequence[str]] = None,
-) -> dict[str, str]:
+) -> Generator[tuple[int, int], None, dict[str, str]]:
     """Write an RT Structure Set DICOM file for the supplied mesh objects.
+
+    Generator variant: yields ``(planes_done, total_planes)`` while contours
+    are extracted, then returns the result dict.
 
     Parameters
     ----------
@@ -303,14 +352,21 @@ def export_rtstruct_to_dicom(
     # Extract contours for every object before building the DICOM dataset so
     # that bmesh operations are completed while we still hold references.
     all_contours: list[dict[float, list[list[tuple[float, float, float]]]]] = []
+    total_planes = max(1, len(objects) * len(z_positions_m))
+    planes_done = 0
     for obj in objects:
-        contours = extract_contours_from_mesh(
-            obj,
-            z_positions_m,
-            depsgraph,
-            apply_modifiers=apply_modifiers,
-        )
+        bm_base = _world_bmesh(obj, depsgraph, apply_modifiers=apply_modifiers)
+        try:
+            contours: dict[float, list[list[tuple[float, float, float]]]] = {}
+            for z_m in z_positions_m:
+                contours[float(z_m)] = _slice_plane(bm_base, z_m)
+                planes_done += 1
+                if planes_done % 8 == 0:
+                    yield planes_done, total_planes
+        finally:
+            bm_base.free()
         all_contours.append(contours)
+    yield planes_done, total_planes
 
     try:
         file_meta = Dataset()
@@ -320,8 +376,6 @@ def export_rtstruct_to_dicom(
         file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
 
         ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
-        ds.is_little_endian = True
-        ds.is_implicit_VR = False
 
         # --- SOP common ---
         ds.SOPClassUID = RTSTRUCT_SOP_CLASS
@@ -478,7 +532,7 @@ def export_rtstruct_to_dicom(
         else:
             filename = os.path.join(output_dir, "RTStruct.dcm")
 
-        ds.save_as(filename)
+        ds.save_as(filename, enforce_file_format=True)
 
     except Exception as exc:
         return {"error": f"Error saving RT Structure Set DICOM file: {exc}"}
@@ -489,4 +543,5 @@ def export_rtstruct_to_dicom(
 __all__ = [
     "extract_contours_from_mesh",
     "export_rtstruct_to_dicom",
+    "export_rtstruct_to_dicom_iter",
 ]

@@ -385,6 +385,15 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
         items=DOSE_SUMMATION_TYPE_ITEMS,
         default="PLAN",
     )
+    dose_accumulation: bpy.props.EnumProperty(
+        name="Dose Overlap",
+        description="How overlapping RT Dose meshes combine in the exported grid",
+        items=[
+            ("SUM", "Sum", "Overlapping dose volumes accumulate, matching how physical dose combines"),
+            ("OVERWRITE", "Overwrite", "The alphabetically last mesh wins in overlapping voxels"),
+        ],
+        default="SUM",
+    )
 
 
 __all__ = [

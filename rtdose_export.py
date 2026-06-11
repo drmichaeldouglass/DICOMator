@@ -36,7 +36,91 @@ import numpy as np
 from mathutils import Vector
 
 from . import constants as shared_constants
-from .constants import RTDOSE_SOP_CLASS
+from .constants import RTDOSE_SOP_CLASS, RTPLAN_SOP_CLASS
+
+
+def _export_minimal_rtplan(
+    output_dir: str,
+    *,
+    patient_name: str,
+    patient_id: str,
+    patient_sex: str,
+    series_description: str,
+    study_instance_uid: str,
+    frame_of_reference_uid: str,
+    series_number: int,
+    date_str: str,
+    time_str: str,
+    phase_index: Optional[int],
+) -> tuple[str, str]:
+    """Write a minimal RT Plan that the RT Dose object can reference.
+
+    ``ReferencedRTPlanSequence`` is Type 1C in the RT Dose IOD whenever
+    ``DoseSummationType`` is PLAN/FRACTION/BEAM, so a syntactically valid
+    plan object is required for strict importers. ``RTPlanGeometry`` is set
+    to TREATMENT_DEVICE because no structure set is referenced.
+
+    Returns ``(sop_instance_uid, filename)``.
+    """
+    pydicom = shared_constants.pydicom
+    Dataset = shared_constants.Dataset
+    FileDataset = shared_constants.FileDataset
+    generate_uid = shared_constants.generate_uid
+
+    plan_sop_instance_uid = generate_uid()
+
+    file_meta = Dataset()
+    file_meta.MediaStorageSOPClassUID = RTPLAN_SOP_CLASS
+    file_meta.MediaStorageSOPInstanceUID = plan_sop_instance_uid
+    file_meta.ImplementationClassUID = pydicom.uid.PYDICOM_IMPLEMENTATION_UID
+    file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+
+    plan = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
+
+    plan.SOPClassUID = RTPLAN_SOP_CLASS
+    plan.SOPInstanceUID = plan_sop_instance_uid
+
+    plan.PatientName = patient_name
+    plan.PatientID = patient_id
+    plan.PatientBirthDate = ""
+    plan.PatientSex = patient_sex
+
+    plan.StudyInstanceUID = study_instance_uid
+    plan.StudyDate = date_str
+    plan.StudyTime = time_str
+    plan.StudyID = "1"
+    plan.AccessionNumber = "1"
+    plan.ReferringPhysicianName = ""
+
+    plan.Modality = "RTPLAN"
+    plan.SeriesInstanceUID = generate_uid()
+    plan.SeriesNumber = int(series_number)
+    plan.SeriesDescription = f"{series_description} - RT Plan"
+    plan.SeriesDate = date_str
+    plan.SeriesTime = time_str
+    plan.Manufacturer = "DICOMator"
+    plan.InstitutionName = "Virtual Hospital"
+    plan.StationName = "Blender"
+    plan.OperatorsName = ""
+
+    plan.FrameOfReferenceUID = frame_of_reference_uid
+    plan.PositionReferenceIndicator = ""
+
+    plan.InstanceNumber = "1"
+    plan.RTPlanLabel = "DICOMator"
+    plan.RTPlanName = "Synthetic plan"
+    plan.RTPlanDate = date_str
+    plan.RTPlanTime = time_str
+    plan.RTPlanGeometry = "TREATMENT_DEVICE"
+    plan.ApprovalStatus = "UNAPPROVED"
+
+    if phase_index is not None:
+        filename = os.path.join(output_dir, f"Phase_{int(phase_index):03d}_RTPlan.dcm")
+    else:
+        filename = os.path.join(output_dir, "RTPlan.dcm")
+    plan.save_as(filename, enforce_file_format=True)
+
+    return plan_sop_instance_uid, filename
 
 
 def export_rtdose_to_dicom(
@@ -57,6 +141,7 @@ def export_rtdose_to_dicom(
     series_instance_uid: Optional[str] = None,
     series_number: int = 1,
     phase_index: Optional[int] = None,
+    write_rtplan: bool = True,
 ) -> dict[str, str]:
     """Write ``dose_grid`` to a single multi-frame DICOM RT Dose file.
 
@@ -91,6 +176,10 @@ def export_rtdose_to_dicom(
     phase_index:
         Optional 1-based phase index used in the output filename when
         exporting a 4D sequence.
+    write_rtplan:
+        When True (default) a minimal companion RT Plan file is written and
+        referenced via ``ReferencedRTPlanSequence``, which the RT Dose IOD
+        requires (Type 1C) for the supported ``DoseSummationType`` values.
 
     Returns
     -------
@@ -156,6 +245,25 @@ def export_rtdose_to_dicom(
     series_instance_uid = series_instance_uid or generate_uid()
     sop_instance_uid = generate_uid()
 
+    plan_sop_instance_uid: Optional[str] = None
+    if write_rtplan:
+        try:
+            plan_sop_instance_uid, _plan_filename = _export_minimal_rtplan(
+                output_dir,
+                patient_name=patient_name,
+                patient_id=patient_id,
+                patient_sex=patient_sex,
+                series_description=series_description,
+                study_instance_uid=study_instance_uid,
+                frame_of_reference_uid=frame_of_reference_uid,
+                series_number=series_number,
+                date_str=date_str,
+                time_str=time_str,
+                phase_index=phase_index,
+            )
+        except Exception as exc:
+            return {"error": f"Error saving companion RT Plan DICOM file: {exc}"}
+
     try:
         file_meta = Dataset()
         file_meta.MediaStorageSOPClassUID = RTDOSE_SOP_CLASS
@@ -164,8 +272,6 @@ def export_rtdose_to_dicom(
         file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
 
         ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
-        ds.is_little_endian = True
-        ds.is_implicit_VR = False
 
         # --- SOP common ---
         ds.SOPClassUID = RTDOSE_SOP_CLASS
@@ -206,6 +312,9 @@ def export_rtdose_to_dicom(
         ds.ContentTime = time_str
         ds.ImageType = ["ORIGINAL", "PRIMARY", "AXIAL"]
         ds.NumberOfFrames = int(depth)
+        # Multi-frame module (PS3.3 C.7.6.6): FrameIncrementPointer is Type 1
+        # and for RT Dose must point at GridFrameOffsetVector (3004,000C).
+        ds.FrameIncrementPointer = pydicom.tag.Tag(0x3004, 0x000C)
 
         # --- Image plane ---
         # ImagePositionPatient is the center of the first voxel (PS3.3
@@ -239,6 +348,11 @@ def export_rtdose_to_dicom(
         ds.DoseType = str(dose_type or "PHYSICAL").upper()
         ds.DoseSummationType = str(dose_summation_type or "PLAN").upper()
         ds.DoseGridScaling = float(dose_grid_scaling)
+        if plan_sop_instance_uid is not None:
+            ref_plan = Dataset()
+            ref_plan.ReferencedSOPClassUID = RTPLAN_SOP_CLASS
+            ref_plan.ReferencedSOPInstanceUID = plan_sop_instance_uid
+            ds.ReferencedRTPlanSequence = [ref_plan]
 
         # Pixel data: all frames concatenated in slice order (C-contiguous).
         ds.PixelData = pixel_frames.tobytes()
@@ -248,7 +362,7 @@ def export_rtdose_to_dicom(
         else:
             filename = os.path.join(output_dir, "RTDose.dcm")
 
-        ds.save_as(filename)
+        ds.save_as(filename, enforce_file_format=True)
 
     except Exception as exc:
         return {"error": f"Error saving RT Dose DICOM file: {exc}"}

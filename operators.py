@@ -1,10 +1,18 @@
-"""Operator definitions for the DICOMator add-on."""
+"""Operator definitions for the DICOMator add-on.
+
+The export operator runs modally: the heavy pipeline stages (voxelization,
+slice writing, DRR projection, contour extraction) are generators that yield
+progress, and a window-manager timer drains them in small time slices so the
+Blender UI stays responsive and the export can be cancelled with ESC.
+"""
 from __future__ import annotations
 
 import math
 import os
-from typing import Iterable, Sequence
+import time
+from typing import Generator, Iterable, Sequence
 
+import bmesh
 import bpy
 from bpy.types import Operator
 from mathutils import Vector
@@ -19,17 +27,21 @@ from .artifacts import (
     apply_partial_volume_effect,
 )
 from .constants import (
+    AIR_DENSITY,
     MODALITY_CT,
     MRI_MODALITIES,
     ensure_pydicom_available,
     generate_uid,
 )
-from .dicom_export import export_projection_to_dicom, export_voxel_grid_to_dicom
-from .drr import generate_drr_from_hu_volume
+from .dicom_export import export_projection_to_dicom, export_voxel_grid_to_dicom_iter
+from .drr import generate_drr_from_hu_volume_iter
 from .rtdose_export import export_rtdose_to_dicom
-from .rtstruct_export import export_rtstruct_to_dicom
-from .utils import force_ui_redraw, get_float_prop, resolve_output_directory
-from .voxelization import voxelize_objects_to_dose, voxelize_objects_to_hu
+from .rtstruct_export import export_rtstruct_to_dicom_iter
+from .utils import get_float_prop, resolve_output_directory
+from .voxelization import voxelize_objects_to_dose_iter, voxelize_objects_to_hu_iter
+
+#: Wall-clock budget (seconds) spent inside the export job per timer tick.
+_MODAL_TIME_BUDGET_S = 0.1
 
 
 def _get_int_prop(props, name: str, default: int) -> int:
@@ -117,16 +129,22 @@ def _apply_configured_artifacts(hu_array, props):
     return result
 
 
-def _make_progress_callback(context: bpy.types.Context, start: float, end: float):
-    """Map a sub-task's 0..1 progress into the Blender progress bar."""
+def _run_subtask(
+    subtask: Generator[tuple[int, int], None, object],
+    start: float,
+    end: float,
+) -> Generator[float, None, object]:
+    """Drive a ``(current, total)``-yielding generator, re-yielding overall
+    progress mapped into ``[start, end]``; returns the subtask's return value."""
 
     span = max(0.0, float(end) - float(start))
-
-    def callback(current: int, total: int) -> None:
+    while True:
+        try:
+            current, total = next(subtask)
+        except StopIteration as stop:
+            return stop.value
         fraction = min(1.0, max(0.0, float(current) / max(1.0, float(total))))
-        context.window_manager.progress_update(float(start) + span * fraction)
-
-    return callback
+        yield float(start) + span * fraction
 
 
 def _mesh_bounds_for_objects(
@@ -173,23 +191,23 @@ def _mesh_bounds_for_objects(
     return min_x, max_x, min_y, max_y, min_z, max_z
 
 
-def _bounds_across_frames(
+def _bounds_across_frames_iter(
     context: bpy.types.Context,
     objects: Sequence[bpy.types.Object],
     frames: Iterable[int],
     *,
     apply_modifiers: bool,
-) -> tuple[float, float, float, float, float, float]:
-    """Return world-space bounds spanning every requested animation frame."""
+) -> Generator[tuple[int, int], None, tuple[float, float, float, float, float, float]]:
+    """Yield per-frame progress while gathering bounds across animation frames."""
 
+    frames = list(frames)
     saved_frame = context.scene.frame_current
     min_x = min_y = min_z = float('inf')
     max_x = max_y = max_z = float('-inf')
 
     try:
-        for frame in frames:
+        for index, frame in enumerate(frames, start=1):
             context.scene.frame_set(int(frame), subframe=0.0)
-            force_ui_redraw()
             depsgraph = context.evaluated_depsgraph_get()
             frame_bounds = _mesh_bounds_for_objects(
                 objects,
@@ -202,10 +220,35 @@ def _bounds_across_frames(
             max_y = max(max_y, frame_bounds[3])
             min_z = min(min_z, frame_bounds[4])
             max_z = max(max_z, frame_bounds[5])
+            yield index, len(frames)
     finally:
         context.scene.frame_set(saved_frame, subframe=0.0)
 
     return min_x, max_x, min_y, max_y, min_z, max_z
+
+
+def _non_manifold_names_iter(
+    objects: Sequence[bpy.types.Object],
+) -> Generator[tuple[int, int], None, list[str]]:
+    """Return names of objects whose base mesh has non-manifold edges.
+
+    Ray-cast voxelization assumes watertight surfaces; non-manifold meshes can
+    produce incorrectly filled columns. The check runs on the base mesh (a
+    modifier stack may change manifoldness either way), so it is a heuristic
+    warning rather than a guarantee.
+    """
+
+    names: list[str] = []
+    for index, obj in enumerate(objects, start=1):
+        bm = bmesh.new()
+        try:
+            bm.from_mesh(obj.data)
+            if any(not edge.is_manifold for edge in bm.edges):
+                names.append(obj.name)
+        finally:
+            bm.free()
+        yield index, len(objects)
+    return names
 
 
 def _pad_bounds(
@@ -266,21 +309,31 @@ def _series_description(base_description: str) -> str:
 
 
 class MESH_OT_export_dicom(Operator):
-    """Export selected meshes to enabled DICOM outputs."""
+    """Export selected meshes to enabled DICOM outputs (ESC cancels)."""
 
     bl_idname = "mesh.export_dicom"
     bl_label = "Export to DICOM"
-    bl_options = {'REGISTER', 'UNDO'}
+    bl_options = {'REGISTER'}
+
+    _timer = None
+    _job = None
+    # Class-level flag: only one modal export may run at a time.
+    _running = False
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:  # pragma: no cover - Blender UI code
         return (
-            context.active_object is not None
+            not cls._running
+            and context.active_object is not None
             and context.active_object.type == 'MESH'
             and context.active_object.mode == 'OBJECT'
         )
 
     def execute(self, context: bpy.types.Context):  # pragma: no cover - Blender runtime
+        if MESH_OT_export_dicom._running:
+            self.report({'ERROR'}, "A DICOM export is already running")
+            return {'CANCELLED'}
+
         if not ensure_pydicom_available():
             self.report({'ERROR'}, "pydicom library not available")
             return {'CANCELLED'}
@@ -362,13 +415,7 @@ class MESH_OT_export_dicom(Operator):
             self.report({'ERROR'}, "Voxel spacing must be greater than zero")
             return {'CANCELLED'}
 
-        vx_m = float(lateral_mm) * 0.001
-        vy_m = float(lateral_mm) * 0.001
-        vz_m = float(axial_mm) * 0.001
-        voxel_size_m = (vx_m, vy_m, vz_m)
-
         modality_key = getattr(props, "imaging_modality", MODALITY_CT)
-        dicom_modality = "MR" if modality_key in MRI_MODALITIES else "CT"
         if export_drr and modality_key in MRI_MODALITIES:
             self.report({'WARNING'}, "DRR uses current intensities as attenuation. CT modality presets are recommended.")
 
@@ -378,131 +425,232 @@ class MESH_OT_export_dicom(Operator):
             self.report({'ERROR'}, str(exc))
             return {'CANCELLED'}
 
-        apply_modifiers = bool(getattr(props, "apply_modifiers", True))
+        config = {
+            'ct_objects': ct_objects,
+            'dose_objects': dose_objects,
+            'struct_objects': struct_objects,
+            'export_objects': export_objects,
+            'export_image_series': export_image_series,
+            'export_drr': export_drr,
+            'export_rtdose': export_rtdose,
+            'export_rtstruct': export_rtstruct,
+            'camera_obj': camera_obj,
+            'output_dir': output_dir,
+            'lateral_mm': float(lateral_mm),
+            'axial_mm': float(axial_mm),
+            'voxel_size_m': (float(lateral_mm) * 0.001, float(lateral_mm) * 0.001, float(axial_mm) * 0.001),
+            'modality_key': modality_key,
+            'dicom_modality': "MR" if modality_key in MRI_MODALITIES else "CT",
+            'frames': frames,
+            'apply_modifiers': bool(getattr(props, "apply_modifiers", True)),
+        }
+
+        self._job = self._export_job(context, config)
+        window_manager = context.window_manager
+        window_manager.progress_begin(0, 1)
+        window_manager.status_text_set("DICOMator: exporting... (ESC to cancel)")
+        self._timer = window_manager.event_timer_add(0.02, window=context.window)
+        window_manager.modal_handler_add(self)
+        MESH_OT_export_dicom._running = True
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context: bpy.types.Context, event: bpy.types.Event):  # pragma: no cover - Blender runtime
+        if event.type == 'ESC':
+            self._finish(context)
+            self.report({'WARNING'}, "DICOM export cancelled")
+            return {'CANCELLED'}
+        if event.type != 'TIMER':
+            return {'PASS_THROUGH'}
+
+        deadline = time.monotonic() + _MODAL_TIME_BUDGET_S
+        progress = None
+        try:
+            while time.monotonic() < deadline:
+                progress = next(self._job)
+        except StopIteration as stop:
+            self._finish(context)
+            outcome = stop.value or {}
+            if 'error' in outcome:
+                self.report({'ERROR'}, outcome['error'])
+                return {'CANCELLED'}
+            self.report({'INFO'}, outcome.get('success', "DICOM export complete"))
+            return {'FINISHED'}
+        except Exception as exc:
+            self._finish(context)
+            self.report({'ERROR'}, f"Export failed: {exc}")
+            return {'CANCELLED'}
+
+        if progress is not None:
+            context.window_manager.progress_update(float(progress))
+        return {'RUNNING_MODAL'}
+
+    def _finish(self, context: bpy.types.Context) -> None:  # pragma: no cover - Blender runtime
+        MESH_OT_export_dicom._running = False
+        window_manager = context.window_manager
+        if self._timer is not None:
+            window_manager.event_timer_remove(self._timer)
+            self._timer = None
+        if self._job is not None:
+            # Closing the generator runs its finally blocks (frame restore).
+            self._job.close()
+            self._job = None
+        window_manager.status_text_set(None)
+        window_manager.progress_end()
+
+    def _export_job(self, context: bpy.types.Context, config: dict) -> Generator[float, None, dict[str, str]]:
+        """Generator that performs the full export, yielding 0..1 progress."""
+
+        props = context.scene.dicomator_props
+        frames: list[int] = config['frames']
+        num_phases = len(frames)
+        voxel_size_m: tuple[float, float, float] = config['voxel_size_m']
+        apply_modifiers: bool = config['apply_modifiers']
+        output_dir: str = config['output_dir']
+        dicom_modality: str = config['dicom_modality']
+        export_image_series: bool = config['export_image_series']
+        export_drr: bool = config['export_drr']
+        export_rtdose: bool = config['export_rtdose']
+        export_rtstruct: bool = config['export_rtstruct']
+        ct_objects = config['ct_objects']
+        dose_objects = config['dose_objects']
+        struct_objects = config['struct_objects']
         padding_voxels = 1
 
-        try:
-            # ------------------------------------------------------------------
-            # Compute a UNIFIED bounding box across enabled export objects
-            # (CT + RTDOSE + RTSTRUCT as requested) so exported files share the
-            # same coordinate space and FrameOfReferenceUID is meaningful.
-            # ------------------------------------------------------------------
-            bounds = _bounds_across_frames(
+        # MR represents air as signal void (0), not as -1000 HU.
+        background_value = 0.0 if dicom_modality == "MR" else AIR_DENSITY
+
+        non_manifold = yield from _run_subtask(
+            _non_manifold_names_iter(config['export_objects']), 0.0, 0.01
+        )
+        if non_manifold:
+            shown = ", ".join(non_manifold[:5])
+            suffix = "..." if len(non_manifold) > 5 else ""
+            self.report(
+                {'WARNING'},
+                f"Non-manifold meshes may voxelize/contour incorrectly: {shown}{suffix}",
+            )
+
+        # ------------------------------------------------------------------
+        # Compute a UNIFIED bounding box across enabled export objects
+        # (CT + RTDOSE + RTSTRUCT as requested) so exported files share the
+        # same coordinate space and FrameOfReferenceUID is meaningful.
+        # ------------------------------------------------------------------
+        bounds = yield from _run_subtask(
+            _bounds_across_frames_iter(
                 context,
-                export_objects,
+                config['export_objects'],
                 frames,
                 apply_modifiers=apply_modifiers,
-            )
-            padded_bounds = _pad_bounds(bounds, voxel_size_m, padding_voxels)
-            estimated_width, estimated_height, estimated_depth = _estimate_grid_dimensions(padded_bounds, voxel_size_m)
+            ),
+            0.01,
+            0.03,
+        )
+        padded_bounds = _pad_bounds(bounds, voxel_size_m, padding_voxels)
+        estimated_width, estimated_height, estimated_depth = _estimate_grid_dimensions(padded_bounds, voxel_size_m)
 
-            total_estimated_voxels = estimated_width * estimated_height * estimated_depth
-            if (
-                estimated_width > 2000
-                or estimated_height > 2000
-                or estimated_depth > 2000
-                or total_estimated_voxels > 100_000_000
-            ):
-                self.report(
-                    {'WARNING'},
-                    (
-                        "Voxel grid very large: "
-                        f"{estimated_width}x{estimated_height}x{estimated_depth} "
-                        f"({total_estimated_voxels:,} voxels). "
-                        f"Selection size: {(bounds[1] - bounds[0]):.3f}x{(bounds[3] - bounds[2]):.3f}x{(bounds[5] - bounds[4]):.3f}m. "
-                        "Continuing anyway. This may be slow or run out of memory."
-                    ),
-                )
-
-            num_phases = len(frames)
-            series_description_base = _series_description(props.series_description)
-
-            # Generate study-level UIDs once so enabled outputs belong to one
-            # study and frame of reference.
-            study_uid = generate_uid()
-            frame_of_ref_uid = generate_uid()
-            saved_frame = context.scene.frame_current
-
-            # Captured per phase so the RT Structure Set can reference the
-            # corresponding CT series (SeriesInstanceUID + per-slice SOP UIDs).
-            ct_series_uid_for_struct: str | None = None
-            ct_sop_class_uid_for_struct: str | None = None
-            ct_sop_instance_uids_for_struct: list[str] = []
-
-            # Build a human-readable list of active export types for reporting.
-            active_types: list[str] = []
-            if export_image_series:
-                active_types.append(dicom_modality)
-            if export_drr:
-                active_types.append("DRR")
-            if export_rtdose:
-                active_types.append("RT Dose")
-            if export_rtstruct:
-                active_types.append("RT Structure")
-            types_label = " + ".join(active_types)
-
+        total_estimated_voxels = estimated_width * estimated_height * estimated_depth
+        if (
+            estimated_width > 2000
+            or estimated_height > 2000
+            or estimated_depth > 2000
+            or total_estimated_voxels > 100_000_000
+        ):
             self.report(
-                {'INFO'},
+                {'WARNING'},
                 (
-                    f"Exporting {num_phases} phase(s) [{types_label}] "
-                    f"lateral {lateral_mm}mm / axial {axial_mm}mm. "
-                    f"Grid: {estimated_width}x{estimated_height}x{estimated_depth}. "
-                    f"Shared StudyUID: {study_uid[:12]}... ForUID: {frame_of_ref_uid[:12]}..."
+                    "Voxel grid very large: "
+                    f"{estimated_width}x{estimated_height}x{estimated_depth} "
+                    f"({total_estimated_voxels:,} voxels). "
+                    f"Selection size: {(bounds[1] - bounds[0]):.3f}x{(bounds[3] - bounds[2]):.3f}x{(bounds[5] - bounds[4]):.3f}m. "
+                    "Continuing anyway. This may be slow or run out of memory."
                 ),
             )
 
-            context.window_manager.progress_begin(0, 1)
+        series_description_base = _series_description(props.series_description)
 
-            try:
-                for phase_index, frame in enumerate(frames, start=1):
-                    phase_start = float(phase_index - 1) / float(num_phases)
-                    phase_end = float(phase_index) / float(num_phases)
+        # Generate study-level UIDs once so enabled outputs belong to one
+        # study and frame of reference.
+        study_uid = generate_uid()
+        frame_of_ref_uid = generate_uid()
+        saved_frame = context.scene.frame_current
 
-                    # Sub-divide the phase span across active export types.
-                    num_active = len(active_types)
-                    type_span = (phase_end - phase_start) / max(1, num_active)
-                    slot = 0
+        # Build a human-readable list of active export types for reporting.
+        active_types: list[str] = []
+        if export_image_series:
+            active_types.append(dicom_modality)
+        if export_drr:
+            active_types.append("DRR")
+        if export_rtdose:
+            active_types.append("RT Dose")
+        if export_rtstruct:
+            active_types.append("RT Structure")
+        types_label = " + ".join(active_types)
 
-                    context.scene.frame_set(frame, subframe=0.0)
-                    force_ui_redraw()
-                    depsgraph = context.evaluated_depsgraph_get()
+        self.report(
+            {'INFO'},
+            (
+                f"Exporting {num_phases} phase(s) [{types_label}] "
+                f"lateral {config['lateral_mm']}mm / axial {config['axial_mm']}mm. "
+                f"Grid: {estimated_width}x{estimated_height}x{estimated_depth}. "
+                f"Shared StudyUID: {study_uid[:12]}... ForUID: {frame_of_ref_uid[:12]}..."
+            ),
+        )
 
-                    phase_description = series_description_base
-                    if num_phases > 1:
-                        percent = (phase_index / num_phases) * 100.0
-                        phase_description = f"{series_description_base} - Phase {phase_index} ({percent:.1f}%)"
+        work_start = 0.03
 
-                    # Reset the per-phase references collected from image
-                    # export; RT Struct uses them when an image series is
-                    # exported in the same phase.
-                    ct_series_uid_for_struct = None
-                    ct_sop_class_uid_for_struct = None
-                    ct_sop_instance_uids_for_struct = []
+        try:
+            for phase_index, frame in enumerate(frames, start=1):
+                phase_start = work_start + (1.0 - work_start) * (phase_index - 1) / num_phases
+                phase_end = work_start + (1.0 - work_start) * phase_index / num_phases
 
-                    # ----------------------------------------------------------
-                    # Image Series / DRR export from image-type meshes
-                    # ----------------------------------------------------------
-                    if ct_objects and (export_image_series or export_drr):
-                        t_start = phase_start + slot * type_span
-                        voxel_progress = _make_progress_callback(context, t_start, t_start + type_span * 0.45)
+                # Sub-divide the phase span across active export types.
+                num_active = len(active_types)
+                type_span = (phase_end - phase_start) / max(1, num_active)
+                slot = 0
 
-                        hu_array, origin, _dimensions = voxelize_objects_to_hu(
+                context.scene.frame_set(frame, subframe=0.0)
+                depsgraph = context.evaluated_depsgraph_get()
+                yield phase_start
+
+                phase_description = series_description_base
+                if num_phases > 1:
+                    # Label phases with their position in the respiratory/
+                    # acquisition cycle starting at 0% (4DCT convention).
+                    percent = ((phase_index - 1) / num_phases) * 100.0
+                    phase_description = f"{series_description_base} - Phase {phase_index} ({percent:.1f}%)"
+
+                # References collected from image export; RT Struct uses them
+                # when an image series is exported in the same phase.
+                ct_series_uid_for_struct: str | None = None
+                ct_sop_class_uid_for_struct: str | None = None
+                ct_sop_instance_uids_for_struct: list[str] = []
+
+                # ----------------------------------------------------------
+                # Image Series / DRR export from image-type meshes
+                # ----------------------------------------------------------
+                if ct_objects and (export_image_series or export_drr):
+                    t_start = phase_start + slot * type_span
+                    hu_array, origin, _dimensions = yield from _run_subtask(
+                        voxelize_objects_to_hu_iter(
                             ct_objects,
                             voxel_size=voxel_size_m,
                             padding=0,
-                            progress_callback=voxel_progress,
                             bbox_override=padded_bounds,
                             apply_modifiers=apply_modifiers,
                             depsgraph=depsgraph,
-                        )
+                            background_value=background_value,
+                        ),
+                        t_start,
+                        t_start + type_span * 0.45,
+                    )
 
-                        if export_image_series:
-                            write_start = phase_start + slot * type_span
-                            write_progress = _make_progress_callback(context, write_start + type_span * 0.45, write_start + type_span)
-                            slot += 1
-                            image_series_uid = generate_uid()
-                            hu_array_to_export = _apply_configured_artifacts(hu_array, props)
-                            result = export_voxel_grid_to_dicom(
+                    if export_image_series:
+                        write_start = phase_start + slot * type_span
+                        slot += 1
+                        image_series_uid = generate_uid()
+                        hu_array_to_export = _apply_configured_artifacts(hu_array, props)
+                        result = yield from _run_subtask(
+                            export_voxel_grid_to_dicom_iter(
                                 hu_array_to_export,
                                 voxel_size_m,
                                 output_dir,
@@ -511,7 +659,6 @@ class MESH_OT_export_dicom(Operator):
                                 patient_id=props.patient_id,
                                 patient_sex=props.patient_sex,
                                 series_description=phase_description,
-                                progress_callback=write_progress,
                                 direct_hu=True,
                                 patient_position=props.patient_position,
                                 dicom_modality=dicom_modality,
@@ -523,121 +670,127 @@ class MESH_OT_export_dicom(Operator):
                                 temporal_position_index=phase_index if num_phases > 1 else None,
                                 temporal_position_identifier=phase_index if num_phases > 1 else None,
                                 phase_index=phase_index if num_phases > 1 else None,
-                            )
-                            if 'error' in result:
-                                self.report({'ERROR'}, result['error'])
-                                return {'CANCELLED'}
+                            ),
+                            write_start + type_span * 0.45,
+                            write_start + type_span,
+                        )
+                        if 'error' in result:
+                            return result
 
-                            # Capture references for RTStruct to link back.
-                            ct_series_uid_for_struct = image_series_uid
-                            ct_sop_class_uid_for_struct = result.get('sop_class_uid')
-                            ct_sop_instance_uids_for_struct = list(result.get('sop_instance_uids') or [])
+                        # Capture references for RTStruct to link back.
+                        ct_series_uid_for_struct = image_series_uid
+                        ct_sop_class_uid_for_struct = result.get('sop_class_uid')
+                        ct_sop_instance_uids_for_struct = list(result.get('sop_instance_uids') or [])
 
-                        if export_drr:
-                            write_start = phase_start + slot * type_span
-                            progress_start = write_start if export_image_series else write_start + type_span * 0.45
-                            write_progress = _make_progress_callback(context, progress_start, write_start + type_span)
-                            slot += 1
-                            drr_series_uid = generate_uid()
-                            projection_image, projection_metadata = generate_drr_from_hu_volume(
+                    if export_drr:
+                        write_start = phase_start + slot * type_span
+                        progress_start = write_start if export_image_series else write_start + type_span * 0.45
+                        slot += 1
+                        drr_series_uid = generate_uid()
+                        projection_image, projection_metadata = yield from _run_subtask(
+                            generate_drr_from_hu_volume_iter(
                                 hu_array,
                                 voxel_size_m,
                                 origin,
                                 context.scene,
-                                camera_obj,
+                                config['camera_obj'],
                                 resolution_scale=get_float_prop(props, "drr_resolution_scale", 1.0),
-                                progress_callback=write_progress,
-                            )
-                            filename = (
-                                f"Phase_{phase_index:03d}_DRR.dcm"
-                                if num_phases > 1 else
-                                "DRR_Image_0001.dcm"
-                            )
-                            drr_description = phase_description
-                            if "DRR" not in drr_description.upper():
-                                drr_description = f"{drr_description} - DRR"
-                            result = export_projection_to_dicom(
-                                projection_image,
-                                output_dir,
-                                filename=filename,
-                                patient_name=props.patient_name,
-                                patient_id=props.patient_id,
-                                patient_sex=props.patient_sex,
-                                patient_position=props.patient_position,
-                                series_description=drr_description,
-                                pixel_spacing_mm=projection_metadata.get("pixel_spacing_mm"),
-                                image_position_patient=projection_metadata.get("image_position_patient"),
-                                image_orientation_patient=projection_metadata.get("image_orientation_patient"),
-                                study_instance_uid=study_uid,
-                                frame_of_reference_uid=frame_of_ref_uid,
-                                series_instance_uid=drr_series_uid,
-                                series_number=phase_index + (len(frames) if export_image_series else 0),
-                                instance_number=1,
-                                number_of_temporal_positions=num_phases if num_phases > 1 else None,
-                                temporal_position_index=phase_index if num_phases > 1 else None,
-                                temporal_position_identifier=phase_index if num_phases > 1 else None,
-                            )
-                            if 'error' in result:
-                                self.report({'ERROR'}, result['error'])
-                                return {'CANCELLED'}
-
-                    # ----------------------------------------------------------
-                    # RT Dose export
-                    # ----------------------------------------------------------
-                    if export_rtdose and dose_objects:
-                        t_start = phase_start + slot * type_span
-                        dose_voxel_progress = _make_progress_callback(context, t_start, t_start + type_span * 0.55)
-                        slot += 1
-
-                        dose_array, dose_origin, _dose_dims = voxelize_objects_to_dose(
-                            dose_objects,
-                            voxel_size=voxel_size_m,
-                            padding=0,
-                            progress_callback=dose_voxel_progress,
-                            bbox_override=padded_bounds,
-                            apply_modifiers=apply_modifiers,
-                            depsgraph=depsgraph,
+                                # Percentile auto-windowing varies per image;
+                                # use the fixed physical mapping for 4D so
+                                # intensities are comparable across phases.
+                                fixed_normalization=num_phases > 1,
+                            ),
+                            progress_start,
+                            write_start + type_span,
                         )
-
-                        dose_series_uid = generate_uid()
-                        dose_type = getattr(props, "dose_type", "PHYSICAL")
-                        dose_summation_type = getattr(props, "dose_summation_type", "PLAN")
-
-                        result = export_rtdose_to_dicom(
-                            dose_array,
-                            voxel_size_m,
-                            dose_origin,
+                        filename = (
+                            f"Phase_{phase_index:03d}_DRR.dcm"
+                            if num_phases > 1 else
+                            "DRR_Image_0001.dcm"
+                        )
+                        drr_description = phase_description
+                        if "DRR" not in drr_description.upper():
+                            drr_description = f"{drr_description} - DRR"
+                        result = export_projection_to_dicom(
+                            projection_image,
                             output_dir,
+                            filename=filename,
                             patient_name=props.patient_name,
                             patient_id=props.patient_id,
                             patient_sex=props.patient_sex,
                             patient_position=props.patient_position,
-                            series_description=f"{phase_description} - RT Dose",
-                            dose_type=dose_type,
-                            dose_summation_type=dose_summation_type,
+                            series_description=drr_description,
+                            pixel_spacing_mm=projection_metadata.get("pixel_spacing_mm"),
+                            image_position_patient=projection_metadata.get("image_position_patient"),
+                            image_orientation_patient=projection_metadata.get("image_orientation_patient"),
                             study_instance_uid=study_uid,
                             frame_of_reference_uid=frame_of_ref_uid,
-                            series_instance_uid=dose_series_uid,
-                            series_number=phase_index + len(frames) * (int(export_image_series) + int(export_drr)),
-                            phase_index=phase_index if num_phases > 1 else None,
+                            series_instance_uid=drr_series_uid,
+                            series_number=phase_index + (len(frames) if export_image_series else 0),
+                            instance_number=1,
+                            number_of_temporal_positions=num_phases if num_phases > 1 else None,
+                            temporal_position_index=phase_index if num_phases > 1 else None,
+                            temporal_position_identifier=phase_index if num_phases > 1 else None,
                         )
-
                         if 'error' in result:
-                            self.report({'ERROR'}, result['error'])
-                            return {'CANCELLED'}
+                            return result
 
-                    # ----------------------------------------------------------
-                    # RT Structure Set export
-                    # ----------------------------------------------------------
-                    if export_rtstruct and struct_objects:
-                        t_start = phase_start + slot * type_span
-                        slot += 1
+                # ----------------------------------------------------------
+                # RT Dose export
+                # ----------------------------------------------------------
+                if export_rtdose and dose_objects:
+                    t_start = phase_start + slot * type_span
+                    slot += 1
 
-                        struct_series_uid = generate_uid()
-                        # bbox_min for RTSTRUCT uses the padded grid origin:
-                        # padded_bounds = (min_x, max_x, min_y, max_y, min_z, max_z)
-                        struct_bbox_min = Vector((padded_bounds[0], padded_bounds[2], padded_bounds[4]))
-                        result = export_rtstruct_to_dicom(
+                    dose_array, dose_origin, _dose_dims = yield from _run_subtask(
+                        voxelize_objects_to_dose_iter(
+                            dose_objects,
+                            voxel_size=voxel_size_m,
+                            padding=0,
+                            bbox_override=padded_bounds,
+                            apply_modifiers=apply_modifiers,
+                            depsgraph=depsgraph,
+                            accumulate=getattr(props, "dose_accumulation", "SUM") == "SUM",
+                        ),
+                        t_start,
+                        t_start + type_span * 0.9,
+                    )
+
+                    dose_series_uid = generate_uid()
+                    result = export_rtdose_to_dicom(
+                        dose_array,
+                        voxel_size_m,
+                        dose_origin,
+                        output_dir,
+                        patient_name=props.patient_name,
+                        patient_id=props.patient_id,
+                        patient_sex=props.patient_sex,
+                        patient_position=props.patient_position,
+                        series_description=f"{phase_description} - RT Dose",
+                        dose_type=getattr(props, "dose_type", "PHYSICAL"),
+                        dose_summation_type=getattr(props, "dose_summation_type", "PLAN"),
+                        study_instance_uid=study_uid,
+                        frame_of_reference_uid=frame_of_ref_uid,
+                        series_instance_uid=dose_series_uid,
+                        series_number=phase_index + len(frames) * (int(export_image_series) + int(export_drr)),
+                        phase_index=phase_index if num_phases > 1 else None,
+                    )
+                    if 'error' in result:
+                        return result
+
+                # ----------------------------------------------------------
+                # RT Structure Set export
+                # ----------------------------------------------------------
+                if export_rtstruct and struct_objects:
+                    t_start = phase_start + slot * type_span
+                    slot += 1
+
+                    struct_series_uid = generate_uid()
+                    # bbox_min for RTSTRUCT uses the padded grid origin:
+                    # padded_bounds = (min_x, max_x, min_y, max_y, min_z, max_z)
+                    struct_bbox_min = Vector((padded_bounds[0], padded_bounds[2], padded_bounds[4]))
+                    result = yield from _run_subtask(
+                        export_rtstruct_to_dicom_iter(
                             struct_objects,
                             bbox_min=struct_bbox_min,
                             voxel_size=voxel_size_m,
@@ -660,25 +813,18 @@ class MESH_OT_export_dicom(Operator):
                             referenced_ct_series_instance_uid=ct_series_uid_for_struct,
                             referenced_ct_sop_class_uid=ct_sop_class_uid_for_struct,
                             referenced_ct_sop_instance_uids=ct_sop_instance_uids_for_struct,
-                        )
+                        ),
+                        t_start,
+                        t_start + type_span,
+                    )
+                    if 'error' in result:
+                        return result
 
-                        if 'error' in result:
-                            self.report({'ERROR'}, result['error'])
-                            return {'CANCELLED'}
+                yield phase_end
+        finally:
+            context.scene.frame_set(saved_frame, subframe=0.0)
 
-            finally:
-                context.scene.frame_set(saved_frame, subframe=0.0)
-                context.window_manager.progress_end()
-
-            self.report({'INFO'}, f"Successfully exported {num_phases} phase(s) [{types_label}] to {output_dir}")
-            return {'FINISHED'}
-        except Exception as exc:
-            try:
-                context.window_manager.progress_end()
-            except Exception:
-                pass
-            self.report({'ERROR'}, f"Export failed: {exc}")
-            return {'CANCELLED'}
+        return {'success': f"Successfully exported {num_phases} phase(s) [{types_label}] to {output_dir}"}
 
 
 __all__ = ["MESH_OT_export_dicom"]

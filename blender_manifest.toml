@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "dicomator"  # use lowercase unique id
-version = "3.1.1"
+version = "3.2.0"
 name = "DICOMator"
 tagline = "Converts mesh objects into synthetic CT/MR series or camera-based DRRs"
 maintainer = "Michael Douglass"
@@ -10,7 +10,8 @@ blender_version_min = "4.2.0"
 license = ["SPDX:MIT"]
 tags = ["3D View", "Medical", "CT", "DICOM"]
 copyright = ["2024 Michael Douglass"]
-platforms = ["windows-x64","macos-arm64"]
+# The only bundled wheel (pydicom) is pure Python, so all desktop platforms work.
+platforms = ["windows-x64", "macos-arm64", "macos-x64", "linux-x64"]
 wheels = [
     "./wheels/pydicom-3.0.1-py3-none-any.whl"
 ]

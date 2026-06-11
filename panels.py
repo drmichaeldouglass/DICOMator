@@ -202,8 +202,28 @@ class VIEW3D_PT_dicomator_selection_info(Panel):
             col.label(text=f"Est. Grid: {est_width} x {est_height} x {est_depth}")
             col.label(text=f"Total Voxels: {total_voxels:,}")
 
-            memory_mb = (total_voxels * 2) / (1024 * 1024)
-            col.label(text=f"Est. Memory: {memory_mb:.1f} MB")
+            # int16 grid is 2 bytes/voxel; the artifact pipeline works on
+            # float32 copies (~12 bytes/voxel peak) and the DRR keeps a
+            # float32 attenuation volume (4 bytes/voxel).
+            bytes_per_voxel = 2
+            artifacts_enabled = any(
+                getattr(props, flag, False)
+                for flag in (
+                    "enable_noise",
+                    "enable_partial_volume",
+                    "enable_metal_artifacts",
+                    "enable_ring_artifacts",
+                    "enable_motion_artifact",
+                    "enable_poisson_noise",
+                    "enable_bias_field",
+                )
+            )
+            if artifacts_enabled:
+                bytes_per_voxel += 12
+            if getattr(props, "export_drr", False):
+                bytes_per_voxel += 4
+            memory_mb = (total_voxels * bytes_per_voxel) / (1024 * 1024)
+            col.label(text=f"Est. Peak Memory: {memory_mb:.1f} MB")
 
             if total_voxels > 100_000_000:
                 col.label(text="Grid too large!", icon='CANCEL')
@@ -351,6 +371,7 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
             dose_box = layout.column(align=True)
             dose_box.prop(props, "dose_type", text="Dose Type")
             dose_box.prop(props, "dose_summation_type", text="Summation Type")
+            dose_box.prop(props, "dose_accumulation", text="Dose Overlap")
 
         modality = getattr(props, "imaging_modality", None)
         is_mri = modality in MRI_MODALITIES

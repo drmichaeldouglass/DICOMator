@@ -34,11 +34,14 @@ Blender add-on that converts selected mesh objects into DICOM outputs for synthe
 - **Export path handling and progress feedback**
   - Accepts Blender-relative paths starting with `//` (resolved relative to the `.blend` file or current working directory)
   - Defaults to `//DICOM_Export` so a new install starts with a portable export location instead of an OS-specific absolute path
-  - Progress bar feedback for voxelization and slice writing
+  - Exports run as a modal background job: the Blender UI stays responsive, a progress bar tracks voxelization and slice writing, and **ESC cancels** the export at any time
+  - Meshes with non-manifold (non-watertight) geometry trigger a warning before export, since ray-cast voxelization assumes closed surfaces
 - **RT Dose export**
   - Mesh objects tagged as RT Dose are voxelized and written as a single multi-frame DICOM RT Dose file (`RTDoseStorage`)
   - Dose values (Gy) are encoded as uint32 scaled by a `DoseGridScaling` factor computed from the peak dose in the grid
+  - Overlapping dose meshes either **sum** (default, matching how physical dose accumulates) or **overwrite** in alphabetical name order, selectable in the dose settings
   - Configurable `DoseType` (Physical / Effective) and `DoseSummationType` (Plan / Fraction / Beam)
+  - A minimal companion RT Plan file (`RTPlanStorage`) is written and referenced via `ReferencedRTPlanSequence`, as required by the RT Dose IOD for the supported summation types
   - RT Dose, image, DRR, and RT Structure exports share the same Study Instance UID and Frame of Reference UID when enabled together
 - **RT Structure Set export**
   - Mesh objects tagged as RT Structure are sliced at each CT Z-plane using bmesh bisection
@@ -100,7 +103,7 @@ Dependency note:
      - Configure **Lateral (mm)** and **Axial (mm)** voxel spacing
      - Toggle **Apply Modifiers/Deformations** to evaluate modifiers, armatures, and shape keys during voxelization
      - When DRR is enabled, set **DRR Resolution Scale** to scale the Blender render resolution used for the projection detector
-     - When any RT Dose mesh is selected, dose settings appear for **Dose Type** (Physical / Effective) and **Dose Summation Type** (Plan / Fraction / Beam)
+     - When any RT Dose mesh is selected, dose settings appear for **Dose Type** (Physical / Effective), **Dose Summation Type** (Plan / Fraction / Beam), and **Dose Overlap** (Sum / Overwrite)
      - Choose an **Export Directory** (supports `//` relative paths and defaults to `//DICOM_Export`)
      - Toggle **Export 4D** to export multiple frames
        - Use the timeline range or set a custom `Start`/`End`/`Frame Step`
@@ -125,6 +128,8 @@ Notes:
 - **Image Series output**
   - Modality: CT (`CTImageStorage`) or MR (`MRImageStorage`) depending on the selected imaging modality
   - Data type: int16 signed (direct HU/intensity values)
+  - Background voxels are -1000 HU (air) for CT and 0 (signal void) for MR
+  - MR series include MR Image module attributes (scanning sequence, TR/TE, etc.) with plausible spin-echo defaults so files pass IOD validation
   - Window: CT exports default to Center 40 / Width 400; MR exports use Center 128 / Width 256
   - Geometry:
     - `PixelSpacing = [voxel_size_mm_y, voxel_size_mm_x]`
@@ -135,7 +140,8 @@ Notes:
   - Storage class: `RTDoseStorage` (SOP class 1.2.840.10008.5.1.4.1.1.481.2)
   - Data type: uint32 multi-frame image scaled by `DoseGridScaling` (Gy/count); maximum dose maps to the full uint32 range
   - Grid dimensions and spatial coordinates match the CT grid exactly, ensuring voxel-to-voxel correspondence
-  - `DoseType`, `DoseSummationType`, and `DoseUnits = GY` are set from the RT Dose Settings panel
+  - `DoseType`, `DoseSummationType`, and `DoseUnits = GY` are set from the RT Dose Settings panel; `FrameIncrementPointer` references `GridFrameOffsetVector` per the multi-frame module
+  - A minimal companion RT Plan (`RTPlan.dcm` / `Phase_###_RTPlan.dcm`) is written and referenced via `ReferencedRTPlanSequence`
   - Shares `StudyInstanceUID` and `FrameOfReferenceUID` with co-exported image, DRR, and structure outputs
 - **RT Structure Set output**
   - Storage class: `RTStructureSetStorage` (SOP class 1.2.840.10008.5.1.4.1.1.481.3)
@@ -146,6 +152,7 @@ Notes:
 - **DRR output**
   - Storage class: Secondary Capture (`SecondaryCaptureImageStorage`) with `ImageType = DERIVED\\PRIMARY\\DRR`
   - Data type: uint16 monochrome projection image
+  - Single-phase exports use percentile auto-windowing; 4D exports use a fixed physical mapping so intensities stay comparable across phases
   - Geometry:
     - `PixelSpacing` follows the active camera detector plane dimensions divided by detector pixels
     - `ImageOrientationPatient` follows the active camera detector row/column axes

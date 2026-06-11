@@ -324,6 +324,9 @@ def add_ring_artifacts(
     ring_radius:
         Relative radius of the ring (0 = center, 1 = edge). When ``None``, a
         small random cluster of detector-channel rings is generated.
+    thickness:
+        Relative radial thickness of each ring (Gaussian width before the
+        per-ring random variation). Must be strictly positive.
     jitter:
         Standard deviation of a low-amplitude speckle field mixed with the
         rings to avoid perfectly smooth structures.
