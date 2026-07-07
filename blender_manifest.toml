@@ -1,14 +1,16 @@
 schema_version = "1.0.0"
 id = "dicomator"  # use lowercase unique id
-version = "3.2.0"
+version = "3.3.0"
 name = "DICOMator"
 tagline = "Converts mesh objects into synthetic CT/MR series or camera-based DRRs"
 maintainer = "Michael Douglass"
 type = "add-on"
 website = "https://github.com/drmichaeldouglass/DICOMator"
-blender_version_min = "4.2.0"
+blender_version_min = "5.1.0"
 license = ["SPDX:MIT"]
-tags = ["3D View", "Medical", "CT", "DICOM"]
+# Tags must come from Blender's fixed add-on tag vocabulary; free-form tags
+# such as "Medical" fail `blender --command extension validate`.
+tags = ["3D View", "Import-Export", "Mesh"]
 copyright = ["2024 Michael Douglass"]
 # The only bundled wheel (pydicom) is pure Python, so all desktop platforms work.
 platforms = ["windows-x64", "macos-arm64", "macos-x64", "linux-x64"]

@@ -8,7 +8,7 @@ Blender add-on that converts selected mesh objects into DICOM outputs for synthe
   - Each selected mesh is tagged as **Image**, **RT Dose**, or **RT Structure** via the Objects panel
   - Image objects: set HU/intensity value or pick a tissue preset; overlapping meshes resolve by alphabetical name order
   - RT Dose objects: assign an absorbed dose value (Gy) per mesh; voxels within the mesh receive that dose
-  - RT Structure objects: assign an ROI type (GTV, CTV, PTV, OAR, External, Other); contours are extracted at each CT slice plane
+  - RT Structure objects: assign an ROI type (GTV, CTV, PTV, OAR, External, Control, Avoidance, Organ, Treated Volume, Irradiated Volume); contours are extracted at each CT slice plane
 - **Tissue intensity presets**
   - Choose CT, T1 MR, or T2 MR modalities and assign tissue presets from a curated table
   - Selected presets automatically populate per-object intensities while still allowing manual overrides
@@ -47,28 +47,28 @@ Blender add-on that converts selected mesh objects into DICOM outputs for synthe
   - Mesh objects tagged as RT Structure are sliced at each CT Z-plane using bmesh bisection
   - Closed planar contours are extracted from cut edges and written as a DICOM RT Structure Set (`RTStructureSetStorage`)
   - ROI display colour is read from the object's first material diffuse colour, or a clinical-style palette is used as a fallback
-  - Supports ROI types GTV, CTV, PTV, OAR, External, and Other
+  - Supports ROI types GTV, CTV, PTV, OAR, External, Control, Avoidance, Organ, Treated Volume, and Irradiated Volume
 - **Selection insights**
   - Live estimates of grid dimensions, voxel counts, and approximate memory usage before export
 
 ## Requirements
 
-- Blender 5.1.1+ (Python 3.13 runtime)
+- Blender 5.1+ (Python 3.13 runtime); `blender_version_min` in the extension manifest is `5.1.0`
 - NumPy (bundled with Blender, used for grid operations)
 - pydicom 3.0.1+ (required for DICOM export; vendored in `wheels/`; the add-on warns and disables export if missing)
 - Optional helper wheels
   - Run `download_wheels.py` to download a Blender-targeted `pydicom` wheel into `./wheels` (defaults to Blender 5.1 / Python 3.13 tags, overrideable via environment variables)
 
-## Blender 5.1.1 compatibility
+## Blender 5.1 compatibility
 
-- Targets the Blender 5.1.1 Python 3.13 runtime (VFX Platform 2026).
+- Targets the Blender 5.1 Python 3.13 runtime (VFX Platform 2026).
 - The add-on has **no OpenVDB dependency**. Voxelization is performed with Blender mesh evaluation, `mathutils.bvhtree.BVHTree`, and NumPy arrays.
 - NumPy 2.x compatibility is maintained by using `np.asarray(...)` rather than `np.array(..., copy=False)` throughout.
 - Extension packaging advertises only the vendored `pydicom 3.0.1` (`py3-none-any`) wheel, which requires Python 3.10+ and is compatible with NumPy 2.x and Python 3.13.
 
 ## Installation
 
-Blender 5.1.1 uses the **Extensions** workflow for add-ons.
+Blender uses the **Extensions** workflow for add-ons.
 
 1. Create an extension zip from this repository root (the zip must include `blender_manifest.toml` at the top level).
 2. In Blender, open **Edit → Preferences → Extensions**.
@@ -93,7 +93,7 @@ Dependency note:
    - **Objects** – For each selected mesh, choose its **DICOM Type**:
      - *Image*: assign HU/intensity values or pick modality-aware tissue presets. When meshes overlap, alphabetical ordering of object names decides the winning intensity (last name wins).
      - *RT Dose*: assign an absorbed dose in Gy. Voxels within the mesh receive that dose value when the RT Dose grid is built.
-     - *RT Structure*: assign an ROI type (GTV, CTV, PTV, OAR, External, Other). The object's material diffuse colour is used as the ROI display colour in the structure set; a clinical-style palette is used if no material is assigned.
+     - *RT Structure*: assign an ROI type (GTV, CTV, PTV, OAR, External, Control, Avoidance, Organ, Treated Volume, Irradiated Volume). The object's material diffuse colour is used as the ROI display colour in the structure set; a clinical-style palette is used if no material is assigned.
    - Enable the desired outputs in the main panel:
      - **Image** – writes CT or MR slices from Image meshes
      - **DRR** – writes a camera-based projection from Image meshes
@@ -166,7 +166,7 @@ Notes:
 <img src="https://github.com/user-attachments/assets/eca22ede-4a6f-47ca-a82c-e53dccb0649d" alt="skull_dose_lat" width="420" />
 <img src="https://github.com/user-attachments/assets/8eb7a3ce-fbaf-4d7d-b70d-33e7b808e0fd" alt="Lung_geometry" width="420" />
 <img src="https://github.com/user-attachments/assets/77e204bd-2a70-46bb-af8f-c3327ef7eb8f" alt="Lung" width="420" />
-<img width="359" height="362" alt="SuzanneXRay" src="https://github.com/user-attachments/assets/2951918f-773b-4505-88cc-4086dfd64b2c" width="420"/>
+<img height="362" alt="SuzanneXRay" src="https://github.com/user-attachments/assets/2951918f-773b-4505-88cc-4086dfd64b2c" width="420"/>
 
 ## Performance and limits
 

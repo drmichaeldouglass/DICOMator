@@ -129,13 +129,13 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
         name="Start Frame",
         description="First frame to export (when not using timeline range)",
         default=1,
-        min=1,
+        min=0,
     )
     frame_end: bpy.props.IntProperty(
         name="End Frame",
         description="Last frame to export (when not using timeline range)",
         default=250,
-        min=1,
+        min=0,
     )
     frame_step: bpy.props.IntProperty(
         name="Frame Step",

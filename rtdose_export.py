@@ -94,7 +94,9 @@ def _export_minimal_rtplan(
 
     plan.Modality = "RTPLAN"
     plan.SeriesInstanceUID = generate_uid()
-    plan.SeriesNumber = int(series_number)
+    # Offset so the companion plan series does not share the dose series'
+    # number within the study.
+    plan.SeriesNumber = int(series_number) + 1000
     plan.SeriesDescription = f"{series_description} - RT Plan"
     plan.SeriesDate = date_str
     plan.SeriesTime = time_str
@@ -223,18 +225,17 @@ def export_rtdose_to_dicom(
         # file round-trips correctly (all pixels remain zero).
         dose_grid_scaling = 1.0
 
-    # Encode all frames into a (D × H × W) uint32 array.
-    # Each frame is a 2D slice dose_f32[:, :, iz] with shape (W, H).
-    # Transposing to (H, W) matches DICOM row-major convention (rows first).
-    pixel_frames = np.zeros((depth, height, width), dtype=np.uint32)
+    # Encode all frames into a (D × H × W) uint32 array: transpose the
+    # (W, H, D) grid so each frame is an (H, W) slice, matching the DICOM
+    # row-major convention (rows first).
+    # Clip before casting: float32 precision on a uint32-range scale can
+    # push values a fraction above uint32_max, which silently wraps on
+    # cast. Clamping keeps the maximum dose as 0xFFFFFFFF.
     uint32_max_value = np.iinfo(np.uint32).max
-    for iz in range(depth):
-        slice_2d = dose_f32[:, :, iz]  # (W, H)
-        # Clip before casting: float32 precision on a uint32-range scale can
-        # push values a fraction above uint32_max, which silently wraps on
-        # cast. Clamping keeps the maximum dose as 0xFFFFFFFF.
-        scaled = np.clip(slice_2d / dose_grid_scaling, 0.0, uint32_max_value)
-        pixel_frames[iz] = scaled.astype(np.uint32).T  # (H, W)
+    scaled = np.clip(dose_f32 / dose_grid_scaling, 0.0, uint32_max_value)
+    pixel_frames = np.ascontiguousarray(
+        scaled.astype(np.uint32).transpose(2, 1, 0)
+    )
 
     now = datetime.now()
     date_str = now.strftime("%Y%m%d")
