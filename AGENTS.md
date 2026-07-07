@@ -1,7 +1,7 @@
 # DICOMator Contributor Notes
 
 ## Repository Overview
-- **Purpose:** Blender 5.1.1+ add-on that voxelizes mesh objects and exports them as CT-style DICOM series, optionally layering synthetic artifacts, and can generate digitally reconstructed radiographs (DRRs) and synthetic radiotherapy data (RT-DOSE and RT-STRUCT).
+- **Purpose:** Blender 5.1+ add-on that voxelizes mesh objects and exports them as CT-style DICOM series, optionally layering synthetic artifacts, and can generate digitally reconstructed radiographs (DRRs) and synthetic radiotherapy data (RT-DOSE and RT-STRUCT).
 - **Key modules:**
   - `__init__.py` – Blender registration entry point and exported API.
   - `properties.py` – `bpy.types.PropertyGroup` definitions backing the add-on UI.
@@ -15,7 +15,7 @@
   - `rtstruct_export.py` – Exports mesh-derived contours as an RT-STRUCT DICOM object (Region of Interest sequences) via pydicom.  - `download_wheels.py` / `wheels/` – Optional vendor wheels for Blender’s bundled Python.
 
 ## Coding Guidelines
-- Target **Python 3.13** (matches Blender 5.1.1 runtime).
+- Target **Python 3.13** (matches the Blender 5.1 runtime).
 - Follow **PEP 8** conventions: 4-space indentation, descriptive naming, and module-level docstrings. Keep public helpers exported through `__all__` lists when the surrounding module already uses them.
 - Prefer explicit type hints (`-> None`, concrete collection types) and keep docstrings concise but informative. Use f-strings for string interpolation.
 - Blender-specific code (`bpy`, `mathutils`) should remain importable without running inside Blender. Avoid executing Blender ops at import time; confine them to functions/operators.
@@ -25,9 +25,9 @@
 - Ensure the code is written and structured in a way that is easily understandable by a medical physicist.
 
 ## Testing & Validation
-- The repository does not ship automated unit tests. **Before committing changes, run:**
+- The repository does not ship automated unit tests. **Before committing changes, run (from the repository root):**
   ```bash
-  python -m compileall DICOMator
+  python -m compileall .
   ```
   This catches syntax errors without requiring Blender.
 - For features that touch Blender interaction, perform a quick manual smoke test inside Blender if possible (not enforced here, but recommended).

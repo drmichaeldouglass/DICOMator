@@ -14,6 +14,7 @@ from typing import Generator, Iterable, Sequence
 
 import bmesh
 import bpy
+import numpy as np
 from bpy.types import Operator
 from mathutils import Vector
 
@@ -26,12 +27,12 @@ from .artifacts import (
     add_ring_artifacts,
     apply_partial_volume_effect,
 )
+from . import constants as shared_constants
 from .constants import (
     AIR_DENSITY,
     MODALITY_CT,
     MRI_MODALITIES,
     ensure_pydicom_available,
-    generate_uid,
 )
 from .dicom_export import export_projection_to_dicom, export_voxel_grid_to_dicom_iter
 from .drr import generate_drr_from_hu_volume_iter
@@ -125,6 +126,11 @@ def _apply_configured_artifacts(hu_array, props):
     if getattr(props, "enable_poisson_noise", False) and get_float_prop(props, "poisson_scale", 0.0) > 0.0 and is_ct:
         scale = max(1.0, get_float_prop(props, "poisson_scale", 150.0))
         result = add_poisson_noise(result, scale=scale)
+
+    if is_mri and result is not hu_array:
+        # The artifact helpers clamp to the CT HU range, which permits
+        # negative values; MR magnitude images are physically non-negative.
+        result = np.maximum(result, 0)
 
     return result
 
@@ -409,8 +415,8 @@ class MESH_OT_export_dicom(Operator):
             self.report({'ERROR'}, "Set an active scene camera before exporting a DRR")
             return {'CANCELLED'}
 
-        lateral_mm = get_float_prop(props, "lateral_resolution_mm", get_float_prop(props, "grid_resolution", 2.0))
-        axial_mm = get_float_prop(props, "axial_resolution_mm", get_float_prop(props, "grid_resolution", 2.0))
+        lateral_mm = get_float_prop(props, "lateral_resolution_mm", 2.0)
+        axial_mm = get_float_prop(props, "axial_resolution_mm", 2.0)
         if lateral_mm <= 0.0 or axial_mm <= 0.0:
             self.report({'ERROR'}, "Voxel spacing must be greater than zero")
             return {'CANCELLED'}
@@ -570,8 +576,8 @@ class MESH_OT_export_dicom(Operator):
 
         # Generate study-level UIDs once so enabled outputs belong to one
         # study and frame of reference.
-        study_uid = generate_uid()
-        frame_of_ref_uid = generate_uid()
+        study_uid = shared_constants.generate_uid()
+        frame_of_ref_uid = shared_constants.generate_uid()
         saved_frame = context.scene.frame_current
 
         # Build a human-readable list of active export types for reporting.
@@ -647,7 +653,7 @@ class MESH_OT_export_dicom(Operator):
                     if export_image_series:
                         write_start = phase_start + slot * type_span
                         slot += 1
-                        image_series_uid = generate_uid()
+                        image_series_uid = shared_constants.generate_uid()
                         hu_array_to_export = _apply_configured_artifacts(hu_array, props)
                         result = yield from _run_subtask(
                             export_voxel_grid_to_dicom_iter(
@@ -686,7 +692,7 @@ class MESH_OT_export_dicom(Operator):
                         write_start = phase_start + slot * type_span
                         progress_start = write_start if export_image_series else write_start + type_span * 0.45
                         slot += 1
-                        drr_series_uid = generate_uid()
+                        drr_series_uid = shared_constants.generate_uid()
                         projection_image, projection_metadata = yield from _run_subtask(
                             generate_drr_from_hu_volume_iter(
                                 hu_array,
@@ -756,7 +762,7 @@ class MESH_OT_export_dicom(Operator):
                         t_start + type_span * 0.9,
                     )
 
-                    dose_series_uid = generate_uid()
+                    dose_series_uid = shared_constants.generate_uid()
                     result = export_rtdose_to_dicom(
                         dose_array,
                         voxel_size_m,
@@ -785,7 +791,7 @@ class MESH_OT_export_dicom(Operator):
                     t_start = phase_start + slot * type_span
                     slot += 1
 
-                    struct_series_uid = generate_uid()
+                    struct_series_uid = shared_constants.generate_uid()
                     # bbox_min for RTSTRUCT uses the padded grid origin:
                     # padded_bounds = (min_x, max_x, min_y, max_y, min_z, max_z)
                     struct_bbox_min = Vector((padded_bounds[0], padded_bounds[2], padded_bounds[4]))

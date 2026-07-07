@@ -69,8 +69,8 @@ def _grid_estimate(
     """Estimate voxel dimensions and total voxel count for the selection."""
 
     obj_width, obj_height, obj_depth = dimensions_m
-    lateral_mm = get_float_prop(props, "lateral_resolution_mm", get_float_prop(props, "grid_resolution", 2.0))
-    axial_mm = get_float_prop(props, "axial_resolution_mm", get_float_prop(props, "grid_resolution", 2.0))
+    lateral_mm = get_float_prop(props, "lateral_resolution_mm", 2.0)
+    axial_mm = get_float_prop(props, "axial_resolution_mm", 2.0)
     if lateral_mm <= 0.0 or axial_mm <= 0.0:
         return None
 

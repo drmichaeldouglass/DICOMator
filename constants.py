@@ -215,9 +215,19 @@ generate_uid = None
 pydicom = None
 PYDICOM_IMPORT_ERROR = ""
 
+#: True once an import attempt has run (success or failure). Callers such as
+#: panel draw() invoke :func:`ensure_pydicom_available` on every UI redraw;
+#: without this negative cache each redraw would re-glob the wheels directory
+#: and retry the import when pydicom is missing.
+_PYDICOM_IMPORT_ATTEMPTED = False
 
-def ensure_pydicom_available() -> bool:
-    """Import ``pydicom`` on demand and cache the resolved module globals."""
+
+def ensure_pydicom_available(*, force_retry: bool = False) -> bool:
+    """Import ``pydicom`` on demand and cache the resolved module globals.
+
+    The result (including failure) is cached; pass ``force_retry=True`` to
+    attempt the import again after e.g. installing pydicom manually.
+    """
 
     global PYDICOM_AVAILABLE
     global PYDICOM_IMPORT_ERROR
@@ -225,9 +235,15 @@ def ensure_pydicom_available() -> bool:
     global FileDataset
     global generate_uid
     global pydicom
+    global _PYDICOM_IMPORT_ATTEMPTED
 
     if PYDICOM_AVAILABLE and pydicom is not None and Dataset is not None and FileDataset is not None and generate_uid is not None:
         return True
+
+    if _PYDICOM_IMPORT_ATTEMPTED and not force_retry:
+        return False
+
+    _PYDICOM_IMPORT_ATTEMPTED = True
 
     # Wheels are zip archives; pydicom uses open() on __file__-relative paths
     # (e.g. data/urls.json), which fails when the module lives inside a zip.
@@ -286,8 +302,6 @@ def get_pydicom_error() -> str:
 
     return str(PYDICOM_IMPORT_ERROR or "")
 
-
-ensure_pydicom_available()
 
 __all__ = [
     "AIR_DENSITY",

@@ -168,6 +168,10 @@ def export_voxel_grid_to_dicom_iter(
                 dataset.TemporalPositionIdentifier = int(temporal_position_identifier)
 
             dataset.Modality = modality
+            if modality == "CT":
+                # KVP is Type 2 in the CT Image module (PS3.3 C.8.2.1);
+                # validators flag its absence. 120 kVp is a typical setting.
+                dataset.KVP = '120'
             if modality == "MR":
                 # MR Image module (PS3.3 C.8.3.1) Type 1/2 attributes with
                 # plausible spin-echo defaults so files pass IOD validation.
@@ -178,6 +182,8 @@ def export_voxel_grid_to_dicom_iter(
                 dataset.RepetitionTime = '500'
                 dataset.EchoTime = '15'
                 dataset.EchoTrainLength = '1'
+                dataset.EchoNumbers = '1'
+                dataset.ImagedNucleus = '1H'
                 dataset.MagneticFieldStrength = '1.5'
             dataset.Manufacturer = 'DICOMator'
             dataset.InstitutionName = 'Virtual Hospital'

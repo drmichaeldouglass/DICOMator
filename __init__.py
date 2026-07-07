@@ -53,11 +53,13 @@ from .panels import (
 from .properties import DICOMatorProperties, update_object_material
 from .voxelization import voxelize_mesh, voxelize_objects_to_dose, voxelize_objects_to_hu
 
+# Legacy add-on metadata; ignored when installed as an extension (the
+# blender_manifest.toml is authoritative). Kept in sync per AGENTS.md.
 bl_info = {
     "name": "DICOMator",
     "author": "Michael Douglass",
-    "version": (3, 2, 0),
-    "blender": (4, 2, 0),
+    "version": (3, 3, 0),
+    "blender": (5, 1, 0),
     "location": "View3D > Sidebar > DICOMator",
     "description": "Converts mesh objects into synthetic CT/MR series or camera-based DRR DICOM images",
     "warning": "",
@@ -81,56 +83,53 @@ def register() -> None:  # pragma: no cover - Blender registration
     for cls in classes:
         bpy.utils.register_class(cls)
 
-    if not hasattr(bpy.types.Scene, "dicomator_props"):
-        bpy.types.Scene.dicomator_props = PointerProperty(type=DICOMatorProperties)
+    # Assign unconditionally: guarding with hasattr() would keep a stale
+    # definition from a previous registration (e.g. an older add-on version)
+    # bound instead of the current one. Re-assignment is idempotent.
+    bpy.types.Scene.dicomator_props = PointerProperty(type=DICOMatorProperties)
 
-    if not hasattr(bpy.types.Object, "dicomator_hu"):
-        bpy.types.Object.dicomator_hu = FloatProperty(
-            name="HU",
-            description="Assigned Hounsfield Units for this mesh",
-            default=0.0,
-            min=MIN_HU_VALUE,
-            max=MAX_HU_VALUE,
-            step=10,
-            precision=0,
-        )
+    bpy.types.Object.dicomator_hu = FloatProperty(
+        name="HU",
+        description="Assigned Hounsfield Units for this mesh",
+        default=0.0,
+        min=MIN_HU_VALUE,
+        max=MAX_HU_VALUE,
+        step=10,
+        precision=0,
+    )
 
-    if not hasattr(bpy.types.Object, "dicomator_material"):
-        bpy.types.Object.dicomator_material = EnumProperty(
-            name="Material",
-            description="Select a predefined tissue/material",
-            items=MATERIAL_ITEMS,
-            default="CUSTOM",
-            update=update_object_material,
-        )
+    bpy.types.Object.dicomator_material = EnumProperty(
+        name="Material",
+        description="Select a predefined tissue/material",
+        items=MATERIAL_ITEMS,
+        default="CUSTOM",
+        update=update_object_material,
+    )
 
-    if not hasattr(bpy.types.Object, "dicomator_object_type"):
-        bpy.types.Object.dicomator_object_type = EnumProperty(
-            name="DICOM Object Type",
-            description="Specifies whether this mesh contributes to image, RT Dose, or RT Structure exports",
-            items=DICOM_OBJECT_TYPE_ITEMS,
-            default="CT",
-        )
+    bpy.types.Object.dicomator_object_type = EnumProperty(
+        name="DICOM Object Type",
+        description="Specifies whether this mesh contributes to image, RT Dose, or RT Structure exports",
+        items=DICOM_OBJECT_TYPE_ITEMS,
+        default="CT",
+    )
 
-    if not hasattr(bpy.types.Object, "dicomator_dose"):
-        bpy.types.Object.dicomator_dose = FloatProperty(
-            name="Dose (Gy)",
-            description="Absorbed dose assigned to voxels within this mesh when exported as RT Dose",
-            default=0.0,
-            min=0.0,
-            soft_max=80.0,
-            max=200.0,
-            step=10,
-            precision=2,
-        )
+    bpy.types.Object.dicomator_dose = FloatProperty(
+        name="Dose (Gy)",
+        description="Absorbed dose assigned to voxels within this mesh when exported as RT Dose",
+        default=0.0,
+        min=0.0,
+        soft_max=80.0,
+        max=200.0,
+        step=10,
+        precision=2,
+    )
 
-    if not hasattr(bpy.types.Object, "dicomator_roi_type"):
-        bpy.types.Object.dicomator_roi_type = EnumProperty(
-            name="ROI Type",
-            description="DICOM RT ROI interpreted type (RTROIInterpretedType) for this structure",
-            items=ROI_TYPE_ITEMS,
-            default="OAR",
-        )
+    bpy.types.Object.dicomator_roi_type = EnumProperty(
+        name="ROI Type",
+        description="DICOM RT ROI interpreted type (RTROIInterpretedType) for this structure",
+        items=ROI_TYPE_ITEMS,
+        default="OAR",
+    )
 
 
 def unregister() -> None:  # pragma: no cover - Blender registration

@@ -185,6 +185,29 @@ def _slice_plane(bm_base: bmesh.types.BMesh, z_m: float) -> list[list[tuple[floa
         bm_slice.free()
 
 
+def _extract_contours_iter(
+    obj: bpy.types.Object,
+    z_positions_m: Sequence[float],
+    depsgraph: bpy.types.Depsgraph,
+    *,
+    apply_modifiers: bool = True,
+) -> Generator[tuple[int, int], None, dict[float, list[list[tuple[float, float, float]]]]]:
+    """Generator variant of :func:`extract_contours_from_mesh`.
+
+    Yields ``(planes_done, total_planes)`` after each bisected Z plane and
+    returns the contour dictionary described there.
+    """
+    bm_base = _world_bmesh(obj, depsgraph, apply_modifiers=apply_modifiers)
+    try:
+        contours: dict[float, list[list[tuple[float, float, float]]]] = {}
+        for index, z_m in enumerate(z_positions_m, start=1):
+            contours[float(z_m)] = _slice_plane(bm_base, z_m)
+            yield index, len(z_positions_m)
+    finally:
+        bm_base.free()
+    return contours
+
+
 def extract_contours_from_mesh(
     obj: bpy.types.Object,
     z_positions_m: Sequence[float],
@@ -218,15 +241,14 @@ def extract_contours_from_mesh(
         The caller is responsible for converting positions to millimetres
         when writing DICOM attributes.
     """
-    # Build a single base bmesh in world space to avoid repeated transforms.
-    bm_base = _world_bmesh(obj, depsgraph, apply_modifiers=apply_modifiers)
-    try:
-        contours: dict[float, list[list[tuple[float, float, float]]]] = {}
-        for z_m in z_positions_m:
-            contours[float(z_m)] = _slice_plane(bm_base, z_m)
-    finally:
-        bm_base.free()
-    return contours
+    generator = _extract_contours_iter(
+        obj, z_positions_m, depsgraph, apply_modifiers=apply_modifiers
+    )
+    while True:
+        try:
+            next(generator)
+        except StopIteration as stop:
+            return stop.value
 
 
 def export_rtstruct_to_dicom(
@@ -355,17 +377,18 @@ def export_rtstruct_to_dicom_iter(
     total_planes = max(1, len(objects) * len(z_positions_m))
     planes_done = 0
     for obj in objects:
-        bm_base = _world_bmesh(obj, depsgraph, apply_modifiers=apply_modifiers)
-        try:
-            contours: dict[float, list[list[tuple[float, float, float]]]] = {}
-            for z_m in z_positions_m:
-                contours[float(z_m)] = _slice_plane(bm_base, z_m)
-                planes_done += 1
-                if planes_done % 8 == 0:
-                    yield planes_done, total_planes
-        finally:
-            bm_base.free()
-        all_contours.append(contours)
+        subtask = _extract_contours_iter(
+            obj, z_positions_m, depsgraph, apply_modifiers=apply_modifiers
+        )
+        while True:
+            try:
+                next(subtask)
+            except StopIteration as stop:
+                all_contours.append(stop.value)
+                break
+            planes_done += 1
+            if planes_done % 8 == 0:
+                yield planes_done, total_planes
     yield planes_done, total_planes
 
     try:
@@ -407,7 +430,9 @@ def export_rtstruct_to_dicom_iter(
         ds.StationName = "Blender"
 
         # --- Structure Set Identification ---
-        ds.StructureSetLabel = series_description
+        # StructureSetLabel has VR SH (max 16 characters); longer values are
+        # non-conformant and trigger pydicom warnings.
+        ds.StructureSetLabel = str(series_description)[:16]
         ds.StructureSetName = series_description
         ds.StructureSetDate = date_str
         ds.StructureSetTime = time_str
@@ -416,21 +441,20 @@ def export_rtstruct_to_dicom_iter(
         ref_for_seq = Dataset()
         ref_for_seq.FrameOfReferenceUID = frame_of_reference_uid
 
-        # RTReferencedStudySequence (references the shared study)
-        rt_ref_study = Dataset()
-        rt_ref_study.ReferencedSOPClassUID = "1.2.840.10008.3.1.2.3.2"  # RT Study
-        rt_ref_study.ReferencedSOPInstanceUID = study_instance_uid
-
-        # Populate RTReferencedSeriesSequence with the co-exported CT series
-        # (if provided) so downstream TPS tools can trace the structure set
-        # back to the images it was drawn on.  ContourImageSequence inside
-        # requires the per-slice SOP Instance UIDs of that CT series.
-        rt_ref_series_sequence: list = []
+        # Reference the co-exported CT series (if provided) so downstream TPS
+        # tools can trace the structure set back to the images it was drawn
+        # on.  RTReferencedSeriesSequence is Type 1 inside a study item, so
+        # when no CT series was co-exported the RTReferencedStudySequence is
+        # omitted entirely rather than written with an empty series sequence.
         if (
             referenced_ct_series_instance_uid
             and referenced_ct_sop_instance_uids
             and referenced_ct_sop_class_uid
         ):
+            rt_ref_study = Dataset()
+            rt_ref_study.ReferencedSOPClassUID = "1.2.840.10008.3.1.2.3.2"  # RT Study
+            rt_ref_study.ReferencedSOPInstanceUID = study_instance_uid
+
             rt_ref_series = Dataset()
             rt_ref_series.SeriesInstanceUID = referenced_ct_series_instance_uid
             contour_image_sequence: list = []
@@ -440,9 +464,8 @@ def export_rtstruct_to_dicom_iter(
                 img_item.ReferencedSOPInstanceUID = sop_uid
                 contour_image_sequence.append(img_item)
             rt_ref_series.ContourImageSequence = contour_image_sequence
-            rt_ref_series_sequence.append(rt_ref_series)
-        rt_ref_study.RTReferencedSeriesSequence = rt_ref_series_sequence
-        ref_for_seq.RTReferencedStudySequence = [rt_ref_study]
+            rt_ref_study.RTReferencedSeriesSequence = [rt_ref_series]
+            ref_for_seq.RTReferencedStudySequence = [rt_ref_study]
         ds.ReferencedFrameOfReferenceSequence = [ref_for_seq]
 
         # --- Structure Set ROI Sequence ---
