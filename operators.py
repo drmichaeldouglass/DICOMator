@@ -21,9 +21,12 @@ from mathutils import Vector
 from .artifacts import (
     add_bias_field_shading,
     add_gaussian_noise,
+    add_gibbs_ringing,
     add_metal_artifacts,
     add_motion_artifact,
+    add_mri_geometric_distortion,
     add_poisson_noise,
+    add_rician_noise,
     add_ring_artifacts,
     apply_partial_volume_effect,
 )
@@ -114,6 +117,24 @@ def _apply_configured_artifacts(hu_array, props):
             axis=axis,
         )
 
+    if getattr(props, "enable_geometric_distortion", False) and is_mri:
+        gradient = get_float_prop(props, "geometric_gradient_strength", 0.05)
+        b0 = max(0.0, get_float_prop(props, "geometric_b0_shift", 3.0))
+        b0_scale = max(0.05, min(1.0, get_float_prop(props, "geometric_b0_scale", 0.35)))
+        readout_axis = 0 if str(getattr(props, "geometric_readout_axis", 'Y')).upper() != 'Y' else 1
+        result = add_mri_geometric_distortion(
+            result,
+            gradient_strength=float(gradient),
+            b0_strength=float(b0),
+            b0_scale=float(b0_scale),
+            readout_axis=readout_axis,
+        )
+
+    if getattr(props, "enable_gibbs_ringing", False) and is_mri:
+        gibbs_strength = max(0.0, min(1.0, get_float_prop(props, "gibbs_strength", 0.6)))
+        gibbs_truncation = max(0.0, min(0.49, get_float_prop(props, "gibbs_truncation", 0.2)))
+        result = add_gibbs_ringing(result, strength=float(gibbs_strength), truncation=float(gibbs_truncation))
+
     if getattr(props, "enable_bias_field", False) and is_mri:
         strength = max(0.0, min(1.0, get_float_prop(props, "bias_field_strength", 0.25)))
         scale = max(0.05, min(1.0, get_float_prop(props, "bias_field_scale", 0.3)))
@@ -121,7 +142,12 @@ def _apply_configured_artifacts(hu_array, props):
 
     if getattr(props, "enable_noise", False) and get_float_prop(props, "noise_std_dev_hu", 0.0) > 0.0:
         std_dev = max(0.0, get_float_prop(props, "noise_std_dev_hu", 20.0))
-        result = add_gaussian_noise(result, std_dev)
+        if is_mri:
+            # MR magnitude images carry Rician (not Gaussian) noise; the value is
+            # reused as the underlying complex-channel standard deviation.
+            result = add_rician_noise(result, std_dev)
+        else:
+            result = add_gaussian_noise(result, std_dev)
 
     if getattr(props, "enable_poisson_noise", False) and get_float_prop(props, "poisson_scale", 0.0) > 0.0 and is_ct:
         scale = max(1.0, get_float_prop(props, "poisson_scale", 150.0))

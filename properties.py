@@ -220,6 +220,66 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
         max=1.0,
         precision=2,
     )
+    enable_geometric_distortion: bpy.props.BoolProperty(
+        name="Add Geometric Distortion",
+        description="Warp MR images with gradient non-linearity and B0 off-resonance distortion",
+        default=False,
+    )
+    geometric_gradient_strength: bpy.props.FloatProperty(
+        name="Gradient Non-linearity",
+        description="Radial warp from gradient non-linearity (>0 pincushion, <0 barrel); "
+        "approx. fractional displacement at the FOV corner",
+        default=0.05,
+        min=-0.5,
+        max=0.5,
+        precision=3,
+    )
+    geometric_b0_shift: bpy.props.FloatProperty(
+        name="B0 Shift (voxels)",
+        description="Peak off-resonance displacement (voxels) along the readout axis",
+        default=3.0,
+        min=0.0,
+        soft_max=15.0,
+        precision=2,
+    )
+    geometric_b0_scale: bpy.props.FloatProperty(
+        name="B0 Field Scale",
+        description="Relative smoothness of the off-resonance field (larger = slower spatial variation)",
+        default=0.35,
+        min=0.05,
+        max=1.0,
+        precision=2,
+    )
+    geometric_readout_axis: bpy.props.EnumProperty(
+        name="Readout Axis",
+        description="Frequency-encode (readout) direction along which B0 distortion shifts voxels",
+        items=[
+            ('X', 'X Axis', 'Readout along the X axis'),
+            ('Y', 'Y Axis', 'Readout along the Y axis'),
+        ],
+        default='Y',
+    )
+    enable_gibbs_ringing: bpy.props.BoolProperty(
+        name="Add Gibbs Ringing",
+        description="Add truncation (Gibbs) ringing from finite k-space sampling (MRI)",
+        default=False,
+    )
+    gibbs_strength: bpy.props.FloatProperty(
+        name="Ringing Strength",
+        description="Blend factor between the original and k-space-truncated reconstruction",
+        default=0.6,
+        min=0.0,
+        max=1.0,
+        subtype='FACTOR',
+    )
+    gibbs_truncation: bpy.props.FloatProperty(
+        name="k-space Truncation",
+        description="Fraction of k-space removed from each in-plane edge (larger = coarser ringing)",
+        default=0.2,
+        min=0.0,
+        max=0.49,
+        precision=3,
+    )
     enable_partial_volume: bpy.props.BoolProperty(
         name="Add Partial Volume Blur",
         description="Blend materials at boundaries using a volumetric blur",
