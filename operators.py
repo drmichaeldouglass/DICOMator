@@ -872,6 +872,8 @@ class MESH_OT_export_dicom(Operator):
                     )
                     if 'error' in result:
                         return result
+                    for warning in result.get('warnings') or []:
+                        self.report({'WARNING'}, warning)
 
                 yield phase_end
         finally:

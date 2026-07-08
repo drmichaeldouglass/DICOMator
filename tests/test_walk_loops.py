@@ -1,15 +1,7 @@
-"""Graph-walk tests for rtstruct_export._walk_loops using fake bmesh objects.
-
-``_walk_loops`` currently returns just the loop list; after the hardening
-rewrite it returns ``(loops, dropped_edge_count)``. ``_walk`` normalizes both
-forms so these tests stay valid across the change; dropped-count assertions
-are skipped while the old API is in place.
-"""
+"""Graph-walk tests for rtstruct_export._walk_loops using fake bmesh objects."""
 from __future__ import annotations
 
 import types
-
-import pytest
 
 from conftest import load_module
 
@@ -81,10 +73,6 @@ def test_open_chain_is_discarded():
         assert dropped == 3
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="greedy neighbors[0] walk may lose the loop depending on start vertex; fixed by the edge-consumption rewrite",
-)
 def test_t_branch_keeps_loop_and_drops_dangling_edge():
     verts, edges = _chain([(0, 0), (1, 0), (1, 1), (0, 1)])
     dangler = FakeVert(2, 0)
@@ -96,10 +84,6 @@ def test_t_branch_keeps_loop_and_drops_dangling_edge():
         assert dropped == 1
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="greedy neighbors[0] walk drops the second lobe at a degree-4 crossing; fixed by the edge-consumption rewrite",
-)
 def test_figure_eight_recovers_both_lobes():
     """Two loops sharing one degree-4 vertex must both be recovered."""
     shared = FakeVert(0, 0)
