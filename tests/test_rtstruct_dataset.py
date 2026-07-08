@@ -133,6 +133,17 @@ def test_no_ct_reference_omits_study_sequence():
         assert "ContourImageSequence" not in item
 
 
+def test_study_metadata_fields():
+    ds, _, _ = _build(
+        study_id="PHANTOM-01",
+        accession_number="ACC-42",
+        patient_birth_date="1980/02/01",
+    )
+    assert str(ds.StudyID) == "PHANTOM-01"
+    assert str(ds.AccessionNumber) == "ACC-42"
+    assert str(ds.PatientBirthDate) == "19800201"
+
+
 def test_display_colour_round_trip():
     ds, _, _ = _build()
     assert [int(v) for v in ds.ROIContourSequence[0].ROIDisplayColor] == [255, 0, 0]

@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import os
 import time
+from datetime import datetime
 from functools import partial
 from typing import Generator, Iterable, Sequence
 
@@ -515,6 +516,9 @@ class MESH_OT_export_dicom(Operator):
             'dicom_modality': "MR" if modality_key in MRI_MODALITIES else "CT",
             'frames': frames,
             'apply_modifiers': bool(getattr(props, "apply_modifiers", True)),
+            # One timestamp for the whole export so Study/Series/Content
+            # dates and times agree across every co-exported object.
+            'study_datetime': datetime.now(),
         }
 
         self._job = self._export_job(context, config)
@@ -785,10 +789,15 @@ class MESH_OT_export_dicom(Operator):
                                 patient_name=props.patient_name,
                                 patient_id=props.patient_id,
                                 patient_sex=props.patient_sex,
+                                patient_birth_date=getattr(props, "patient_birth_date", ""),
                                 series_description=phase_description,
                                 direct_hu=True,
                                 patient_position=props.patient_position,
                                 dicom_modality=dicom_modality,
+                                mr_weighting=config['modality_key'] if dicom_modality == "MR" else None,
+                                study_id=getattr(props, "study_id", "1"),
+                                accession_number=getattr(props, "accession_number", "1"),
+                                study_datetime=config['study_datetime'],
                                 study_instance_uid=study_uid,
                                 frame_of_reference_uid=frame_of_ref_uid,
                                 series_instance_uid=image_series_uid,
@@ -845,8 +854,12 @@ class MESH_OT_export_dicom(Operator):
                             patient_name=props.patient_name,
                             patient_id=props.patient_id,
                             patient_sex=props.patient_sex,
+                            patient_birth_date=getattr(props, "patient_birth_date", ""),
                             patient_position=props.patient_position,
                             series_description=drr_description,
+                            study_id=getattr(props, "study_id", "1"),
+                            accession_number=getattr(props, "accession_number", "1"),
+                            study_datetime=config['study_datetime'],
                             pixel_spacing_mm=projection_metadata.get("pixel_spacing_mm"),
                             image_position_patient=projection_metadata.get("image_position_patient"),
                             image_orientation_patient=projection_metadata.get("image_orientation_patient"),
@@ -897,10 +910,14 @@ class MESH_OT_export_dicom(Operator):
                         patient_name=props.patient_name,
                         patient_id=props.patient_id,
                         patient_sex=props.patient_sex,
+                        patient_birth_date=getattr(props, "patient_birth_date", ""),
                         patient_position=props.patient_position,
                         series_description=f"{phase_description} - RT Dose",
                         dose_type=getattr(props, "dose_type", "PHYSICAL"),
                         dose_summation_type=getattr(props, "dose_summation_type", "PLAN"),
+                        study_id=getattr(props, "study_id", "1"),
+                        accession_number=getattr(props, "accession_number", "1"),
+                        study_datetime=config['study_datetime'],
                         study_instance_uid=study_uid,
                         frame_of_reference_uid=frame_of_ref_uid,
                         series_instance_uid=dose_series_uid,
@@ -932,8 +949,12 @@ class MESH_OT_export_dicom(Operator):
                             patient_name=props.patient_name,
                             patient_id=props.patient_id,
                             patient_sex=props.patient_sex,
+                            patient_birth_date=getattr(props, "patient_birth_date", ""),
                             patient_position=props.patient_position,
                             series_description=f"{phase_description} - RT Structure",
+                            study_id=getattr(props, "study_id", "1"),
+                            accession_number=getattr(props, "accession_number", "1"),
+                            study_datetime=config['study_datetime'],
                             apply_modifiers=apply_modifiers,
                             study_instance_uid=study_uid,
                             frame_of_reference_uid=frame_of_ref_uid,

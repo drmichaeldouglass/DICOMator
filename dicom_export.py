@@ -14,6 +14,10 @@ from .constants import (
     DEFAULT_DENSITY,
     MAX_HU_VALUE,
     MIN_HU_VALUE,
+    MODALITY_MRI_T1,
+    MR_SEQUENCE_PARAMETERS,
+    normalize_dicom_date,
+    truncate_sh,
 )
 
 SliceProgressCallback = Optional[Callable[[int, int], None]]
@@ -53,10 +57,15 @@ def export_voxel_grid_to_dicom_iter(
     patient_name: str = "Anonymous",
     patient_id: str = "12345678",
     patient_sex: str = "M",
+    patient_birth_date: str = "",
     series_description: str = "CT Series from DICOMator",
     direct_hu: bool = False,
     patient_position: str = "HFS",
     dicom_modality: str = "CT",
+    mr_weighting: Optional[str] = None,
+    study_id: str = "1",
+    accession_number: str = "1",
+    study_datetime: Optional[datetime] = None,
     study_instance_uid: Optional[str] = None,
     frame_of_reference_uid: Optional[str] = None,
     series_instance_uid: Optional[str] = None,
@@ -70,6 +79,11 @@ def export_voxel_grid_to_dicom_iter(
 
     Yields ``(slices_written, total_slices)`` after each slice and returns the
     result dict (``{'success': ...}`` or ``{'error': ...}``).
+
+    ``mr_weighting`` selects the emitted MR acquisition parameters (TR/TE,
+    echo train) so the metadata matches the T1/T2 intensity preset;
+    ``study_datetime`` lets callers share one timestamp across co-exported
+    series so Study/Series/Content times agree between objects.
     """
     if not shared_constants.ensure_pydicom_available():
         return {'error': 'pydicom not available'}
@@ -85,7 +99,7 @@ def export_voxel_grid_to_dicom_iter(
     if modality not in {"CT", "MR"}:
         modality = "CT"
 
-    current_datetime = datetime.now()
+    current_datetime = study_datetime or datetime.now()
     date_str = current_datetime.strftime('%Y%m%d')
     time_str = current_datetime.strftime('%H%M%S.%f')
 
@@ -142,14 +156,14 @@ def export_voxel_grid_to_dicom_iter(
 
             dataset.PatientName = common_metadata['patient_name']
             dataset.PatientID = common_metadata['patient_id']
-            dataset.PatientBirthDate = ''
+            dataset.PatientBirthDate = normalize_dicom_date(patient_birth_date)
             dataset.PatientSex = common_metadata['patient_sex']
             dataset.PatientPosition = str(patient_position)
 
             dataset.StudyInstanceUID = common_metadata['study_instance_uid']
             dataset.FrameOfReferenceUID = common_metadata['frame_of_reference_uid']
-            dataset.StudyID = '1'
-            dataset.AccessionNumber = '1'
+            dataset.StudyID = truncate_sh(study_id, '1')
+            dataset.AccessionNumber = truncate_sh(accession_number, '1')
             dataset.StudyDate = common_metadata['date_str']
             dataset.StudyTime = common_metadata['time_str']
             dataset.ReferringPhysicianName = ''
@@ -173,15 +187,19 @@ def export_voxel_grid_to_dicom_iter(
                 # validators flag its absence. 120 kVp is a typical setting.
                 dataset.KVP = '120'
             if modality == "MR":
-                # MR Image module (PS3.3 C.8.3.1) Type 1/2 attributes with
-                # plausible spin-echo defaults so files pass IOD validation.
+                # MR Image module (PS3.3 C.8.3.1) Type 1/2 attributes using
+                # spin-echo parameters representative of the selected T1/T2
+                # weighting preset so the metadata matches the intensities.
+                sequence = MR_SEQUENCE_PARAMETERS.get(
+                    mr_weighting, MR_SEQUENCE_PARAMETERS[MODALITY_MRI_T1]
+                )
                 dataset.ScanningSequence = 'SE'
-                dataset.SequenceVariant = 'NONE'
+                dataset.SequenceVariant = sequence['SequenceVariant']
                 dataset.ScanOptions = ''
                 dataset.MRAcquisitionType = '3D'
-                dataset.RepetitionTime = '500'
-                dataset.EchoTime = '15'
-                dataset.EchoTrainLength = '1'
+                dataset.RepetitionTime = sequence['RepetitionTime']
+                dataset.EchoTime = sequence['EchoTime']
+                dataset.EchoTrainLength = sequence['EchoTrainLength']
                 dataset.EchoNumbers = '1'
                 dataset.ImagedNucleus = '1H'
                 dataset.MagneticFieldStrength = '1.5'
@@ -260,8 +278,12 @@ def export_projection_to_dicom(
     patient_name: str = "Anonymous",
     patient_id: str = "12345678",
     patient_sex: str = "M",
+    patient_birth_date: str = "",
     patient_position: str = "HFS",
     series_description: str = "DRR from DICOMator",
+    study_id: str = "1",
+    accession_number: str = "1",
+    study_datetime: Optional[datetime] = None,
     pixel_spacing_mm: Optional[Sequence[float]] = None,
     image_position_patient: Optional[Sequence[float]] = None,
     image_orientation_patient: Optional[Sequence[float]] = None,
@@ -293,7 +315,7 @@ def export_projection_to_dicom(
     if image_2d.dtype != np.uint16:
         image_2d = np.clip(image_2d, 0, 65535).astype(np.uint16, copy=False)
 
-    current_datetime = datetime.now()
+    current_datetime = study_datetime or datetime.now()
     date_str = current_datetime.strftime('%Y%m%d')
     time_str = current_datetime.strftime('%H%M%S.%f')
 
@@ -317,14 +339,14 @@ def export_projection_to_dicom(
 
         dataset.PatientName = patient_name
         dataset.PatientID = patient_id
-        dataset.PatientBirthDate = ''
+        dataset.PatientBirthDate = normalize_dicom_date(patient_birth_date)
         dataset.PatientSex = patient_sex
         dataset.PatientPosition = str(patient_position)
 
         dataset.StudyInstanceUID = study_instance_uid
         dataset.FrameOfReferenceUID = frame_of_reference_uid
-        dataset.StudyID = '1'
-        dataset.AccessionNumber = '1'
+        dataset.StudyID = truncate_sh(study_id, '1')
+        dataset.AccessionNumber = truncate_sh(accession_number, '1')
         dataset.StudyDate = date_str
         dataset.StudyTime = time_str
         dataset.ReferringPhysicianName = ''

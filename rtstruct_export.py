@@ -36,7 +36,7 @@ import bmesh
 import bpy
 
 from . import constants as shared_constants
-from .constants import RTSTRUCT_SOP_CLASS
+from .constants import RTSTRUCT_SOP_CLASS, normalize_dicom_date, truncate_sh
 
 # ---------------------------------------------------------------------------
 # Default colour palette used when an object has no material assigned.
@@ -346,6 +346,9 @@ def build_rtstruct_dataset(
     patient_name: str = "Anonymous",
     patient_id: str = "12345678",
     patient_sex: str = "M",
+    patient_birth_date: str = "",
+    study_id: str = "1",
+    accession_number: str = "1",
     series_description: str = "RT Structure Set from DICOMator",
     series_number: int = 1,
     bbox_min_z_m: float = 0.0,
@@ -383,15 +386,15 @@ def build_rtstruct_dataset(
     # --- Patient module ---
     ds.PatientName = patient_name
     ds.PatientID = patient_id
-    ds.PatientBirthDate = ""
+    ds.PatientBirthDate = normalize_dicom_date(patient_birth_date)
     ds.PatientSex = patient_sex
 
     # --- General study ---
     ds.StudyInstanceUID = study_instance_uid
     ds.StudyDate = date_str
     ds.StudyTime = time_str
-    ds.StudyID = "1"
-    ds.AccessionNumber = "1"
+    ds.StudyID = truncate_sh(study_id, "1")
+    ds.AccessionNumber = truncate_sh(accession_number, "1")
     ds.ReferringPhysicianName = ""
 
     # --- RT series ---
@@ -562,8 +565,12 @@ def export_rtstruct_to_dicom_iter(
     patient_name: str = "Anonymous",
     patient_id: str = "12345678",
     patient_sex: str = "M",
+    patient_birth_date: str = "",
     patient_position: str = "HFS",
     series_description: str = "RT Structure Set from DICOMator",
+    study_id: str = "1",
+    accession_number: str = "1",
+    study_datetime: Optional[datetime] = None,
     apply_modifiers: bool = True,
     study_instance_uid: Optional[str] = None,
     frame_of_reference_uid: Optional[str] = None,
@@ -635,7 +642,7 @@ def export_rtstruct_to_dicom_iter(
     bbox_min_z_m = float(bbox_min.z)
     z_positions_m: list[float] = [bbox_min_z_m + (i + 0.5) * vz_m for i in range(n_slices)]
 
-    now = datetime.now()
+    now = study_datetime or datetime.now()
     date_str = now.strftime("%Y%m%d")
     time_str = now.strftime("%H%M%S.%f")
 
@@ -693,6 +700,9 @@ def export_rtstruct_to_dicom_iter(
             patient_name=patient_name,
             patient_id=patient_id,
             patient_sex=patient_sex,
+            patient_birth_date=patient_birth_date,
+            study_id=study_id,
+            accession_number=accession_number,
             series_description=series_description,
             series_number=series_number,
             bbox_min_z_m=bbox_min_z_m,

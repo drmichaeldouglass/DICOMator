@@ -97,6 +97,85 @@ def test_mr_series_has_mr_module(tmp_path):
         assert "RescaleSlope" not in ds
 
 
+def test_mr_tags_follow_weighting_preset(tmp_path):
+    t1_dir = tmp_path / "t1"
+    t2_dir = tmp_path / "t2"
+    _, t1_datasets = _export(t1_dir, _grid(), dicom_modality="MR", mr_weighting=constants.MODALITY_MRI_T1)
+    _, t2_datasets = _export(t2_dir, _grid(), dicom_modality="MR", mr_weighting=constants.MODALITY_MRI_T2)
+
+    for ds in t1_datasets:
+        assert str(ds.RepetitionTime) == "500"
+        assert str(ds.EchoTime) == "15"
+        assert str(ds.EchoTrainLength) == "1"
+        assert str(ds.SequenceVariant) == "NONE"
+    for ds in t2_datasets:
+        assert str(ds.RepetitionTime) == "4000"
+        assert str(ds.EchoTime) == "100"
+        assert str(ds.EchoTrainLength) == "16"
+        assert str(ds.SequenceVariant) == "SK"
+
+
+def test_study_metadata_and_shared_timestamp(tmp_path):
+    from datetime import datetime
+
+    stamp = datetime(2026, 7, 8, 12, 34, 56, 789000)
+    _, datasets = _export(
+        tmp_path,
+        _grid(),
+        study_id="PHANTOM-01",
+        accession_number="ACC-42",
+        patient_birth_date="1980-02-01",
+        study_datetime=stamp,
+    )
+    for ds in datasets:
+        assert str(ds.StudyID) == "PHANTOM-01"
+        assert str(ds.AccessionNumber) == "ACC-42"
+        assert str(ds.PatientBirthDate) == "19800201"
+        assert str(ds.StudyDate) == "20260708"
+        assert str(ds.StudyTime) == "123456.789000"
+        assert str(ds.ContentDate) == "20260708"
+        assert str(ds.ContentTime) == "123456.789000"
+
+    drr_result = dicom_export.export_projection_to_dicom(
+        np.zeros((4, 4), dtype=np.uint16),
+        str(tmp_path),
+        filename="DRR_meta.dcm",
+        study_id="PHANTOM-01",
+        accession_number="ACC-42",
+        patient_birth_date="19800201",
+        study_datetime=stamp,
+    )
+    assert "success" in drr_result, drr_result
+    drr = pydicom.dcmread(str(tmp_path / "DRR_meta.dcm"))
+    assert str(drr.StudyDate) == "20260708"
+    assert str(drr.StudyTime) == "123456.789000"
+    assert str(drr.StudyID) == "PHANTOM-01"
+    assert str(drr.PatientBirthDate) == "19800201"
+
+
+def test_invalid_birth_date_written_empty(tmp_path):
+    _, datasets = _export(tmp_path, _grid(), patient_birth_date="Feb 1980")
+    for ds in datasets:
+        assert str(ds.PatientBirthDate) == ""
+
+
+def test_long_study_id_truncated_to_sh_limit(tmp_path):
+    _, datasets = _export(tmp_path, _grid(), study_id="X" * 40)
+    for ds in datasets:
+        assert str(ds.StudyID) == "X" * 16
+
+
+def test_normalize_and_truncate_helpers():
+    assert constants.normalize_dicom_date("1980-02-01") == "19800201"
+    assert constants.normalize_dicom_date("19800201") == "19800201"
+    assert constants.normalize_dicom_date("1980") == ""
+    assert constants.normalize_dicom_date(None) == ""
+    assert constants.truncate_sh("A" * 20) == "A" * 16
+    assert constants.truncate_sh("", "1") == "1"
+    assert constants.truncate_sh("  ", "1") == "1"
+    assert constants.truncate_sh(None, "1") == "1"
+
+
 def test_drr_projection_roundtrip(tmp_path):
     image = (np.arange(6 * 8, dtype=np.uint16) * 900).reshape(6, 8)
     result = dicom_export.export_projection_to_dicom(

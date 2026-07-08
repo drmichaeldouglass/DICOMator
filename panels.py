@@ -311,8 +311,11 @@ class VIEW3D_PT_dicomator_patient_info(Panel):
         layout.prop(props, "series_description", text="Description")
         layout.prop(props, "patient_name")
         layout.prop(props, "patient_id")
+        layout.prop(props, "patient_birth_date", text="Birth Date")
         layout.prop(props, "patient_sex")
         layout.prop(props, "patient_position", text="Position")
+        layout.prop(props, "study_id")
+        layout.prop(props, "accession_number")
 
 
 class VIEW3D_PT_dicomator_export_settings(Panel):

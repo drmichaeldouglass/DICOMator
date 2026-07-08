@@ -154,6 +154,49 @@ def get_material_intensity(material_key: str, modality: str) -> float | None:
 
 
 # ---------------------------------------------------------------------------
+# MR acquisition parameters per weighting preset
+# ---------------------------------------------------------------------------
+
+#: Representative spin-echo acquisition parameters emitted in the MR Image
+#: module for each weighting preset: a conventional SE for T1 and a fast
+#: (segmented k-space) SE for T2, so the metadata matches the intensity
+#: preset the user selected.
+MR_SEQUENCE_PARAMETERS = {
+    MODALITY_MRI_T1: {
+        "RepetitionTime": "500",
+        "EchoTime": "15",
+        "EchoTrainLength": "1",
+        "SequenceVariant": "NONE",
+    },
+    MODALITY_MRI_T2: {
+        "RepetitionTime": "4000",
+        "EchoTime": "100",
+        "EchoTrainLength": "16",
+        "SequenceVariant": "SK",
+    },
+}
+
+
+def normalize_dicom_date(value: str | None) -> str:
+    """Return ``value`` as an 8-digit DICOM DA string, or '' when invalid.
+
+    Non-digit separators are stripped (e.g. ``1980-02-01`` → ``19800201``);
+    anything that does not reduce to exactly 8 digits yields an empty string,
+    which is valid for Type 2 date attributes such as PatientBirthDate.
+    """
+
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    return digits if len(digits) == 8 else ""
+
+
+def truncate_sh(value: str | None, default: str = "") -> str:
+    """Clamp ``value`` to the 16-character DICOM SH (Short String) limit."""
+
+    text = str(value) if value is not None and str(value).strip() else default
+    return text[:16]
+
+
+# ---------------------------------------------------------------------------
 # RT DICOM SOP class UIDs
 # ---------------------------------------------------------------------------
 
@@ -315,7 +358,10 @@ __all__ = [
     "IMAGING_MODALITY_ITEMS",
     "MATERIAL_INTENSITIES",
     "MATERIAL_ITEMS",
+    "MR_SEQUENCE_PARAMETERS",
     "get_material_intensity",
+    "normalize_dicom_date",
+    "truncate_sh",
     "RTSTRUCT_SOP_CLASS",
     "RTDOSE_SOP_CLASS",
     "RTPLAN_SOP_CLASS",

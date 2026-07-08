@@ -81,6 +81,31 @@ def test_rtdose_references_companion_plan(tmp_path):
     assert plan.FrameOfReferenceUID == dose.FrameOfReferenceUID
 
 
+def test_rtdose_metadata_and_shared_timestamp(tmp_path):
+    from datetime import datetime
+
+    stamp = datetime(2026, 7, 8, 12, 34, 56, 789000)
+    result = rtdose_export.export_rtdose_to_dicom(
+        _dose_grid(),
+        VOXEL_SIZE_M,
+        BBOX_MIN,
+        str(tmp_path),
+        study_id="PHANTOM-01",
+        accession_number="ACC-42",
+        patient_birth_date="19800201",
+        study_datetime=stamp,
+    )
+    assert "success" in result, result
+    dose = pydicom.dcmread(str(tmp_path / "RTDose.dcm"))
+    plan = pydicom.dcmread(str(tmp_path / "RTPlan.dcm"))
+    for ds in (dose, plan):
+        assert str(ds.StudyID) == "PHANTOM-01"
+        assert str(ds.AccessionNumber) == "ACC-42"
+        assert str(ds.PatientBirthDate) == "19800201"
+        assert str(ds.StudyDate) == "20260708"
+        assert str(ds.StudyTime) == "123456.789000"
+
+
 def test_rtdose_shares_provided_study_uid(tmp_path):
     study_uid = constants.generate_uid()
     result = rtdose_export.export_rtdose_to_dicom(

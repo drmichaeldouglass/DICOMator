@@ -83,6 +83,24 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
         description="Medical Record Number (Patient ID)",
         default="12345678",
     )
+    patient_birth_date: bpy.props.StringProperty(
+        name="Birth Date",
+        description="Patient birth date as YYYYMMDD (8 digits); left empty when unset or invalid",
+        default="",
+        maxlen=16,
+    )
+    study_id: bpy.props.StringProperty(
+        name="Study ID",
+        description="DICOM Study ID written to every exported object (max 16 characters)",
+        default="1",
+        maxlen=16,
+    )
+    accession_number: bpy.props.StringProperty(
+        name="Accession Number",
+        description="DICOM Accession Number written to every exported object (max 16 characters)",
+        default="1",
+        maxlen=16,
+    )
     patient_sex: bpy.props.EnumProperty(
         name="Patient Sex",
         description="Patient sex",
