@@ -581,20 +581,33 @@ class MESH_OT_export_dicom(Operator):
         estimated_width, estimated_height, estimated_depth = _estimate_grid_dimensions(padded_bounds, voxel_size_m)
 
         total_estimated_voxels = estimated_width * estimated_height * estimated_depth
-        if (
+        oversized = (
             estimated_width > 2000
             or estimated_height > 2000
             or estimated_depth > 2000
             or total_estimated_voxels > 100_000_000
-        ):
+        )
+        if oversized:
+            size_text = (
+                f"{estimated_width}x{estimated_height}x{estimated_depth} "
+                f"({total_estimated_voxels:,} voxels). "
+                f"Selection size: {(bounds[1] - bounds[0]):.3f}x{(bounds[3] - bounds[2]):.3f}x{(bounds[5] - bounds[4]):.3f}m."
+            )
+            if not getattr(props, "allow_oversized_grids", False):
+                return {
+                    'error': (
+                        f"Voxel grid too large: {size_text} "
+                        "Limits: 2000 voxels per dimension, 100,000,000 total. "
+                        "Increase the voxel spacing or enable 'Allow Oversized Grids' "
+                        "in the Export panel."
+                    )
+                }
             self.report(
                 {'WARNING'},
                 (
-                    "Voxel grid very large: "
-                    f"{estimated_width}x{estimated_height}x{estimated_depth} "
-                    f"({total_estimated_voxels:,} voxels). "
-                    f"Selection size: {(bounds[1] - bounds[0]):.3f}x{(bounds[3] - bounds[2]):.3f}x{(bounds[5] - bounds[4]):.3f}m. "
-                    "Continuing anyway. This may be slow or run out of memory."
+                    f"Voxel grid very large: {size_text} "
+                    "Continuing anyway (oversized grids allowed). "
+                    "This may be slow or run out of memory."
                 ),
             )
 
@@ -662,6 +675,7 @@ class MESH_OT_export_dicom(Operator):
                 # ----------------------------------------------------------
                 if ct_objects and (export_image_series or export_drr):
                     t_start = phase_start + slot * type_span
+                    voxel_messages: list[str] = []
                     hu_array, origin, _dimensions = yield from _run_subtask(
                         voxelize_objects_to_hu_iter(
                             ct_objects,
@@ -671,10 +685,13 @@ class MESH_OT_export_dicom(Operator):
                             apply_modifiers=apply_modifiers,
                             depsgraph=depsgraph,
                             background_value=background_value,
+                            messages=voxel_messages,
                         ),
                         t_start,
                         t_start + type_span * 0.45,
                     )
+                    for message in voxel_messages:
+                        self.report({'WARNING'}, message)
 
                     if export_image_series:
                         write_start = phase_start + slot * type_span
@@ -774,6 +791,7 @@ class MESH_OT_export_dicom(Operator):
                     t_start = phase_start + slot * type_span
                     slot += 1
 
+                    dose_messages: list[str] = []
                     dose_array, dose_origin, _dose_dims = yield from _run_subtask(
                         voxelize_objects_to_dose_iter(
                             dose_objects,
@@ -783,10 +801,13 @@ class MESH_OT_export_dicom(Operator):
                             apply_modifiers=apply_modifiers,
                             depsgraph=depsgraph,
                             accumulate=getattr(props, "dose_accumulation", "SUM") == "SUM",
+                            messages=dose_messages,
                         ),
                         t_start,
                         t_start + type_span * 0.9,
                     )
+                    for message in dose_messages:
+                        self.report({'WARNING'}, message)
 
                     dose_series_uid = shared_constants.generate_uid()
                     result = export_rtdose_to_dicom(

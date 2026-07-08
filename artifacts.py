@@ -403,15 +403,16 @@ def add_metal_artifacts(
         back_proj /= float(num_views)
 
         # Radial decay away from the metal so distant streaks fade, controlled by
-        # ``falloff``. Distance is measured from the metal centroid.
-        gy, gx = np.indices((w0, h0), dtype=np.float32)
+        # ``falloff``. Distance is measured from the metal centroid. Axis 0 of
+        # the working slice is the volume's X/width axis, axis 1 is Y/height.
+        g0, g1 = np.indices((w0, h0), dtype=np.float32)
         mask_small = _resize_bilinear(source_mask.astype(np.float32), (w0, h0)) > 0.25
         if np.any(mask_small):
-            cy = float(np.mean(gy[mask_small]))
-            cx = float(np.mean(gx[mask_small]))
+            c0 = float(np.mean(g0[mask_small]))
+            c1 = float(np.mean(g1[mask_small]))
         else:
-            cy, cx = (w0 - 1) / 2.0, (h0 - 1) / 2.0
-        rad = np.sqrt((gy - cy) ** 2 + (gx - cx) ** 2)
+            c0, c1 = (w0 - 1) / 2.0, (h0 - 1) / 2.0
+        rad = np.sqrt((g0 - c0) ** 2 + (g1 - c1) ** 2)
         rad_norm = rad / (0.5 * float(math.hypot(w0, h0)) + 1e-3)
         back_proj *= np.exp(-decay * rad_norm).astype(np.float32)
 
@@ -484,16 +485,18 @@ def add_ring_artifacts(
     result = hu_array.astype(np.float32, copy=True)
 
     # Use explicit first-two axes from the volume to derive slice dimensions.
-    # This guarantees the radial grid shape matches result[:, :, iz] exactly.
+    # The volume is ordered (X, Y, Z), so axis 0 is the image X/width axis and
+    # axis 1 is Y/height; the radial pattern is symmetric, so only the shape
+    # match with result[:, :, iz] matters.
     if result.ndim < 3 or result.shape[2] == 0:
         return result.astype(np.int16, copy=False)
-    rows = int(result.shape[0])
-    cols = int(result.shape[1])
+    size0 = int(result.shape[0])
+    size1 = int(result.shape[1])
     depth = int(result.shape[2])
 
-    r_idx, c_idx = np.indices((rows, cols), dtype=np.float32)
-    x = (c_idx / max(1, cols - 1)) * 2.0 - 1.0 if cols > 1 else c_idx * 0.0
-    y = (r_idx / max(1, rows - 1)) * 2.0 - 1.0 if rows > 1 else r_idx * 0.0
+    idx0, idx1 = np.indices((size0, size1), dtype=np.float32)
+    norm1 = (idx1 / max(1, size1 - 1)) * 2.0 - 1.0 if size1 > 1 else idx1 * 0.0
+    norm0 = (idx0 / max(1, size0 - 1)) * 2.0 - 1.0 if size0 > 1 else idx0 * 0.0
 
     # A persistent detector-channel calibration error reconstructs as a signed
     # ring. When no radius is specified, synthesize a small cluster of rings.
@@ -504,11 +507,11 @@ def add_ring_artifacts(
     else:
         ring_specs.append((float(ring_radius), float(generator.choice([-1.0, 1.0]))))
 
-    center_x = float(generator.normal(0.0, 0.015))
-    center_y = float(generator.normal(0.0, 0.015))
-    radius = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
+    center1 = float(generator.normal(0.0, 0.015))
+    center0 = float(generator.normal(0.0, 0.015))
+    radius = np.sqrt((norm1 - center1) ** 2 + (norm0 - center0) ** 2)
 
-    base_pattern = np.zeros((rows, cols), dtype=np.float32)
+    base_pattern = np.zeros((size0, size1), dtype=np.float32)
     t = float(thickness)
     for r0, sign in ring_specs:
         channel_width = t * float(generator.uniform(0.75, 1.35))

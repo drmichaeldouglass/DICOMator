@@ -170,9 +170,10 @@ Notes:
 
 ## Performance and limits
 
-- Guardrails prevent extremely large grids:
+- Guardrails abort exports of extremely large grids with an error:
   - Per-dimension limit: 2,000 voxels
   - Total voxels limit: 100,000,000 (≈200 MB int16)
+  - Enable **Allow Oversized Grids** in the Export panel to bypass the limits at your own risk (oversized exports may be very slow or run out of memory)
 - Tips:
   - Increase voxel spacing (mm) to reduce memory/time requirements
   - Reduce the number of selected meshes or animation frames
@@ -195,8 +196,8 @@ Notes:
 
 - **“pydicom library not available”**
   - Install `pydicom` in Blender’s Python or use the helper script to fetch wheels, then restart Blender.
-- **“Grid too large”**
-  - Increase voxel spacing (mm), reduce padding/selection size, or limit the frame range.
+- **“Voxel grid too large”**
+  - Increase voxel spacing (mm), reduce padding/selection size, or limit the frame range. To proceed anyway, enable **Allow Oversized Grids** in the Export panel.
 - **“Set an active scene camera before exporting a DRR”**
   - Assign a camera to the scene (`Scene Properties → Camera`) or make a camera active in the 3D View before DRR export.
 - **“Output directory is not writable”**

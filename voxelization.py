@@ -132,6 +132,7 @@ def _voxelize_objects_iter(
     background_value: float,
     accumulate: bool,
     label: str,
+    messages: Optional[list[str]] = None,
 ) -> VoxelizeGenerator:
     """Shared ray-casting voxelizer.
 
@@ -139,6 +140,9 @@ def _voxelize_objects_iter(
     ``background_value``. Meshes are processed in alphabetical name order;
     when ``accumulate`` is False the alphabetically last mesh wins any
     overlapping voxels, when True the per-object values are summed.
+
+    When ``messages`` is provided, human-readable warnings about skipped
+    objects are appended to it so callers can surface them in the UI.
     """
     if not objects:
         raise ValueError(f"No objects provided for {label} voxelization")
@@ -172,11 +176,18 @@ def _voxelize_objects_iter(
         objects,
         key=lambda obj: (obj.name.casefold(), obj.name),
     )
+    def _skip(reason: str) -> None:
+        print(reason)
+        if messages is not None:
+            messages.append(reason)
+
+    skipped_names: list[str] = []
     object_data: list[tuple[BVHTree, float, int, int, int, int]] = []
     for obj in sorted_objects:
         geometry = _object_geometry(obj, depsgraph=depsgraph, apply_modifiers=apply_modifiers)
         if geometry is None:
-            print(f"Skipping {label} voxelization for '{obj.name}': mesh has no faces.")
+            skipped_names.append(obj.name)
+            _skip(f"Skipped '{obj.name}' during {label} voxelization: mesh has no faces")
             continue
         bvh, (obj_min_x, obj_max_x, obj_min_y, obj_max_y) = geometry
         # Rays outside the object's XY footprint cannot intersect it, so only
@@ -187,11 +198,16 @@ def _voxelize_objects_iter(
         iy0 = max(0, int(math.floor((obj_min_y - min_y) / vy)) - 1)
         iy1 = min(height - 1, int(math.ceil((obj_max_y - min_y) / vy)) + 1)
         if ix1 < ix0 or iy1 < iy0:
+            skipped_names.append(obj.name)
+            _skip(f"Skipped '{obj.name}' during {label} voxelization: outside the voxel grid")
             continue
         object_data.append((bvh, float(value_for_object(obj)), ix0, ix1, iy0, iy1))
 
     if not object_data:
-        raise ValueError("No voxelizable objects provided (all selected meshes had zero faces)")
+        raise ValueError(
+            f"No voxelizable {label} objects: all selected meshes were skipped "
+            f"({', '.join(skipped_names)})"
+        )
 
     print(f"Voxelizing {len(object_data)} object(s) into {width}x{height}x{depth} {label} grid...")
 
@@ -273,11 +289,13 @@ def voxelize_objects_to_hu_iter(
     apply_modifiers: bool = False,
     depsgraph: Optional[bpy.types.Depsgraph] = None,
     background_value: float = AIR_DENSITY,
+    messages: Optional[list[str]] = None,
 ) -> VoxelizeGenerator:
     """Generator variant of :func:`voxelize_objects_to_hu`.
 
     ``background_value`` fills voxels not covered by any mesh. CT exports use
     air (-1000 HU); MR exports should pass 0 (signal void) instead.
+    ``messages`` collects skipped-object warnings for the caller's UI.
     """
     def hu_for_object(obj: Object) -> float:
         hu_value = float(getattr(obj, "dicomator_hu", DEFAULT_DENSITY))
@@ -295,6 +313,7 @@ def voxelize_objects_to_hu_iter(
         background_value=float(background_value),
         accumulate=False,
         label="HU",
+        messages=messages,
     )
 
 
@@ -338,6 +357,7 @@ def voxelize_objects_to_dose_iter(
     apply_modifiers: bool = False,
     depsgraph: Optional[bpy.types.Depsgraph] = None,
     accumulate: bool = True,
+    messages: Optional[list[str]] = None,
 ) -> VoxelizeGenerator:
     """Generator variant of :func:`voxelize_objects_to_dose`."""
     def dose_for_object(obj: Object) -> float:
@@ -356,6 +376,7 @@ def voxelize_objects_to_dose_iter(
         background_value=0.0,
         accumulate=accumulate,
         label="dose",
+        messages=messages,
     )
 
 
