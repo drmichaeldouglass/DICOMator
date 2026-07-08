@@ -23,7 +23,9 @@ jobs:
                ".github/**" \
                ".gitignore" \
                "AGENTS.md" \
-               "download_wheels.py"
+               "download_wheels.py" \
+               "tests/**" \
+               "ruff.toml"
 
       - name: Upload dicomator.zip to this release
         uses: softprops/action-gh-release@v2

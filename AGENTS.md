@@ -25,11 +25,14 @@
 - Ensure the code is written and structured in a way that is easily understandable by a medical physicist.
 
 ## Testing & Validation
-- The repository does not ship automated unit tests. **Before committing changes, run (from the repository root):**
+- A headless pytest suite lives in `tests/` (stub `bpy`/`bmesh`/`mathutils` modules are installed by `tests/conftest.py`, so no Blender is required). **Before committing changes, run (from the repository root):**
   ```bash
   python -m compileall .
+  ruff check .
+  pytest -q
   ```
-  This catches syntax errors without requiring Blender.
+  Dependencies for the test run: `pip install numpy pydicom pytest ruff`.
+- CI (`.github/workflows/ci.yml`) runs the same three steps on every push and pull request.
 - For features that touch Blender interaction, perform a quick manual smoke test inside Blender if possible (not enforced here, but recommended).
 
 ## Documentation & Communication

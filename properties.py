@@ -83,6 +83,24 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
         description="Medical Record Number (Patient ID)",
         default="12345678",
     )
+    patient_birth_date: bpy.props.StringProperty(
+        name="Birth Date",
+        description="Patient birth date as YYYYMMDD (8 digits); left empty when unset or invalid",
+        default="",
+        maxlen=16,
+    )
+    study_id: bpy.props.StringProperty(
+        name="Study ID",
+        description="DICOM Study ID written to every exported object (max 16 characters)",
+        default="1",
+        maxlen=16,
+    )
+    accession_number: bpy.props.StringProperty(
+        name="Accession Number",
+        description="DICOM Accession Number written to every exported object (max 16 characters)",
+        default="1",
+        maxlen=16,
+    )
     patient_sex: bpy.props.EnumProperty(
         name="Patient Sex",
         description="Patient sex",
@@ -165,6 +183,14 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
         name="Apply Modifiers/Deformations",
         description="Evaluate modifiers/shape keys/armatures/lattices when voxelizing",
         default=True,
+    )
+    allow_oversized_grids: bpy.props.BoolProperty(
+        name="Allow Oversized Grids",
+        description=(
+            "Permit voxel grids beyond 2000 voxels per dimension or 100 million "
+            "total voxels. Oversized exports may be very slow or run out of memory"
+        ),
+        default=False,
     )
     drr_resolution_scale: bpy.props.FloatProperty(
         name="DRR Resolution Scale",

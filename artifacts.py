@@ -44,14 +44,17 @@ def _convolve_along_axis(array: np.ndarray, kernel: np.ndarray, axis: int) -> np
 
     pad = int(kernel.size // 2)
     moved = np.moveaxis(arr, axis, -1)
-
-    def _conv_row(v: np.ndarray) -> np.ndarray:
-        padded = np.pad(v, (pad, pad), mode="edge")
-        return np.convolve(padded, kernel, mode="valid")
-
-    smoothed = np.apply_along_axis(_conv_row, -1, moved)
-    if smoothed.shape != moved.shape:
-        smoothed = _ensure_shape_like(smoothed, moved.shape)
+    pad_widths = [(0, 0)] * (moved.ndim - 1) + [(pad, pad)]
+    padded = np.pad(moved, pad_widths, mode="edge")
+    # Batched sliding-window dot product: a zero-copy window view plus one
+    # matmul replaces np.apply_along_axis (a Python loop over rows). The
+    # kernel is flipped because convolution reverses it, whereas a window
+    # dot product correlates.
+    windows = np.lib.stride_tricks.sliding_window_view(padded, kernel.size, axis=-1)
+    smoothed = (windows @ kernel[::-1].copy()).astype(np.float32, copy=False)
+    # Even-sized kernels produce one extra output sample; crop to match the
+    # original np.convolve(..., 'valid') + center-crop behaviour.
+    smoothed = smoothed[..., : moved.shape[-1]]
 
     return np.moveaxis(smoothed, -1, axis)
 
@@ -360,6 +363,19 @@ def add_metal_artifacts(
     # ``falloff`` sharpens the radial decay of the back-projected streaks.
     decay = float(np.clip(falloff, 0.1, 24.0)) / 6.0
 
+    # Slice-invariant quantities hoisted out of the per-slice loop: the
+    # working resolution, projection angles, coordinate grids, and halo
+    # kernel depend only on the volume's in-plane shape.
+    scale = 1.0
+    if max(width, height) > work_cap:
+        scale = work_cap / float(max(width, height))
+    w0 = max(8, int(round(width * scale)))
+    h0 = max(8, int(round(height * scale)))
+    angles = np.linspace(0.0, math.pi, num_views, endpoint=False)
+    g0, g1 = np.indices((w0, h0), dtype=np.float32)
+    half_diag = 0.5 * float(math.hypot(w0, h0)) + 1e-3
+    halo_kernel = max(3, min(21, (min(width, height) // 10) * 2 + 1))
+
     for iz in range(depth):
         source_slice = hu_array[:, :, iz].astype(np.float32, copy=False)
         source_mask = source_slice >= density_threshold
@@ -373,14 +389,8 @@ def add_metal_artifacts(
         attn = (metal_excess / norm).astype(np.float32, copy=False)
 
         # Optionally downsample the attenuation map for the projection loop.
-        scale = 1.0
-        if max(width, height) > work_cap:
-            scale = work_cap / float(max(width, height))
-        w0 = max(8, int(round(width * scale)))
-        h0 = max(8, int(round(height * scale)))
         attn_small = _resize_bilinear(attn, (w0, h0)) if (w0, h0) != (width, height) else attn
 
-        angles = np.linspace(0.0, math.pi, num_views, endpoint=False)
         back_proj = np.zeros((w0, h0), dtype=np.float32)
         for angle in angles:
             rotated = _rotate_bilinear(attn_small, float(angle))
@@ -403,16 +413,16 @@ def add_metal_artifacts(
         back_proj /= float(num_views)
 
         # Radial decay away from the metal so distant streaks fade, controlled by
-        # ``falloff``. Distance is measured from the metal centroid.
-        gy, gx = np.indices((w0, h0), dtype=np.float32)
+        # ``falloff``. Distance is measured from the metal centroid. Axis 0 of
+        # the working slice is the volume's X/width axis, axis 1 is Y/height.
         mask_small = _resize_bilinear(source_mask.astype(np.float32), (w0, h0)) > 0.25
         if np.any(mask_small):
-            cy = float(np.mean(gy[mask_small]))
-            cx = float(np.mean(gx[mask_small]))
+            c0 = float(np.mean(g0[mask_small]))
+            c1 = float(np.mean(g1[mask_small]))
         else:
-            cy, cx = (w0 - 1) / 2.0, (h0 - 1) / 2.0
-        rad = np.sqrt((gy - cy) ** 2 + (gx - cx) ** 2)
-        rad_norm = rad / (0.5 * float(math.hypot(w0, h0)) + 1e-3)
+            c0, c1 = (w0 - 1) / 2.0, (h0 - 1) / 2.0
+        rad = np.sqrt((g0 - c0) ** 2 + (g1 - c1) ** 2)
+        rad_norm = rad / half_diag
         back_proj *= np.exp(-decay * rad_norm).astype(np.float32)
 
         # Scale so the robust peak of the streak field reaches ``intensity`` HU.
@@ -425,7 +435,6 @@ def add_metal_artifacts(
             slice_artifact = _resize_bilinear(slice_artifact, (width, height))
 
         # Broad beam-hardening shading immediately around the dense object.
-        halo_kernel = max(3, min(21, (min(width, height) // 10) * 2 + 1))
         halo = _gaussian_blur(source_mask.astype(np.float32), halo_kernel)
         halo_max = float(np.max(halo))
         if halo_max > 0.0:
@@ -484,16 +493,18 @@ def add_ring_artifacts(
     result = hu_array.astype(np.float32, copy=True)
 
     # Use explicit first-two axes from the volume to derive slice dimensions.
-    # This guarantees the radial grid shape matches result[:, :, iz] exactly.
+    # The volume is ordered (X, Y, Z), so axis 0 is the image X/width axis and
+    # axis 1 is Y/height; the radial pattern is symmetric, so only the shape
+    # match with result[:, :, iz] matters.
     if result.ndim < 3 or result.shape[2] == 0:
         return result.astype(np.int16, copy=False)
-    rows = int(result.shape[0])
-    cols = int(result.shape[1])
+    size0 = int(result.shape[0])
+    size1 = int(result.shape[1])
     depth = int(result.shape[2])
 
-    r_idx, c_idx = np.indices((rows, cols), dtype=np.float32)
-    x = (c_idx / max(1, cols - 1)) * 2.0 - 1.0 if cols > 1 else c_idx * 0.0
-    y = (r_idx / max(1, rows - 1)) * 2.0 - 1.0 if rows > 1 else r_idx * 0.0
+    idx0, idx1 = np.indices((size0, size1), dtype=np.float32)
+    norm1 = (idx1 / max(1, size1 - 1)) * 2.0 - 1.0 if size1 > 1 else idx1 * 0.0
+    norm0 = (idx0 / max(1, size0 - 1)) * 2.0 - 1.0 if size0 > 1 else idx0 * 0.0
 
     # A persistent detector-channel calibration error reconstructs as a signed
     # ring. When no radius is specified, synthesize a small cluster of rings.
@@ -504,11 +515,11 @@ def add_ring_artifacts(
     else:
         ring_specs.append((float(ring_radius), float(generator.choice([-1.0, 1.0]))))
 
-    center_x = float(generator.normal(0.0, 0.015))
-    center_y = float(generator.normal(0.0, 0.015))
-    radius = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
+    center1 = float(generator.normal(0.0, 0.015))
+    center0 = float(generator.normal(0.0, 0.015))
+    radius = np.sqrt((norm1 - center1) ** 2 + (norm0 - center0) ** 2)
 
-    base_pattern = np.zeros((rows, cols), dtype=np.float32)
+    base_pattern = np.zeros((size0, size1), dtype=np.float32)
     t = float(thickness)
     for r0, sign in ring_specs:
         channel_width = t * float(generator.uniform(0.75, 1.35))
@@ -526,15 +537,17 @@ def add_ring_artifacts(
         jitter_field = 0.0
 
     # Apply the same base pattern to every slice, allowing small per-slice
-    # scale/offset variations so the effect isn't perfectly identical slice-to-slice.
-    for iz in range(depth):
-        # Slow axial modulation mimics channel drift while preserving continuity.
-        scale = generator.uniform(0.97, 1.03)
-        offset = float(generator.normal(0.0, abs(ring_intensity) * 0.01))
-        slice_pattern = scale * base_pattern + offset
-        if isinstance(jitter_field, np.ndarray):
-            slice_pattern += abs(ring_intensity) * 0.1 * jitter_field
-        result[:, :, iz] = np.clip(result[:, :, iz] + slice_pattern, MIN_HU_VALUE, MAX_HU_VALUE)
+    # scale/offset variations so the effect isn't perfectly identical
+    # slice-to-slice. Slow axial modulation mimics channel drift while
+    # preserving continuity; the per-slice factors are drawn as batches and
+    # broadcast over the plane instead of looping slice by slice.
+    scales = generator.uniform(0.97, 1.03, size=depth).astype(np.float32)
+    offsets = generator.normal(0.0, abs(ring_intensity) * 0.01, size=depth).astype(np.float32)
+    pattern = scales[None, None, :] * base_pattern[:, :, None] + offsets[None, None, :]
+    if isinstance(jitter_field, np.ndarray):
+        pattern += (abs(ring_intensity) * 0.1) * jitter_field[:, :, None]
+    result += pattern
+    np.clip(result, MIN_HU_VALUE, MAX_HU_VALUE, out=result)
 
     return result.astype(np.int16, copy=False)
 
@@ -590,22 +603,23 @@ def add_motion_artifact(
     weights /= float(np.sum(weights))
     ghost_shift = max(1, blur_size // 3)
 
-    for iz in range(depth):
-        slice_view = result[:, :, iz]
+    # Rolling the whole (W, H, D) volume along an in-plane axis shifts every
+    # slice identically, so the per-slice loop collapses into 3D operations.
+    # Average several displaced positions. This better represents object
+    # motion during acquisition than a flat box blur.
+    blurred = np.zeros_like(result, dtype=np.float32)
+    for offset, weight in zip(offsets, weights, strict=False):
+        blurred += float(weight) * np.roll(result, int(offset), axis=axis)
 
-        # Average several displaced positions. This better represents object
-        # motion during acquisition than a flat box blur.
-        blurred = np.zeros_like(slice_view, dtype=np.float32)
-        for offset, weight in zip(offsets, weights, strict=False):
-            blurred += float(weight) * np.roll(slice_view, int(offset), axis=axis)
+    # Residual ghost edges approximate projection inconsistency.
+    ghost = 0.5 * np.roll(result, ghost_shift, axis=axis)
+    ghost += 0.5 * np.roll(result, -ghost_shift, axis=axis)
 
-        # Residual ghost edges approximate projection inconsistency.
-        ghost_weight = float(generator.uniform(0.15, 0.35))
-        ghost = 0.5 * np.roll(slice_view, ghost_shift, axis=axis)
-        ghost += 0.5 * np.roll(slice_view, -ghost_shift, axis=axis)
+    # Per-slice ghost strength, drawn in slice order (matches the previous
+    # scalar-per-slice draws for a given seed) and broadcast over the plane.
+    ghost_weight = generator.uniform(0.15, 0.35, size=depth).astype(np.float32)[None, None, :]
 
-        slice_view = (1.0 - severity) * slice_view + severity * ((1.0 - ghost_weight) * blurred + ghost_weight * ghost)
-        result[:, :, iz] = slice_view
+    result = (1.0 - severity) * result + severity * ((1.0 - ghost_weight) * blurred + ghost_weight * ghost)
 
     result = np.clip(np.round(result), MIN_HU_VALUE, MAX_HU_VALUE)
     return result.astype(np.int16, copy=False)
@@ -848,16 +862,41 @@ def add_mri_geometric_distortion(
         b0_field = None
 
     result = np.empty_like(source)
-    for iz in range(depth):
-        coord0 = base0.copy()
-        coord1 = base1.copy()
-        if b0_field is not None:
+    if b0_field is None:
+        # The gradient-only warp is identical for every slice, so the
+        # sampling grid is computed once and all slices are gathered with
+        # fancy indexing. Slabs of slices bound the float32 temporaries
+        # (~4 volume-sized gathers) to roughly 256 MB.
+        x0 = np.floor(base0).astype(np.int64)
+        x1 = np.floor(base1).astype(np.int64)
+        f0 = (base0 - x0).astype(np.float32)[:, :, None]
+        f1 = (base1 - x1).astype(np.float32)[:, :, None]
+        valid = ((x0 >= 0) & (x0 < width - 1) & (x1 >= 0) & (x1 < height - 1))[:, :, None]
+        x0c = np.clip(x0, 0, width - 2)
+        x1c = np.clip(x1, 0, height - 2)
+        slice_bytes = width * height * 4
+        slab = max(1, min(depth, int(67_108_864 // max(1, slice_bytes))))
+        for z0 in range(0, depth, slab):
+            z1 = min(depth, z0 + slab)
+            block = source[:, :, z0:z1]
+            v00 = block[x0c, x1c, :]
+            v01 = block[x0c, x1c + 1, :]
+            v10 = block[x0c + 1, x1c, :]
+            v11 = block[x0c + 1, x1c + 1, :]
+            top = v00 * (1.0 - f1) + v01 * f1
+            bot = v10 * (1.0 - f1) + v11 * f1
+            out = top * (1.0 - f0) + bot * f0
+            result[:, :, z0:z1] = np.where(valid, out, np.float32(0.0))
+    else:
+        # B0 off-resonance shifts differ per slice, so each slice keeps its
+        # own (already fully vectorized) bilinear remap.
+        for iz in range(depth):
             shift = float(b0_strength) * b0_field[:, :, iz]
             if readout_axis == 0:
-                coord0 = coord0 + shift
+                coord0, coord1 = base0 + shift, base1
             else:
-                coord1 = coord1 + shift
-        result[:, :, iz] = _remap_bilinear(source[:, :, iz], coord0, coord1, fill=0.0)
+                coord0, coord1 = base0, base1 + shift
+            result[:, :, iz] = _remap_bilinear(source[:, :, iz], coord0, coord1, fill=0.0)
 
     if np.issubdtype(intensity_array.dtype, np.integer):
         info = np.iinfo(intensity_array.dtype)
@@ -915,12 +954,22 @@ def add_gibbs_ringing(
     mask[lo0:lo0 + keep0, lo1:lo1 + keep1] = 1.0
 
     result = source.copy()
-    for iz in range(depth):
-        spectrum = np.fft.fftshift(np.fft.fft2(source[:, :, iz]))
-        truncated = np.fft.ifft2(np.fft.ifftshift(spectrum * mask))
+    # Batch the 2D FFTs over slabs of slices (axes 0/1 are the in-plane
+    # axes). NumPy computes FFTs in complex128, so the slab size is capped to
+    # keep the complex temporaries bounded (~256 MB) on large volumes while
+    # still amortizing the per-call overhead; the math is identical to a
+    # slice-at-a-time transform.
+    slice_complex_bytes = width * height * 16
+    slab = max(1, min(depth, int(268_435_456 // max(1, slice_complex_bytes))))
+    mask3 = mask[:, :, None]
+    for z0 in range(0, depth, slab):
+        z1 = min(depth, z0 + slab)
+        block = source[:, :, z0:z1]
+        spectrum = np.fft.fftshift(np.fft.fft2(block, axes=(0, 1)), axes=(0, 1))
+        truncated = np.fft.ifft2(np.fft.ifftshift(spectrum * mask3, axes=(0, 1)), axes=(0, 1))
         # MR images are magnitude data, so take the modulus of the result.
         truncated = np.abs(truncated).astype(np.float32)
-        result[:, :, iz] = (1.0 - strength) * source[:, :, iz] + strength * truncated
+        result[:, :, z0:z1] = (1.0 - strength) * block + strength * truncated
 
     if np.issubdtype(intensity_array.dtype, np.integer):
         info = np.iinfo(intensity_array.dtype)

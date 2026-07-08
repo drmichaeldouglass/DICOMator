@@ -29,8 +29,10 @@ Blender add-on that converts selected mesh objects into DICOM outputs for synthe
   - MRI modalities expose Rician noise, coil-shaped bias-field shading, geometric distortion (gradient non-linearity and B0 off-resonance), Gibbs/truncation ringing, and motion blur tuned for MR appearance
   - Artifact order matches the UI and adapts per modality so effects apply consistently
 - **Patient and orientation metadata**
-  - Patient Name, MRN (Patient ID), Sex, and Patient Position (HFS/FFS/HFP/FFP/HFDR/HFDL/FFDR/FFDL)
+  - Patient Name, MRN (Patient ID), Birth Date (YYYYMMDD), Sex, and Patient Position (HFS/FFS/HFP/FFP/HFDR/HFDL/FFDR/FFDL)
+  - Study ID and Accession Number are user-editable and written to every exported object
   - Customizable Series Description per export or phase
+  - All objects exported together share a single study timestamp, so Study/Series/Content dates and times agree across image slices, DRR, dose, plan, and structure files
 - **Export path handling and progress feedback**
   - Accepts Blender-relative paths starting with `//` (resolved relative to the `.blend` file or current working directory)
   - Defaults to `//DICOM_Export` so a new install starts with a portable export location instead of an OS-specific absolute path
@@ -107,7 +109,7 @@ Dependency note:
      - Choose an **Export Directory** (supports `//` relative paths and defaults to `//DICOM_Export`)
      - Toggle **Export 4D** to export multiple frames
        - Use the timeline range or set a custom `Start`/`End`/`Frame Step`
-   - **Series** – Set the series description, patient name, MRN, sex, and patient position in one place.
+   - **Series** – Set the series description, patient name, MRN, birth date, sex, patient position, study ID, and accession number in one place.
    - **Estimate** – Inspect selection size, estimated grid resolution, voxel count, memory, and DRR detector dimensions.
    - **Artifacts** – Optional and collapsed by default for Image output:
      - *CT*: Gaussian noise, partial volume, projection-domain metal streaks, rings, motion, and quantum noise
@@ -129,7 +131,7 @@ Notes:
   - Modality: CT (`CTImageStorage`) or MR (`MRImageStorage`) depending on the selected imaging modality
   - Data type: int16 signed (direct HU/intensity values)
   - Background voxels are -1000 HU (air) for CT and 0 (signal void) for MR
-  - MR series include MR Image module attributes (scanning sequence, TR/TE, etc.) with plausible spin-echo defaults so files pass IOD validation
+  - MR series include MR Image module attributes matched to the selected weighting preset (T1: spin-echo TR 500/TE 15; T2: fast spin-echo TR 4000/TE 100, echo train 16) so the metadata is consistent with the intensities
   - Window: CT exports default to Center 40 / Width 400; MR exports use Center 128 / Width 256
   - Geometry:
     - `PixelSpacing = [voxel_size_mm_y, voxel_size_mm_x]`
@@ -170,9 +172,10 @@ Notes:
 
 ## Performance and limits
 
-- Guardrails prevent extremely large grids:
+- Guardrails abort exports of extremely large grids with an error:
   - Per-dimension limit: 2,000 voxels
   - Total voxels limit: 100,000,000 (≈200 MB int16)
+  - Enable **Allow Oversized Grids** in the Export panel to bypass the limits at your own risk (oversized exports may be very slow or run out of memory)
 - Tips:
   - Increase voxel spacing (mm) to reduce memory/time requirements
   - Reduce the number of selected meshes or animation frames
@@ -195,8 +198,8 @@ Notes:
 
 - **“pydicom library not available”**
   - Install `pydicom` in Blender’s Python or use the helper script to fetch wheels, then restart Blender.
-- **“Grid too large”**
-  - Increase voxel spacing (mm), reduce padding/selection size, or limit the frame range.
+- **“Voxel grid too large”**
+  - Increase voxel spacing (mm), reduce padding/selection size, or limit the frame range. To proceed anyway, enable **Allow Oversized Grids** in the Export panel.
 - **“Set an active scene camera before exporting a DRR”**
   - Assign a camera to the scene (`Scene Properties → Camera`) or make a camera active in the 3D View before DRR export.
 - **“Output directory is not writable”**
@@ -207,6 +210,19 @@ Notes:
   - Ensure structure meshes are closed (manifold) and intersect the CT grid Z-planes. Increase axial resolution (decrease voxel spacing) to capture thin structures.
 - **RT Dose grid is all zeros**
   - Verify that the mesh objects intended as dose volumes have their DICOM Type set to *RT Dose* and that a non-zero Dose (Gy) value is assigned in the Objects panel.
+
+## Development and testing
+
+- A headless test suite lives in `tests/` and runs without Blender (stub `bpy`/`bmesh`/`mathutils` modules are installed by `tests/conftest.py`):
+
+  ```bash
+  pip install numpy pydicom pytest ruff
+  pytest -q
+  ruff check .
+  python -m compileall -q .
+  ```
+
+- Continuous integration (`.github/workflows/ci.yml`) runs the same byte-compile, lint, and test steps on every push and pull request.
 
 ## License
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 import math
 import os
 import time
+from datetime import datetime
+from functools import partial
 from typing import Generator, Iterable, Sequence
 
 import bmesh
@@ -42,7 +44,12 @@ from .drr import generate_drr_from_hu_volume_iter
 from .rtdose_export import export_rtdose_to_dicom
 from .rtstruct_export import export_rtstruct_to_dicom_iter
 from .utils import get_float_prop, resolve_output_directory
-from .voxelization import voxelize_objects_to_dose_iter, voxelize_objects_to_hu_iter
+from .voxelization import (
+    _world_vertex_array,
+    prepare_object_geometry_iter,
+    voxelize_objects_to_dose_iter,
+    voxelize_objects_to_hu_iter,
+)
 
 #: Wall-clock budget (seconds) spent inside the export job per timer tick.
 _MODAL_TIME_BUDGET_S = 0.1
@@ -57,10 +64,14 @@ def _get_int_prop(props, name: str, default: int) -> int:
         return int(default)
 
 
-def _apply_configured_artifacts(hu_array, props):
-    """Apply the artifacts configured in ``props`` to ``hu_array`` sequentially."""
+def _configured_artifact_stages(props) -> list:
+    """Build the ordered artifact operations enabled in ``props``.
 
-    result = hu_array
+    Each entry is a callable taking and returning a volume; parameters are
+    read from ``props`` once, when the list is built.
+    """
+
+    stages: list = []
     modality = getattr(props, "imaging_modality", MODALITY_CT)
     if modality not in MRI_MODALITIES and modality != MODALITY_CT:
         modality = MODALITY_CT
@@ -73,20 +84,20 @@ def _apply_configured_artifacts(hu_array, props):
             kernel += 1
         iterations = max(1, _get_int_prop(props, "partial_volume_iterations", 1))
         mix = max(0.0, min(1.0, get_float_prop(props, "partial_volume_mix", 1.0)))
-        result = apply_partial_volume_effect(result, kernel_size=kernel, iterations=iterations, mix=mix)
+        stages.append(partial(apply_partial_volume_effect, kernel_size=kernel, iterations=iterations, mix=mix))
 
     if getattr(props, "enable_metal_artifacts", False) and is_ct:
         intensity = max(0.0, get_float_prop(props, "metal_intensity", 400.0))
         threshold = get_float_prop(props, "metal_density_threshold", 2000.0)
         streaks = max(0, _get_int_prop(props, "metal_num_streaks", 10))
         falloff = max(0.1, get_float_prop(props, "metal_falloff", 6.0))
-        result = add_metal_artifacts(
-            result,
+        stages.append(partial(
+            add_metal_artifacts,
             intensity=float(intensity),
             density_threshold=float(threshold),
             num_streaks=streaks,
             falloff=float(falloff),
-        )
+        ))
 
     if getattr(props, "enable_ring_artifacts", False) and is_ct:
         ring_intensity = max(0.0, get_float_prop(props, "ring_intensity", 80.0))
@@ -95,13 +106,13 @@ def _apply_configured_artifacts(hu_array, props):
         # Keep UI-entered zero values from aborting the export pipeline.
         thickness = max(1e-4, get_float_prop(props, "ring_thickness", 0.02))
         jitter = max(0.0, get_float_prop(props, "ring_jitter", 0.02))
-        result = add_ring_artifacts(
-            result,
+        stages.append(partial(
+            add_ring_artifacts,
             ring_intensity=float(ring_intensity),
             ring_radius=float(ring_radius) if ring_radius is not None else None,
             thickness=float(thickness),
             jitter=float(jitter),
-        )
+        ))
 
     if getattr(props, "enable_motion_artifact", False):
         blur_size = max(1, _get_int_prop(props, "motion_blur_size", 9))
@@ -110,55 +121,83 @@ def _apply_configured_artifacts(hu_array, props):
         severity = max(0.0, min(1.0, get_float_prop(props, "motion_severity", 0.5)))
         axis_prop = getattr(props, "motion_axis", 'X')
         axis = 0 if str(axis_prop).upper() != 'Y' else 1
-        result = add_motion_artifact(
-            result,
+        stages.append(partial(
+            add_motion_artifact,
             blur_size=blur_size,
             severity=float(severity),
             axis=axis,
-        )
+        ))
 
     if getattr(props, "enable_geometric_distortion", False) and is_mri:
         gradient = get_float_prop(props, "geometric_gradient_strength", 0.05)
         b0 = max(0.0, get_float_prop(props, "geometric_b0_shift", 3.0))
         b0_scale = max(0.05, min(1.0, get_float_prop(props, "geometric_b0_scale", 0.35)))
         readout_axis = 0 if str(getattr(props, "geometric_readout_axis", 'Y')).upper() != 'Y' else 1
-        result = add_mri_geometric_distortion(
-            result,
+        stages.append(partial(
+            add_mri_geometric_distortion,
             gradient_strength=float(gradient),
             b0_strength=float(b0),
             b0_scale=float(b0_scale),
             readout_axis=readout_axis,
-        )
+        ))
 
     if getattr(props, "enable_gibbs_ringing", False) and is_mri:
         gibbs_strength = max(0.0, min(1.0, get_float_prop(props, "gibbs_strength", 0.6)))
         gibbs_truncation = max(0.0, min(0.49, get_float_prop(props, "gibbs_truncation", 0.2)))
-        result = add_gibbs_ringing(result, strength=float(gibbs_strength), truncation=float(gibbs_truncation))
+        stages.append(partial(add_gibbs_ringing, strength=float(gibbs_strength), truncation=float(gibbs_truncation)))
 
     if getattr(props, "enable_bias_field", False) and is_mri:
         strength = max(0.0, min(1.0, get_float_prop(props, "bias_field_strength", 0.25)))
         scale = max(0.05, min(1.0, get_float_prop(props, "bias_field_scale", 0.3)))
-        result = add_bias_field_shading(result, strength=float(strength), scale=float(scale))
+        stages.append(partial(add_bias_field_shading, strength=float(strength), scale=float(scale)))
 
     if getattr(props, "enable_noise", False) and get_float_prop(props, "noise_std_dev_hu", 0.0) > 0.0:
         std_dev = max(0.0, get_float_prop(props, "noise_std_dev_hu", 20.0))
         if is_mri:
             # MR magnitude images carry Rician (not Gaussian) noise; the value is
             # reused as the underlying complex-channel standard deviation.
-            result = add_rician_noise(result, std_dev)
+            stages.append(partial(add_rician_noise, sigma=float(std_dev)))
         else:
-            result = add_gaussian_noise(result, std_dev)
+            stages.append(partial(add_gaussian_noise, std_hu=float(std_dev)))
 
     if getattr(props, "enable_poisson_noise", False) and get_float_prop(props, "poisson_scale", 0.0) > 0.0 and is_ct:
         scale = max(1.0, get_float_prop(props, "poisson_scale", 150.0))
-        result = add_poisson_noise(result, scale=scale)
+        stages.append(partial(add_poisson_noise, scale=float(scale)))
 
-    if is_mri and result is not hu_array:
+    if is_mri and stages:
         # The artifact helpers clamp to the CT HU range, which permits
         # negative values; MR magnitude images are physically non-negative.
-        result = np.maximum(result, 0)
+        stages.append(lambda volume: np.maximum(volume, 0))
 
+    return stages
+
+
+def _apply_configured_artifacts_iter(hu_array, props) -> Generator[tuple[int, int], None, object]:
+    """Apply the configured artifacts, yielding ``(stage, total)`` progress.
+
+    Yields between artifact stages so the modal operator can update the UI
+    instead of running the whole chain inside a single timer tick.
+    """
+
+    stages = _configured_artifact_stages(props)
+    total = max(1, len(stages))
+    result = hu_array
+    yield 0, total
+    for index, stage in enumerate(stages, start=1):
+        result = stage(result)
+        yield index, total
     return result
+
+
+def _apply_configured_artifacts(hu_array, props):
+    """Apply the artifacts configured in ``props`` to ``hu_array`` sequentially."""
+
+    generator = _apply_configured_artifacts_iter(hu_array, props)
+    while True:
+        try:
+            next(generator)
+        except StopIteration as stop:
+            return stop.value
 
 
 def _run_subtask(
@@ -196,17 +235,19 @@ def _mesh_bounds_for_objects(
             obj_eval = obj.evaluated_get(depsgraph)
             mesh = obj_eval.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
             try:
-                for vertex in mesh.vertices:
-                    world_vertex = obj_eval.matrix_world @ vertex.co
-                    min_x = min(min_x, world_vertex.x)
-                    max_x = max(max_x, world_vertex.x)
-                    min_y = min(min_y, world_vertex.y)
-                    max_y = max(max_y, world_vertex.y)
-                    min_z = min(min_z, world_vertex.z)
-                    max_z = max(max_z, world_vertex.z)
-                    found_vertex = True
+                verts_world = _world_vertex_array(mesh, obj_eval.matrix_world)
             finally:
                 obj_eval.to_mesh_clear()
+            if verts_world.size:
+                mins = verts_world.min(axis=0)
+                maxs = verts_world.max(axis=0)
+                min_x = min(min_x, float(mins[0]))
+                max_x = max(max_x, float(maxs[0]))
+                min_y = min(min_y, float(mins[1]))
+                max_y = max(max_y, float(maxs[1]))
+                min_z = min(min_z, float(mins[2]))
+                max_z = max(max_z, float(maxs[2]))
+                found_vertex = True
         else:
             for corner in obj.bound_box:
                 world_corner = obj.matrix_world @ Vector(corner)
@@ -475,6 +516,9 @@ class MESH_OT_export_dicom(Operator):
             'dicom_modality': "MR" if modality_key in MRI_MODALITIES else "CT",
             'frames': frames,
             'apply_modifiers': bool(getattr(props, "apply_modifiers", True)),
+            # One timestamp for the whole export so Study/Series/Content
+            # dates and times agree across every co-exported object.
+            'study_datetime': datetime.now(),
         }
 
         self._job = self._export_job(context, config)
@@ -566,35 +610,81 @@ class MESH_OT_export_dicom(Operator):
         # Compute a UNIFIED bounding box across enabled export objects
         # (CT + RTDOSE + RTSTRUCT as requested) so exported files share the
         # same coordinate space and FrameOfReferenceUID is meaningful.
+        #
+        # Single-phase exports evaluate each mesh exactly once here (BVH +
+        # bounds) and reuse the prepared geometry during voxelization; 4D
+        # exports must re-evaluate per frame, so they keep the bounds-only
+        # sweep and rebuild geometry inside each phase.
         # ------------------------------------------------------------------
-        bounds = yield from _run_subtask(
-            _bounds_across_frames_iter(
-                context,
-                config['export_objects'],
-                frames,
-                apply_modifiers=apply_modifiers,
-            ),
-            0.01,
-            0.03,
-        )
+        prepared_geometry = None
+        if num_phases == 1:
+            frame_before_prepare = context.scene.frame_current
+            context.scene.frame_set(int(frames[0]), subframe=0.0)
+            try:
+                prepared_geometry = yield from _run_subtask(
+                    prepare_object_geometry_iter(
+                        config['export_objects'],
+                        context.evaluated_depsgraph_get(),
+                        apply_modifiers=apply_modifiers,
+                    ),
+                    0.01,
+                    0.03,
+                )
+            finally:
+                context.scene.frame_set(frame_before_prepare, subframe=0.0)
+            if not prepared_geometry:
+                return {'error': "No valid mesh geometry found in the selected objects"}
+            object_bounds = list(prepared_geometry.values())
+            bounds = (
+                min(geo[1][0] for geo in object_bounds),
+                max(geo[1][1] for geo in object_bounds),
+                min(geo[1][2] for geo in object_bounds),
+                max(geo[1][3] for geo in object_bounds),
+                min(geo[1][4] for geo in object_bounds),
+                max(geo[1][5] for geo in object_bounds),
+            )
+        else:
+            bounds = yield from _run_subtask(
+                _bounds_across_frames_iter(
+                    context,
+                    config['export_objects'],
+                    frames,
+                    apply_modifiers=apply_modifiers,
+                ),
+                0.01,
+                0.03,
+            )
         padded_bounds = _pad_bounds(bounds, voxel_size_m, padding_voxels)
         estimated_width, estimated_height, estimated_depth = _estimate_grid_dimensions(padded_bounds, voxel_size_m)
 
         total_estimated_voxels = estimated_width * estimated_height * estimated_depth
-        if (
+        oversized = (
             estimated_width > 2000
             or estimated_height > 2000
             or estimated_depth > 2000
             or total_estimated_voxels > 100_000_000
-        ):
+        )
+        if oversized:
+            size_text = (
+                f"{estimated_width}x{estimated_height}x{estimated_depth} "
+                f"({total_estimated_voxels:,} voxels). "
+                f"Selection size: {(bounds[1] - bounds[0]):.3f}x{(bounds[3] - bounds[2]):.3f}x{(bounds[5] - bounds[4]):.3f}m."
+            )
+            if not getattr(props, "allow_oversized_grids", False):
+                return {
+                    'error': (
+                        f"Voxel grid too large: {size_text} "
+                        "Limits: 2000 voxels per dimension, 100,000,000 total. "
+                        "Increase the voxel spacing or enable 'Allow Oversized Grids' "
+                        "in the Export panel."
+                    )
+                }
             self.report(
                 {'WARNING'},
                 (
-                    "Voxel grid very large: "
-                    f"{estimated_width}x{estimated_height}x{estimated_depth} "
-                    f"({total_estimated_voxels:,} voxels). "
-                    f"Selection size: {(bounds[1] - bounds[0]):.3f}x{(bounds[3] - bounds[2]):.3f}x{(bounds[5] - bounds[4]):.3f}m. "
-                    "Continuing anyway. This may be slow or run out of memory."
+                    f"Voxel grid very large: {size_text} "
+                    "Continuing anyway (oversized grids allowed). "
+                    "This may be slow or run out of memory."
                 ),
             )
 
@@ -662,6 +752,7 @@ class MESH_OT_export_dicom(Operator):
                 # ----------------------------------------------------------
                 if ct_objects and (export_image_series or export_drr):
                     t_start = phase_start + slot * type_span
+                    voxel_messages: list[str] = []
                     hu_array, origin, _dimensions = yield from _run_subtask(
                         voxelize_objects_to_hu_iter(
                             ct_objects,
@@ -671,16 +762,24 @@ class MESH_OT_export_dicom(Operator):
                             apply_modifiers=apply_modifiers,
                             depsgraph=depsgraph,
                             background_value=background_value,
+                            messages=voxel_messages,
+                            prepared=prepared_geometry,
                         ),
                         t_start,
                         t_start + type_span * 0.45,
                     )
+                    for message in voxel_messages:
+                        self.report({'WARNING'}, message)
 
                     if export_image_series:
                         write_start = phase_start + slot * type_span
                         slot += 1
                         image_series_uid = shared_constants.generate_uid()
-                        hu_array_to_export = _apply_configured_artifacts(hu_array, props)
+                        hu_array_to_export = yield from _run_subtask(
+                            _apply_configured_artifacts_iter(hu_array, props),
+                            write_start + type_span * 0.45,
+                            write_start + type_span * 0.55,
+                        )
                         result = yield from _run_subtask(
                             export_voxel_grid_to_dicom_iter(
                                 hu_array_to_export,
@@ -690,10 +789,15 @@ class MESH_OT_export_dicom(Operator):
                                 patient_name=props.patient_name,
                                 patient_id=props.patient_id,
                                 patient_sex=props.patient_sex,
+                                patient_birth_date=getattr(props, "patient_birth_date", ""),
                                 series_description=phase_description,
                                 direct_hu=True,
                                 patient_position=props.patient_position,
                                 dicom_modality=dicom_modality,
+                                mr_weighting=config['modality_key'] if dicom_modality == "MR" else None,
+                                study_id=getattr(props, "study_id", "1"),
+                                accession_number=getattr(props, "accession_number", "1"),
+                                study_datetime=config['study_datetime'],
                                 study_instance_uid=study_uid,
                                 frame_of_reference_uid=frame_of_ref_uid,
                                 series_instance_uid=image_series_uid,
@@ -703,7 +807,7 @@ class MESH_OT_export_dicom(Operator):
                                 temporal_position_identifier=phase_index if num_phases > 1 else None,
                                 phase_index=phase_index if num_phases > 1 else None,
                             ),
-                            write_start + type_span * 0.45,
+                            write_start + type_span * 0.55,
                             write_start + type_span,
                         )
                         if 'error' in result:
@@ -750,8 +854,12 @@ class MESH_OT_export_dicom(Operator):
                             patient_name=props.patient_name,
                             patient_id=props.patient_id,
                             patient_sex=props.patient_sex,
+                            patient_birth_date=getattr(props, "patient_birth_date", ""),
                             patient_position=props.patient_position,
                             series_description=drr_description,
+                            study_id=getattr(props, "study_id", "1"),
+                            accession_number=getattr(props, "accession_number", "1"),
+                            study_datetime=config['study_datetime'],
                             pixel_spacing_mm=projection_metadata.get("pixel_spacing_mm"),
                             image_position_patient=projection_metadata.get("image_position_patient"),
                             image_orientation_patient=projection_metadata.get("image_orientation_patient"),
@@ -774,6 +882,7 @@ class MESH_OT_export_dicom(Operator):
                     t_start = phase_start + slot * type_span
                     slot += 1
 
+                    dose_messages: list[str] = []
                     dose_array, dose_origin, _dose_dims = yield from _run_subtask(
                         voxelize_objects_to_dose_iter(
                             dose_objects,
@@ -783,10 +892,14 @@ class MESH_OT_export_dicom(Operator):
                             apply_modifiers=apply_modifiers,
                             depsgraph=depsgraph,
                             accumulate=getattr(props, "dose_accumulation", "SUM") == "SUM",
+                            messages=dose_messages,
+                            prepared=prepared_geometry,
                         ),
                         t_start,
                         t_start + type_span * 0.9,
                     )
+                    for message in dose_messages:
+                        self.report({'WARNING'}, message)
 
                     dose_series_uid = shared_constants.generate_uid()
                     result = export_rtdose_to_dicom(
@@ -797,10 +910,14 @@ class MESH_OT_export_dicom(Operator):
                         patient_name=props.patient_name,
                         patient_id=props.patient_id,
                         patient_sex=props.patient_sex,
+                        patient_birth_date=getattr(props, "patient_birth_date", ""),
                         patient_position=props.patient_position,
                         series_description=f"{phase_description} - RT Dose",
                         dose_type=getattr(props, "dose_type", "PHYSICAL"),
                         dose_summation_type=getattr(props, "dose_summation_type", "PLAN"),
+                        study_id=getattr(props, "study_id", "1"),
+                        accession_number=getattr(props, "accession_number", "1"),
+                        study_datetime=config['study_datetime'],
                         study_instance_uid=study_uid,
                         frame_of_reference_uid=frame_of_ref_uid,
                         series_instance_uid=dose_series_uid,
@@ -832,8 +949,12 @@ class MESH_OT_export_dicom(Operator):
                             patient_name=props.patient_name,
                             patient_id=props.patient_id,
                             patient_sex=props.patient_sex,
+                            patient_birth_date=getattr(props, "patient_birth_date", ""),
                             patient_position=props.patient_position,
                             series_description=f"{phase_description} - RT Structure",
+                            study_id=getattr(props, "study_id", "1"),
+                            accession_number=getattr(props, "accession_number", "1"),
+                            study_datetime=config['study_datetime'],
                             apply_modifiers=apply_modifiers,
                             study_instance_uid=study_uid,
                             frame_of_reference_uid=frame_of_ref_uid,
@@ -851,6 +972,8 @@ class MESH_OT_export_dicom(Operator):
                     )
                     if 'error' in result:
                         return result
+                    for warning in result.get('warnings') or []:
+                        self.report({'WARNING'}, warning)
 
                 yield phase_end
         finally:

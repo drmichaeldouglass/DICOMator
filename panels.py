@@ -135,7 +135,10 @@ def _draw_export_action(layout: bpy.types.UILayout, context: Context) -> None:
 
     estimate = _grid_estimate(_selection_bounds(selected_meshes), props)
     if estimate is not None and estimate[3] > 100_000_000:
-        layout.label(text="Large grid", icon='ERROR')
+        if getattr(props, "allow_oversized_grids", False):
+            layout.label(text="Oversized grid allowed", icon='ERROR')
+        else:
+            layout.label(text="Grid too large - export will abort", icon='ERROR')
     layout.operator("mesh.export_dicom", text=button_text, icon='EXPORT')
 
 
@@ -228,7 +231,10 @@ class VIEW3D_PT_dicomator_selection_info(Panel):
             col.label(text=f"Est. Peak Memory: {memory_mb:.1f} MB")
 
             if total_voxels > 100_000_000:
-                col.label(text="Grid too large!", icon='CANCEL')
+                if getattr(props, "allow_oversized_grids", False):
+                    col.label(text="Oversized grid allowed - may exhaust memory", icon='ERROR')
+                else:
+                    col.label(text="Grid too large - export blocked", icon='CANCEL')
             elif total_voxels > 50_000_000:
                 col.label(text="Large grid - may be slow", icon='ERROR')
 
@@ -305,8 +311,11 @@ class VIEW3D_PT_dicomator_patient_info(Panel):
         layout.prop(props, "series_description", text="Description")
         layout.prop(props, "patient_name")
         layout.prop(props, "patient_id")
+        layout.prop(props, "patient_birth_date", text="Birth Date")
         layout.prop(props, "patient_sex")
         layout.prop(props, "patient_position", text="Position")
+        layout.prop(props, "study_id")
+        layout.prop(props, "accession_number")
 
 
 class VIEW3D_PT_dicomator_export_settings(Panel):
@@ -342,6 +351,7 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
                 drr_box.label(text="No active scene camera", icon='ERROR')
 
         layout.prop(props, "apply_modifiers", text="Apply Modifiers")
+        layout.prop(props, "allow_oversized_grids", text="Allow Oversized Grids")
         layout.prop(props, "export_directory")
 
         col = layout.column(align=True)

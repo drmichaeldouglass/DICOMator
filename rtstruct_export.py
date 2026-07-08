@@ -27,6 +27,7 @@ indexed by the ROI number so that structures remain distinguishable.
 """
 from __future__ import annotations
 
+import math
 import os
 from datetime import datetime
 from typing import Generator, Optional, Sequence
@@ -35,7 +36,7 @@ import bmesh
 import bpy
 
 from . import constants as shared_constants
-from .constants import RTSTRUCT_SOP_CLASS
+from .constants import RTSTRUCT_SOP_CLASS, normalize_dicom_date, truncate_sh
 
 # ---------------------------------------------------------------------------
 # Default colour palette used when an object has no material assigned.
@@ -72,64 +73,128 @@ def _roi_colour_from_object(obj: bpy.types.Object, fallback_index: int) -> tuple
     return _DEFAULT_ROI_COLOURS[fallback_index % len(_DEFAULT_ROI_COLOURS)]
 
 
-def _walk_loops(cut_edges: list) -> list[list[tuple[float, float, float]]]:
+def _walk_loops(cut_edges: list) -> tuple[list[list[tuple[float, float, float]]], int]:
     """Convert a set of BMEdge objects from a bisect into ordered closed loops.
 
-    Each loop is returned as a list of ``(x, y, z)`` float tuples in Blender
-    world-space metres.  Only loops that actually close back on their start
-    vertex with three or more points are returned; open edge chains (from
-    non-watertight meshes) and degenerate single-edge intersections are
-    discarded, since emitting them as ``CLOSED_PLANAR`` contours would be
-    incorrect.
+    Returns ``(loops, dropped_edge_count)``. Each loop is a list of
+    ``(x, y, z)`` float tuples in Blender world-space metres. Every input edge
+    is consumed exactly once: it either becomes part of a closed loop or is
+    counted in ``dropped_edge_count``. Open chains (from non-watertight
+    meshes) and degenerate single-edge intersections are discarded, since
+    emitting them as ``CLOSED_PLANAR`` contours would be incorrect.
 
-    The walk uses vertex object-identity comparisons, which are valid while
-    the bmesh remains alive.
+    Dangling chains are peeled off first (repeatedly removing degree-1
+    vertices), so branch points such as a loop with a stray edge attached do
+    not derail the loop walk. At crossings where multiple continuations
+    remain (e.g. a figure-eight cross-section), the walk closes back to its
+    start vertex when possible and otherwise picks the most collinear unused
+    edge, keeping each lobe's edges together.
+
+    The walk uses vertex/edge object-identity comparisons, which are valid
+    while the bmesh remains alive.
     """
     if not cut_edges:
-        return []
+        return [], 0
 
-    # Build adjacency map using BMVert objects as keys.
-    adj: dict = {}
+    # Incidence map using BMVert objects as keys and edge lists as values.
+    incident: dict = {}
     for edge in cut_edges:
         v0, v1 = edge.verts
-        adj.setdefault(v0, []).append(v1)
-        adj.setdefault(v1, []).append(v0)
+        incident.setdefault(v0, []).append(edge)
+        incident.setdefault(v1, []).append(edge)
+
+    used: set[int] = set()
+    dropped = 0
+
+    def _other(edge, vert):
+        v0, v1 = edge.verts
+        return v1 if vert is v0 else v0
+
+    def _unused(vert) -> list:
+        return [edge for edge in incident.get(vert, []) if id(edge) not in used]
+
+    def _direction(a, b) -> tuple[float, float, float]:
+        dx = float(b.co.x) - float(a.co.x)
+        dy = float(b.co.y) - float(a.co.y)
+        dz = float(b.co.z) - float(a.co.z)
+        norm = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if norm <= 0.0:
+            return (0.0, 0.0, 0.0)
+        return (dx / norm, dy / norm, dz / norm)
+
+    # ------------------------------------------------------------------
+    # Peel dangling chains: repeatedly consume edges at degree-1 vertices.
+    # Whatever remains has minimum degree 2, so the loop walk below cannot
+    # be lured into a dead end right next to a branch vertex.
+    # ------------------------------------------------------------------
+    pending = [vert for vert in incident if len(_unused(vert)) == 1]
+    while pending:
+        vert = pending.pop()
+        chain = _unused(vert)
+        if len(chain) != 1:
+            continue
+        edge = chain[0]
+        used.add(id(edge))
+        dropped += 1
+        neighbor = _other(edge, vert)
+        if len(_unused(neighbor)) == 1:
+            pending.append(neighbor)
 
     loops: list[list[tuple[float, float, float]]] = []
-    unvisited: set = set(adj.keys())
 
-    while unvisited:
-        start = next(iter(unvisited))
-        loop_verts: list = [start]
-        unvisited.discard(start)
-        prev = None
-        current = start
+    for seed in cut_edges:
+        if id(seed) in used:
+            continue
+        used.add(id(seed))
+        start, current = seed.verts
+        path: list = [start, current]
+        prev_dir = _direction(start, current)
+        edges_in_path = 1
         closed = False
 
         while True:
-            # Prefer vertices not yet visited; stop if we reach the start
-            # (closed loop) or a dead end.
-            neighbors = [n for n in adj.get(current, []) if n is not prev]
-            if not neighbors:
+            candidates = _unused(current)
+            if not candidates:
                 break
-            nxt = neighbors[0]
-            if nxt is start and len(loop_verts) >= 3:
-                # Successfully closed the loop.
+
+            closing_edge = None
+            best_edge = None
+            best_next = None
+            best_dir = None
+            best_dot = -2.0
+            for edge in candidates:
+                nxt = _other(edge, current)
+                if nxt is start and len(path) >= 3:
+                    closing_edge = edge
+                    break
+                direction = _direction(current, nxt)
+                dot = (
+                    prev_dir[0] * direction[0]
+                    + prev_dir[1] * direction[1]
+                    + prev_dir[2] * direction[2]
+                )
+                if dot > best_dot:
+                    best_edge, best_next, best_dir, best_dot = edge, nxt, direction, dot
+
+            if closing_edge is not None:
+                used.add(id(closing_edge))
+                edges_in_path += 1
                 closed = True
                 break
-            if nxt not in unvisited:
-                # Either reached a dead end or a vertex belonging to another
-                # loop sub-path — stop here.
+            if best_edge is None:
                 break
-            loop_verts.append(nxt)
-            unvisited.discard(nxt)
-            prev = current
-            current = nxt
+            used.add(id(best_edge))
+            edges_in_path += 1
+            path.append(best_next)
+            prev_dir = best_dir
+            current = best_next
 
-        if closed and len(loop_verts) >= 3:
-            loops.append([(float(v.co.x), float(v.co.y), float(v.co.z)) for v in loop_verts])
+        if closed and len(path) >= 3:
+            loops.append([(float(v.co.x), float(v.co.y), float(v.co.z)) for v in path])
+        else:
+            dropped += edges_in_path
 
-    return loops
+    return loops, dropped
 
 
 def _world_bmesh(
@@ -161,8 +226,10 @@ def _world_bmesh(
     return bm
 
 
-def _slice_plane(bm_base: bmesh.types.BMesh, z_m: float) -> list[list[tuple[float, float, float]]]:
-    """Bisect ``bm_base`` at world-space height ``z_m`` and return its loops."""
+def _slice_plane(
+    bm_base: bmesh.types.BMesh, z_m: float
+) -> tuple[list[list[tuple[float, float, float]]], int]:
+    """Bisect ``bm_base`` at ``z_m``; return ``(loops, dropped_edge_count)``."""
     bm_slice = bm_base.copy()
     try:
         bm_slice.verts.ensure_lookup_table()
@@ -191,21 +258,25 @@ def _extract_contours_iter(
     depsgraph: bpy.types.Depsgraph,
     *,
     apply_modifiers: bool = True,
-) -> Generator[tuple[int, int], None, dict[float, list[list[tuple[float, float, float]]]]]:
+) -> Generator[tuple[int, int], None, tuple[dict[float, list[list[tuple[float, float, float]]]], int]]:
     """Generator variant of :func:`extract_contours_from_mesh`.
 
     Yields ``(planes_done, total_planes)`` after each bisected Z plane and
-    returns the contour dictionary described there.
+    returns ``(contours, dropped_edge_count)`` where the count totals the
+    open/ambiguous cut edges discarded across all planes.
     """
     bm_base = _world_bmesh(obj, depsgraph, apply_modifiers=apply_modifiers)
     try:
         contours: dict[float, list[list[tuple[float, float, float]]]] = {}
+        dropped_total = 0
         for index, z_m in enumerate(z_positions_m, start=1):
-            contours[float(z_m)] = _slice_plane(bm_base, z_m)
+            loops, dropped = _slice_plane(bm_base, z_m)
+            contours[float(z_m)] = loops
+            dropped_total += dropped
             yield index, len(z_positions_m)
     finally:
         bm_base.free()
-    return contours
+    return contours, dropped_total
 
 
 def extract_contours_from_mesh(
@@ -248,7 +319,215 @@ def extract_contours_from_mesh(
         try:
             next(generator)
         except StopIteration as stop:
-            return stop.value
+            contours, _dropped = stop.value
+            return contours
+
+
+#: Plain-data ROI definition consumed by :func:`build_rtstruct_dataset`:
+#: ``(roi_name, (r, g, b), roi_interpreted_type, contours_by_z)`` where
+#: ``contours_by_z`` maps Z metres to lists of ``(x, y, z)`` metre loops.
+RoiDefinition = tuple[
+    str,
+    tuple[int, int, int],
+    str,
+    dict[float, list[list[tuple[float, float, float]]]],
+]
+
+
+def build_rtstruct_dataset(
+    roi_defs: Sequence[RoiDefinition],
+    *,
+    study_instance_uid: str,
+    frame_of_reference_uid: str,
+    series_instance_uid: str,
+    sop_instance_uid: str,
+    date_str: str,
+    time_str: str,
+    patient_name: str = "Anonymous",
+    patient_id: str = "12345678",
+    patient_sex: str = "M",
+    patient_birth_date: str = "",
+    study_id: str = "1",
+    accession_number: str = "1",
+    series_description: str = "RT Structure Set from DICOMator",
+    series_number: int = 1,
+    bbox_min_z_m: float = 0.0,
+    vz_m: float = 0.0,
+    referenced_ct_series_instance_uid: Optional[str] = None,
+    referenced_ct_sop_class_uid: Optional[str] = None,
+    referenced_ct_sop_instance_uids: Optional[Sequence[str]] = None,
+):
+    """Build an RT Structure Set ``FileDataset`` from plain contour data.
+
+    This is the Blender-free half of the RTSTRUCT export: it takes ROI
+    definitions already extracted from mesh objects and assembles the pydicom
+    dataset, so it can be exercised (and unit-tested) without ``bpy``.
+    The caller is responsible for saving the returned dataset.
+    """
+    if not shared_constants.ensure_pydicom_available():
+        raise RuntimeError("pydicom not available")
+
+    pydicom = shared_constants.pydicom
+    Dataset = shared_constants.Dataset
+    FileDataset = shared_constants.FileDataset
+
+    file_meta = Dataset()
+    file_meta.MediaStorageSOPClassUID = RTSTRUCT_SOP_CLASS
+    file_meta.MediaStorageSOPInstanceUID = sop_instance_uid
+    file_meta.ImplementationClassUID = pydicom.uid.PYDICOM_IMPLEMENTATION_UID
+    file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+
+    ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
+
+    # --- SOP common ---
+    ds.SOPClassUID = RTSTRUCT_SOP_CLASS
+    ds.SOPInstanceUID = sop_instance_uid
+
+    # --- Patient module ---
+    ds.PatientName = patient_name
+    ds.PatientID = patient_id
+    ds.PatientBirthDate = normalize_dicom_date(patient_birth_date)
+    ds.PatientSex = patient_sex
+
+    # --- General study ---
+    ds.StudyInstanceUID = study_instance_uid
+    ds.StudyDate = date_str
+    ds.StudyTime = time_str
+    ds.StudyID = truncate_sh(study_id, "1")
+    ds.AccessionNumber = truncate_sh(accession_number, "1")
+    ds.ReferringPhysicianName = ""
+
+    # --- RT series ---
+    ds.Modality = "RTSTRUCT"
+    ds.SeriesInstanceUID = series_instance_uid
+    ds.SeriesNumber = int(series_number)
+    ds.SeriesDescription = series_description
+    ds.SeriesDate = date_str
+    ds.SeriesTime = time_str
+    ds.Manufacturer = "DICOMator"
+    ds.InstitutionName = "Virtual Hospital"
+    ds.StationName = "Blender"
+
+    # --- Structure Set Identification ---
+    # StructureSetLabel has VR SH (max 16 characters); longer values are
+    # non-conformant and trigger pydicom warnings.
+    ds.StructureSetLabel = str(series_description)[:16]
+    ds.StructureSetName = series_description
+    ds.StructureSetDate = date_str
+    ds.StructureSetTime = time_str
+
+    # --- Referenced Frame of Reference Sequence ---
+    ref_for_seq = Dataset()
+    ref_for_seq.FrameOfReferenceUID = frame_of_reference_uid
+
+    # Reference the co-exported CT series (if provided) so downstream TPS
+    # tools can trace the structure set back to the images it was drawn
+    # on.  RTReferencedSeriesSequence is Type 1 inside a study item, so
+    # when no CT series was co-exported the RTReferencedStudySequence is
+    # omitted entirely rather than written with an empty series sequence.
+    if (
+        referenced_ct_series_instance_uid
+        and referenced_ct_sop_instance_uids
+        and referenced_ct_sop_class_uid
+    ):
+        rt_ref_study = Dataset()
+        rt_ref_study.ReferencedSOPClassUID = "1.2.840.10008.3.1.2.3.2"  # RT Study
+        rt_ref_study.ReferencedSOPInstanceUID = study_instance_uid
+
+        rt_ref_series = Dataset()
+        rt_ref_series.SeriesInstanceUID = referenced_ct_series_instance_uid
+        contour_image_sequence: list = []
+        for sop_uid in referenced_ct_sop_instance_uids:
+            img_item = Dataset()
+            img_item.ReferencedSOPClassUID = referenced_ct_sop_class_uid
+            img_item.ReferencedSOPInstanceUID = sop_uid
+            contour_image_sequence.append(img_item)
+        rt_ref_series.ContourImageSequence = contour_image_sequence
+        rt_ref_study.RTReferencedSeriesSequence = [rt_ref_series]
+        ref_for_seq.RTReferencedStudySequence = [rt_ref_study]
+    ds.ReferencedFrameOfReferenceSequence = [ref_for_seq]
+
+    # --- Structure Set ROI Sequence ---
+    roi_sequence = []
+    for roi_number, (roi_name, _colour, _roi_type, _contours) in enumerate(roi_defs, start=1):
+        roi_item = Dataset()
+        roi_item.ROINumber = roi_number
+        roi_item.ReferencedFrameOfReferenceUID = frame_of_reference_uid
+        # ROIName has VR LO (max 64 characters).
+        roi_item.ROIName = str(roi_name)[:64]
+        roi_item.ROIGenerationAlgorithm = "MANUAL"
+        roi_sequence.append(roi_item)
+    ds.StructureSetROISequence = roi_sequence
+
+    # Build a lookup from Z plane → referenced CT SOP Instance UID so we
+    # can attach a ContourImageSequence to every emitted contour.
+    ct_uids_by_slice: list[str] = (
+        list(referenced_ct_sop_instance_uids)
+        if referenced_ct_sop_instance_uids is not None
+        else []
+    )
+
+    def _referenced_ct_sop_uid_for_z(z_m: float) -> Optional[str]:
+        if not ct_uids_by_slice or vz_m <= 0.0:
+            return None
+        idx = int(round((float(z_m) - bbox_min_z_m) / vz_m - 0.5))
+        if 0 <= idx < len(ct_uids_by_slice):
+            return ct_uids_by_slice[idx]
+        return None
+
+    # --- ROI Contour Sequence ---
+    roi_contour_sequence = []
+    for roi_number, (_roi_name, colour, _roi_type, contours_by_z) in enumerate(roi_defs, start=1):
+        r, g, b = colour
+
+        roi_contour_item = Dataset()
+        roi_contour_item.ReferencedROINumber = roi_number
+        roi_contour_item.ROIDisplayColor = [int(r), int(g), int(b)]
+
+        contour_sequence = []
+        for z_m, loops in sorted(contours_by_z.items()):
+            ref_sop_uid = _referenced_ct_sop_uid_for_z(z_m)
+            for loop in loops:
+                if len(loop) < 3:
+                    continue
+                # Flatten to [x1_mm, y1_mm, z1_mm, x2_mm, ...] in mm.
+                contour_data: list[float] = []
+                for (x_m, y_m, _z) in loop:
+                    contour_data.append(round(x_m * 1000.0, 4))
+                    contour_data.append(round(y_m * 1000.0, 4))
+                    contour_data.append(round(z_m * 1000.0, 4))
+
+                contour_item = Dataset()
+                contour_item.ContourGeometricType = "CLOSED_PLANAR"
+                contour_item.NumberOfContourPoints = len(loop)
+                contour_item.ContourData = contour_data
+                if ref_sop_uid and referenced_ct_sop_class_uid:
+                    img_ref = Dataset()
+                    img_ref.ReferencedSOPClassUID = referenced_ct_sop_class_uid
+                    img_ref.ReferencedSOPInstanceUID = ref_sop_uid
+                    contour_item.ContourImageSequence = [img_ref]
+                contour_sequence.append(contour_item)
+
+        roi_contour_item.ContourSequence = contour_sequence
+        roi_contour_sequence.append(roi_contour_item)
+
+    ds.ROIContourSequence = roi_contour_sequence
+
+    # --- RT ROI Observations Sequence ---
+    observations_sequence = []
+    for obs_number, (roi_name, _colour, roi_type, _contours) in enumerate(roi_defs, start=1):
+        obs_item = Dataset()
+        obs_item.ObservationNumber = obs_number
+        obs_item.ReferencedROINumber = obs_number
+        # ROIObservationLabel has VR SH (max 16 characters).
+        obs_item.ROIObservationLabel = str(roi_name)[:16]
+        obs_item.RTROIInterpretedType = str(roi_type or "OAR").upper()
+        obs_item.ROIInterpreter = ""
+        observations_sequence.append(obs_item)
+
+    ds.RTROIObservationsSequence = observations_sequence
+
+    return ds
 
 
 def export_rtstruct_to_dicom(
@@ -286,8 +565,12 @@ def export_rtstruct_to_dicom_iter(
     patient_name: str = "Anonymous",
     patient_id: str = "12345678",
     patient_sex: str = "M",
+    patient_birth_date: str = "",
     patient_position: str = "HFS",
     series_description: str = "RT Structure Set from DICOMator",
+    study_id: str = "1",
+    accession_number: str = "1",
+    study_datetime: Optional[datetime] = None,
     apply_modifiers: bool = True,
     study_instance_uid: Optional[str] = None,
     frame_of_reference_uid: Optional[str] = None,
@@ -345,24 +628,21 @@ def export_rtstruct_to_dicom_iter(
     if not shared_constants.ensure_pydicom_available():
         return {"error": "pydicom not available"}
 
-    pydicom = shared_constants.pydicom
-    Dataset = shared_constants.Dataset
-    FileDataset = shared_constants.FileDataset
     generate_uid = shared_constants.generate_uid
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Resolve voxel dimensions.
+    # Resolve the voxel Z dimension (only Z is needed for contour planes).
     if isinstance(voxel_size, (list, tuple)) and len(voxel_size) == 3:
-        vx_m, vy_m, vz_m = (float(v) for v in voxel_size)
+        vz_m = float(voxel_size[2])
     else:
-        vx_m = vy_m = vz_m = float(voxel_size)
+        vz_m = float(voxel_size)
 
     # Z positions at the voxel centre for each slice (metres).
     bbox_min_z_m = float(bbox_min.z)
     z_positions_m: list[float] = [bbox_min_z_m + (i + 0.5) * vz_m for i in range(n_slices)]
 
-    now = datetime.now()
+    now = study_datetime or datetime.now()
     date_str = now.strftime("%Y%m%d")
     time_str = now.strftime("%H%M%S.%f")
 
@@ -374,6 +654,7 @@ def export_rtstruct_to_dicom_iter(
     # Extract contours for every object before building the DICOM dataset so
     # that bmesh operations are completed while we still hold references.
     all_contours: list[dict[float, list[list[tuple[float, float, float]]]]] = []
+    warnings: list[str] = []
     total_planes = max(1, len(objects) * len(z_positions_m))
     planes_done = 0
     for obj in objects:
@@ -384,171 +665,52 @@ def export_rtstruct_to_dicom_iter(
             try:
                 next(subtask)
             except StopIteration as stop:
-                all_contours.append(stop.value)
+                contours, dropped = stop.value
+                all_contours.append(contours)
+                if dropped:
+                    warnings.append(
+                        f"{dropped} open/ambiguous cut edge(s) discarded while "
+                        f"contouring '{obj.name}' (non-watertight mesh?)"
+                    )
                 break
             planes_done += 1
             if planes_done % 8 == 0:
                 yield planes_done, total_planes
     yield planes_done, total_planes
 
-    try:
-        file_meta = Dataset()
-        file_meta.MediaStorageSOPClassUID = RTSTRUCT_SOP_CLASS
-        file_meta.MediaStorageSOPInstanceUID = sop_instance_uid
-        file_meta.ImplementationClassUID = pydicom.uid.PYDICOM_IMPLEMENTATION_UID
-        file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
-
-        ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
-
-        # --- SOP common ---
-        ds.SOPClassUID = RTSTRUCT_SOP_CLASS
-        ds.SOPInstanceUID = sop_instance_uid
-
-        # --- Patient module ---
-        ds.PatientName = patient_name
-        ds.PatientID = patient_id
-        ds.PatientBirthDate = ""
-        ds.PatientSex = patient_sex
-
-        # --- General study ---
-        ds.StudyInstanceUID = study_instance_uid
-        ds.StudyDate = date_str
-        ds.StudyTime = time_str
-        ds.StudyID = "1"
-        ds.AccessionNumber = "1"
-        ds.ReferringPhysicianName = ""
-
-        # --- RT series ---
-        ds.Modality = "RTSTRUCT"
-        ds.SeriesInstanceUID = series_instance_uid
-        ds.SeriesNumber = int(series_number)
-        ds.SeriesDescription = series_description
-        ds.SeriesDate = date_str
-        ds.SeriesTime = time_str
-        ds.Manufacturer = "DICOMator"
-        ds.InstitutionName = "Virtual Hospital"
-        ds.StationName = "Blender"
-
-        # --- Structure Set Identification ---
-        # StructureSetLabel has VR SH (max 16 characters); longer values are
-        # non-conformant and trigger pydicom warnings.
-        ds.StructureSetLabel = str(series_description)[:16]
-        ds.StructureSetName = series_description
-        ds.StructureSetDate = date_str
-        ds.StructureSetTime = time_str
-
-        # --- Referenced Frame of Reference Sequence ---
-        ref_for_seq = Dataset()
-        ref_for_seq.FrameOfReferenceUID = frame_of_reference_uid
-
-        # Reference the co-exported CT series (if provided) so downstream TPS
-        # tools can trace the structure set back to the images it was drawn
-        # on.  RTReferencedSeriesSequence is Type 1 inside a study item, so
-        # when no CT series was co-exported the RTReferencedStudySequence is
-        # omitted entirely rather than written with an empty series sequence.
-        if (
-            referenced_ct_series_instance_uid
-            and referenced_ct_sop_instance_uids
-            and referenced_ct_sop_class_uid
-        ):
-            rt_ref_study = Dataset()
-            rt_ref_study.ReferencedSOPClassUID = "1.2.840.10008.3.1.2.3.2"  # RT Study
-            rt_ref_study.ReferencedSOPInstanceUID = study_instance_uid
-
-            rt_ref_series = Dataset()
-            rt_ref_series.SeriesInstanceUID = referenced_ct_series_instance_uid
-            contour_image_sequence: list = []
-            for sop_uid in referenced_ct_sop_instance_uids:
-                img_item = Dataset()
-                img_item.ReferencedSOPClassUID = referenced_ct_sop_class_uid
-                img_item.ReferencedSOPInstanceUID = sop_uid
-                contour_image_sequence.append(img_item)
-            rt_ref_series.ContourImageSequence = contour_image_sequence
-            rt_ref_study.RTReferencedSeriesSequence = [rt_ref_series]
-            ref_for_seq.RTReferencedStudySequence = [rt_ref_study]
-        ds.ReferencedFrameOfReferenceSequence = [ref_for_seq]
-
-        # --- Structure Set ROI Sequence ---
-        roi_sequence = []
-        for roi_number, obj in enumerate(objects, start=1):
-            roi_item = Dataset()
-            roi_item.ROINumber = roi_number
-            roi_item.ReferencedFrameOfReferenceUID = frame_of_reference_uid
-            roi_item.ROIName = obj.name
-            roi_item.ROIGenerationAlgorithm = "MANUAL"
-            roi_sequence.append(roi_item)
-        ds.StructureSetROISequence = roi_sequence
-
-        # Build a lookup from Z plane → referenced CT SOP Instance UID so we
-        # can attach a ContourImageSequence to every emitted contour.
-        ct_uids_by_slice: list[str] = (
-            list(referenced_ct_sop_instance_uids)
-            if referenced_ct_sop_instance_uids is not None
-            else []
+    roi_defs: list[RoiDefinition] = [
+        (
+            obj.name,
+            _roi_colour_from_object(obj, index),
+            str(getattr(obj, "dicomator_roi_type", "OAR")).upper(),
+            contours_by_z,
         )
+        for index, (obj, contours_by_z) in enumerate(zip(objects, all_contours))
+    ]
 
-        def _referenced_ct_sop_uid_for_z(z_m: float) -> Optional[str]:
-            if not ct_uids_by_slice or vz_m <= 0.0:
-                return None
-            idx = int(round((float(z_m) - bbox_min_z_m) / vz_m - 0.5))
-            if 0 <= idx < len(ct_uids_by_slice):
-                return ct_uids_by_slice[idx]
-            return None
-
-        # --- ROI Contour Sequence ---
-        roi_contour_sequence = []
-        for roi_number, (obj, contours_by_z) in enumerate(
-            zip(objects, all_contours), start=1
-        ):
-            r, g, b = _roi_colour_from_object(obj, roi_number - 1)
-
-            roi_contour_item = Dataset()
-            roi_contour_item.ReferencedROINumber = roi_number
-            roi_contour_item.ROIDisplayColor = [r, g, b]
-
-            contour_sequence = []
-            for z_m, loops in sorted(contours_by_z.items()):
-                ref_sop_uid = _referenced_ct_sop_uid_for_z(z_m)
-                for loop in loops:
-                    if len(loop) < 3:
-                        continue
-                    # Flatten to [x1_mm, y1_mm, z1_mm, x2_mm, ...] in mm.
-                    contour_data: list[float] = []
-                    for (x_m, y_m, _z) in loop:
-                        contour_data.append(round(x_m * 1000.0, 4))
-                        contour_data.append(round(y_m * 1000.0, 4))
-                        contour_data.append(round(z_m * 1000.0, 4))
-
-                    contour_item = Dataset()
-                    contour_item.ContourGeometricType = "CLOSED_PLANAR"
-                    contour_item.NumberOfContourPoints = len(loop)
-                    contour_item.ContourData = contour_data
-                    if ref_sop_uid and referenced_ct_sop_class_uid:
-                        img_ref = Dataset()
-                        img_ref.ReferencedSOPClassUID = referenced_ct_sop_class_uid
-                        img_ref.ReferencedSOPInstanceUID = ref_sop_uid
-                        contour_item.ContourImageSequence = [img_ref]
-                    contour_sequence.append(contour_item)
-
-            roi_contour_item.ContourSequence = contour_sequence
-            roi_contour_sequence.append(roi_contour_item)
-
-        ds.ROIContourSequence = roi_contour_sequence
-
-        # --- RT ROI Observations Sequence ---
-        observations_sequence = []
-        for obs_number, obj in enumerate(objects, start=1):
-            obs_item = Dataset()
-            obs_item.ObservationNumber = obs_number
-            obs_item.ReferencedROINumber = obs_number
-            obs_item.ROIObservationLabel = obj.name
-            # Read the per-object ROI type; fall back to 'OAR' if unset.
-            roi_type = str(getattr(obj, "dicomator_roi_type", "OAR")).upper()
-            obs_item.RTROIInterpretedType = roi_type
-            obs_item.ROIInterpreter = ""
-            observations_sequence.append(obs_item)
-
-        ds.RTROIObservationsSequence = observations_sequence
+    try:
+        ds = build_rtstruct_dataset(
+            roi_defs,
+            study_instance_uid=study_instance_uid,
+            frame_of_reference_uid=frame_of_reference_uid,
+            series_instance_uid=series_instance_uid,
+            sop_instance_uid=sop_instance_uid,
+            date_str=date_str,
+            time_str=time_str,
+            patient_name=patient_name,
+            patient_id=patient_id,
+            patient_sex=patient_sex,
+            patient_birth_date=patient_birth_date,
+            study_id=study_id,
+            accession_number=accession_number,
+            series_description=series_description,
+            series_number=series_number,
+            bbox_min_z_m=bbox_min_z_m,
+            vz_m=vz_m,
+            referenced_ct_series_instance_uid=referenced_ct_series_instance_uid,
+            referenced_ct_sop_class_uid=referenced_ct_sop_class_uid,
+            referenced_ct_sop_instance_uids=referenced_ct_sop_instance_uids,
+        )
 
         if phase_index is not None:
             filename = os.path.join(output_dir, f"Phase_{int(phase_index):03d}_RTStruct.dcm")
@@ -560,10 +722,14 @@ def export_rtstruct_to_dicom_iter(
     except Exception as exc:
         return {"error": f"Error saving RT Structure Set DICOM file: {exc}"}
 
-    return {"success": f"Successfully exported RT Structure Set to {filename}"}
+    return {
+        "success": f"Successfully exported RT Structure Set to {filename}",
+        "warnings": warnings,
+    }
 
 
 __all__ = [
+    "build_rtstruct_dataset",
     "extract_contours_from_mesh",
     "export_rtstruct_to_dicom",
     "export_rtstruct_to_dicom_iter",

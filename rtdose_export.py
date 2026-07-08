@@ -36,7 +36,12 @@ import numpy as np
 from mathutils import Vector
 
 from . import constants as shared_constants
-from .constants import RTDOSE_SOP_CLASS, RTPLAN_SOP_CLASS
+from .constants import (
+    RTDOSE_SOP_CLASS,
+    RTPLAN_SOP_CLASS,
+    normalize_dicom_date,
+    truncate_sh,
+)
 
 
 def _export_minimal_rtplan(
@@ -45,6 +50,9 @@ def _export_minimal_rtplan(
     patient_name: str,
     patient_id: str,
     patient_sex: str,
+    patient_birth_date: str = "",
+    study_id: str = "1",
+    accession_number: str = "1",
     series_description: str,
     study_instance_uid: str,
     frame_of_reference_uid: str,
@@ -82,14 +90,14 @@ def _export_minimal_rtplan(
 
     plan.PatientName = patient_name
     plan.PatientID = patient_id
-    plan.PatientBirthDate = ""
+    plan.PatientBirthDate = normalize_dicom_date(patient_birth_date)
     plan.PatientSex = patient_sex
 
     plan.StudyInstanceUID = study_instance_uid
     plan.StudyDate = date_str
     plan.StudyTime = time_str
-    plan.StudyID = "1"
-    plan.AccessionNumber = "1"
+    plan.StudyID = truncate_sh(study_id, "1")
+    plan.AccessionNumber = truncate_sh(accession_number, "1")
     plan.ReferringPhysicianName = ""
 
     plan.Modality = "RTPLAN"
@@ -134,10 +142,14 @@ def export_rtdose_to_dicom(
     patient_name: str = "Anonymous",
     patient_id: str = "12345678",
     patient_sex: str = "M",
+    patient_birth_date: str = "",
     patient_position: str = "HFS",
     series_description: str = "RT Dose from DICOMator",
     dose_type: str = "PHYSICAL",
     dose_summation_type: str = "PLAN",
+    study_id: str = "1",
+    accession_number: str = "1",
+    study_datetime: Optional[datetime] = None,
     study_instance_uid: Optional[str] = None,
     frame_of_reference_uid: Optional[str] = None,
     series_instance_uid: Optional[str] = None,
@@ -230,14 +242,17 @@ def export_rtdose_to_dicom(
     # row-major convention (rows first).
     # Clip before casting: float32 precision on a uint32-range scale can
     # push values a fraction above uint32_max, which silently wraps on
-    # cast. Clamping keeps the maximum dose as 0xFFFFFFFF.
-    uint32_max_value = np.iinfo(np.uint32).max
-    scaled = np.clip(dose_f32 / dose_grid_scaling, 0.0, uint32_max_value)
+    # cast. The clip bound itself must be a float32 value that does not
+    # exceed uint32_max — uint32_max is not representable in float32 and
+    # rounds up to 2**32, which would defeat the clamp and wrap the
+    # maximum-dose voxels to 0.
+    safe_uint32_max = np.nextafter(np.float32(np.iinfo(np.uint32).max), np.float32(0.0))
+    scaled = np.clip(dose_f32 / np.float32(dose_grid_scaling), np.float32(0.0), safe_uint32_max)
     pixel_frames = np.ascontiguousarray(
         scaled.astype(np.uint32).transpose(2, 1, 0)
     )
 
-    now = datetime.now()
+    now = study_datetime or datetime.now()
     date_str = now.strftime("%Y%m%d")
     time_str = now.strftime("%H%M%S.%f")
 
@@ -254,6 +269,9 @@ def export_rtdose_to_dicom(
                 patient_name=patient_name,
                 patient_id=patient_id,
                 patient_sex=patient_sex,
+                patient_birth_date=patient_birth_date,
+                study_id=study_id,
+                accession_number=accession_number,
                 series_description=series_description,
                 study_instance_uid=study_instance_uid,
                 frame_of_reference_uid=frame_of_reference_uid,
@@ -281,15 +299,15 @@ def export_rtdose_to_dicom(
         # --- Patient module ---
         ds.PatientName = patient_name
         ds.PatientID = patient_id
-        ds.PatientBirthDate = ""
+        ds.PatientBirthDate = normalize_dicom_date(patient_birth_date)
         ds.PatientSex = patient_sex
 
         # --- General study ---
         ds.StudyInstanceUID = study_instance_uid
         ds.StudyDate = date_str
         ds.StudyTime = time_str
-        ds.StudyID = "1"
-        ds.AccessionNumber = "1"
+        ds.StudyID = truncate_sh(study_id, "1")
+        ds.AccessionNumber = truncate_sh(accession_number, "1")
         ds.ReferringPhysicianName = ""
 
         # --- RT series ---
