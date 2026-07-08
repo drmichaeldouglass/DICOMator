@@ -216,6 +216,8 @@ class VIEW3D_PT_dicomator_selection_info(Panel):
                     "enable_motion_artifact",
                     "enable_poisson_noise",
                     "enable_bias_field",
+                    "enable_geometric_distortion",
+                    "enable_gibbs_ringing",
                 )
             )
             if artifacts_enabled:
@@ -417,6 +419,21 @@ class VIEW3D_PT_dicomator_artifacts(Panel):
             if props.enable_bias_field:
                 bias_box.prop(props, "bias_field_strength")
                 bias_box.prop(props, "bias_field_scale")
+
+            distortion_box = layout.box()
+            distortion_box.prop(props, "enable_geometric_distortion", text="Geometric Distortion")
+            if props.enable_geometric_distortion:
+                distortion_box.prop(props, "geometric_gradient_strength")
+                row = distortion_box.row(align=True)
+                row.prop(props, "geometric_b0_shift")
+                row.prop(props, "geometric_readout_axis", text="")
+                distortion_box.prop(props, "geometric_b0_scale")
+
+            gibbs_box = layout.box()
+            gibbs_box.prop(props, "enable_gibbs_ringing", text="Gibbs Ringing")
+            if props.enable_gibbs_ringing:
+                gibbs_box.prop(props, "gibbs_strength")
+                gibbs_box.prop(props, "gibbs_truncation")
         else:
             partial_box = layout.box()
             partial_box.prop(props, "enable_partial_volume", text="Partial Volume")

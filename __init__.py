@@ -29,10 +29,14 @@ for _module_name in (
         importlib.reload(sys.modules[_qualified_name])
 
 from .artifacts import (
+    add_bias_field_shading,
     add_gaussian_noise,
+    add_gibbs_ringing,
     add_metal_artifacts,
     add_motion_artifact,
+    add_mri_geometric_distortion,
     add_poisson_noise,
+    add_rician_noise,
     add_ring_artifacts,
     apply_partial_volume_effect,
 )
@@ -58,7 +62,7 @@ from .voxelization import voxelize_mesh, voxelize_objects_to_dose, voxelize_obje
 bl_info = {
     "name": "DICOMator",
     "author": "Michael Douglass",
-    "version": (3, 3, 0),
+    "version": (3, 4, 0),
     "blender": (5, 1, 0),
     "location": "View3D > Sidebar > DICOMator",
     "description": "Converts mesh objects into synthetic CT/MR series or camera-based DRR DICOM images",
@@ -156,10 +160,14 @@ def unregister() -> None:  # pragma: no cover - Blender registration
 
 
 __all__ = [
+    "add_bias_field_shading",
     "add_gaussian_noise",
+    "add_gibbs_ringing",
     "add_metal_artifacts",
     "add_motion_artifact",
+    "add_mri_geometric_distortion",
     "add_poisson_noise",
+    "add_rician_noise",
     "add_ring_artifacts",
     "apply_partial_volume_effect",
     "export_projection_to_dicom",

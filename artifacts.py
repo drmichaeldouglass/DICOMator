@@ -119,6 +119,94 @@ def _ensure_shape_like(arr: np.ndarray, target_shape: tuple[int, ...]) -> np.nda
     return res
 
 
+def _remap_bilinear(
+    image: np.ndarray,
+    coord0: np.ndarray,
+    coord1: np.ndarray,
+    fill: float = 0.0,
+) -> np.ndarray:
+    """Sample ``image`` at floating-point coordinates using bilinear interpolation.
+
+    ``coord0``/``coord1`` give, for every output pixel, the source position in
+    the first/second axis of ``image``. Positions whose 2x2 support falls
+    outside the image are set to ``fill``. This is a lightweight, NumPy-only
+    stand-in for ``scipy.ndimage.map_coordinates`` (SciPy is not bundled with
+    Blender's Python).
+    """
+
+    n0, n1 = image.shape
+    x0 = np.floor(coord0).astype(np.int64)
+    x1 = np.floor(coord1).astype(np.int64)
+    f0 = (coord0 - x0).astype(np.float32)
+    f1 = (coord1 - x1).astype(np.float32)
+
+    valid = (x0 >= 0) & (x0 < n0 - 1) & (x1 >= 0) & (x1 < n1 - 1)
+    x0c = np.clip(x0, 0, n0 - 2)
+    x1c = np.clip(x1, 0, n1 - 2)
+
+    img = image.astype(np.float32, copy=False)
+    v00 = img[x0c, x1c]
+    v01 = img[x0c, x1c + 1]
+    v10 = img[x0c + 1, x1c]
+    v11 = img[x0c + 1, x1c + 1]
+    top = v00 * (1.0 - f1) + v01 * f1
+    bot = v10 * (1.0 - f1) + v11 * f1
+    out = top * (1.0 - f0) + bot * f0
+    return np.where(valid, out, np.float32(fill)).astype(np.float32)
+
+
+def _rotate_bilinear(image: np.ndarray, angle_rad: float, fill: float = 0.0) -> np.ndarray:
+    """Rotate a 2D image about its centre by ``angle_rad`` (bilinear, NumPy-only)."""
+
+    n0, n1 = image.shape
+    c0 = (n0 - 1) / 2.0
+    c1 = (n1 - 1) / 2.0
+    o0, o1 = np.indices((n0, n1), dtype=np.float32)
+    r0 = o0 - c0
+    r1 = o1 - c1
+    ca = math.cos(angle_rad)
+    sa = math.sin(angle_rad)
+    # Inverse map: fetch the source pixel that rotates onto each output pixel.
+    src0 = c0 + ca * r0 + sa * r1
+    src1 = c1 - sa * r0 + ca * r1
+    return _remap_bilinear(image, src0, src1, fill)
+
+
+def _resize_bilinear(image: np.ndarray, out_shape: tuple[int, int]) -> np.ndarray:
+    """Resample a 2D image to ``out_shape`` using bilinear interpolation."""
+
+    n0, n1 = image.shape
+    m0, m1 = out_shape
+    if (n0, n1) == (m0, m1):
+        return image.astype(np.float32, copy=False)
+    # Map output pixel centres back to source coordinates (align corners).
+    s0 = (np.arange(m0, dtype=np.float32) * (max(1, n0 - 1) / max(1, m0 - 1)))
+    s1 = (np.arange(m1, dtype=np.float32) * (max(1, n1 - 1) / max(1, m1 - 1)))
+    coord0 = np.repeat(s0[:, None], m1, axis=1)
+    coord1 = np.repeat(s1[None, :], m0, axis=0)
+    return _remap_bilinear(image, coord0, coord1, fill=0.0)
+
+
+def _smooth_random_field(shape: tuple[int, ...], scale: float, rng: np.random.Generator) -> np.ndarray:
+    """Return a smooth, zero-centred random field in roughly ``[-1, 1]``.
+
+    Used to model spatially slowly-varying physical quantities such as the
+    static-field (B0) inhomogeneity that drives MRI geometric distortion.
+    """
+
+    field = rng.normal(0.0, 1.0, size=shape).astype(np.float32, copy=False)
+    for axis, axis_len in enumerate(shape):
+        window = max(3, int(round(float(scale) * max(1, axis_len))))
+        if window % 2 == 0:
+            window += 1
+        field = _moving_average_along_axis(field, window, axis)
+    field -= float(np.mean(field))
+    max_abs = float(np.max(np.abs(field)))
+    if max_abs > 0.0:
+        field /= max_abs
+    return field.astype(np.float32, copy=False)
+
+
 def add_gaussian_noise(hu_array: np.ndarray, std_hu: float, rng: GeneratorLike = None) -> np.ndarray:
     """Add zero-mean Gaussian noise in HU to ``hu_array``.
 
@@ -208,27 +296,47 @@ def add_metal_artifacts(
     hu_array: np.ndarray,
     intensity: float = 400.0,
     density_threshold: float = 2000.0,
-    num_streaks: int = 10,
+    num_streaks: int = 60,
     falloff: float = 6.0,
     rng: GeneratorLike = None,
 ) -> np.ndarray:
-    """Inject streak-like artifacts originating from high-density voxels.
+    """Inject streak artifacts from high-density voxels using a projection model.
+
+    Rather than drawing streaks at random image-space angles, this generates the
+    artifact in the projection (sinogram) domain, which is where CT metal
+    artifacts physically originate:
+
+    1. Voxels above ``density_threshold`` form a metal attenuation map.
+    2. The map is forward-projected (a discrete Radon transform) over a set of
+       view angles, giving the metal path length seen by each detector reading.
+    3. Two non-linear detector errors are modelled per view:
+       * **Photon starvation** - very few photons survive the long, dense path,
+         so the log-converted signal is dominated by noise. Modelled as a
+         path-length-weighted random error that grows super-linearly with path.
+       * **Beam hardening** - the polychromatic beam is preferentially hardened
+         along dense paths, so the reconstructed value is under-estimated. This
+         produces the dark bands that connect pairs of dense objects.
+    4. The zero-mean view errors are unfiltered back-projected, which smears each
+       inconsistent view across the image as a streak. Superimposing the views
+       reproduces the classic star pattern that is tangent to the metal and the
+       dark bands between separate implants.
 
     Parameters
     ----------
     hu_array:
-        Input HU volume.
+        Input HU volume with shape ``(width, height, depth)``.
     intensity:
-        Base amplitude of the streaks in HU.
+        Target amplitude of the streaks in HU (robust peak of the artifact).
     density_threshold:
         Voxels with HU above this value are treated as metal sources.
     num_streaks:
-        Number of radial streaks to synthesize for each affected slice. When set
-        to ``0`` or negative, the number of streaks scales with the amount of
-        detected metal voxels.
+        Number of projection view angles distributed over 180 degrees. More
+        views produce a denser, finer star pattern. Values ``<= 0`` fall back to
+        an automatic count. (Kept named ``num_streaks`` for backward
+        compatibility with existing callers/UI.)
     falloff:
-        Controls how quickly the streaks decay away from the streak direction.
-        Higher values localize the artifact closer to the metal object.
+        Controls how quickly streaks decay with distance from the metal. Higher
+        values localise the artifact closer to the dense object.
     rng:
         Optional seed or generator for deterministic results.
 
@@ -242,10 +350,15 @@ def add_metal_artifacts(
     result = hu_array.astype(np.float32, copy=True)
     width, height, depth = result.shape
 
-    # Pre-compute a normalized coordinate grid for the slice plane.
-    x_coords = np.linspace(-1.0, 1.0, width, dtype=np.float32)
-    y_coords = np.linspace(-1.0, 1.0, height, dtype=np.float32)
-    base_xx, base_yy = np.meshgrid(x_coords, y_coords, indexing="ij")
+    # Cap the working resolution of the (relatively expensive) rotation-based
+    # projection so large grids stay responsive; the artifact is resampled back
+    # to full resolution afterwards. Streaks are low-frequency, so this is a
+    # good approximation.
+    work_cap = 256
+    num_views = int(num_streaks) if int(num_streaks) > 0 else 60
+    num_views = int(np.clip(num_views, 16, 360))
+    # ``falloff`` sharpens the radial decay of the back-projected streaks.
+    decay = float(np.clip(falloff, 0.1, 24.0)) / 6.0
 
     for iz in range(depth):
         source_slice = hu_array[:, :, iz].astype(np.float32, copy=False)
@@ -253,52 +366,74 @@ def add_metal_artifacts(
         if not np.any(source_mask):
             continue
 
+        # Metal attenuation excess above the threshold, normalised so a typical
+        # metal path integrates to O(1) regardless of the HU units in use.
         metal_excess = np.clip(source_slice - float(density_threshold), 0.0, None)
-        weights = metal_excess + source_mask.astype(np.float32)
-        weight_sum = float(np.sum(weights))
-        if weight_sum <= 0.0:
+        norm = float(np.percentile(metal_excess[source_mask], 90)) or 1.0
+        attn = (metal_excess / norm).astype(np.float32, copy=False)
+
+        # Optionally downsample the attenuation map for the projection loop.
+        scale = 1.0
+        if max(width, height) > work_cap:
+            scale = work_cap / float(max(width, height))
+        w0 = max(8, int(round(width * scale)))
+        h0 = max(8, int(round(height * scale)))
+        attn_small = _resize_bilinear(attn, (w0, h0)) if (w0, h0) != (width, height) else attn
+
+        angles = np.linspace(0.0, math.pi, num_views, endpoint=False)
+        back_proj = np.zeros((w0, h0), dtype=np.float32)
+        for angle in angles:
+            rotated = _rotate_bilinear(attn_small, float(angle))
+            # Line integral of metal along the rotated projection direction.
+            path = rotated.sum(axis=0)
+
+            # Beam hardening: dark (negative) error growing with path length.
+            beam_hardening = -(path ** 2)
+            # Photon starvation: log-domain noise amplified along dense paths.
+            starvation = generator.normal(0.0, 1.0, size=path.shape).astype(np.float32)
+            starvation *= path * np.sqrt(1.0 + path)
+            view_error = beam_hardening + 0.6 * starvation
+
+            # Remove the DC term so the streaks are signed and do not bias HU.
+            view_error -= float(np.mean(view_error))
+
+            smear = np.broadcast_to(view_error, (w0, h0))
+            back_proj += _rotate_bilinear(smear, -float(angle))
+
+        back_proj /= float(num_views)
+
+        # Radial decay away from the metal so distant streaks fade, controlled by
+        # ``falloff``. Distance is measured from the metal centroid.
+        gy, gx = np.indices((w0, h0), dtype=np.float32)
+        mask_small = _resize_bilinear(source_mask.astype(np.float32), (w0, h0)) > 0.25
+        if np.any(mask_small):
+            cy = float(np.mean(gy[mask_small]))
+            cx = float(np.mean(gx[mask_small]))
+        else:
+            cy, cx = (w0 - 1) / 2.0, (h0 - 1) / 2.0
+        rad = np.sqrt((gy - cy) ** 2 + (gx - cx) ** 2)
+        rad_norm = rad / (0.5 * float(math.hypot(w0, h0)) + 1e-3)
+        back_proj *= np.exp(-decay * rad_norm).astype(np.float32)
+
+        # Scale so the robust peak of the streak field reaches ``intensity`` HU.
+        peak = float(np.percentile(np.abs(back_proj), 99.5))
+        if peak <= 0.0:
             continue
+        slice_artifact = (float(intensity) / peak) * back_proj
 
-        centroid_x = float(np.sum(base_xx * weights) / weight_sum)
-        centroid_y = float(np.sum(base_yy * weights) / weight_sum)
-        metal_fraction = float(np.mean(source_mask))
-        mean_excess = float(np.mean(metal_excess[source_mask]))
-        source_strength = np.clip(mean_excess / 1200.0 + 10.0 * metal_fraction, 0.25, 3.0)
+        if (w0, h0) != (width, height):
+            slice_artifact = _resize_bilinear(slice_artifact, (width, height))
 
-        # Express coordinates relative to the metal centroid. This is an image-
-        # space approximation of projection paths crossing a high-attenuation
-        # object, producing photon-starvation shadows plus beam-hardening bands.
-        rel_x = base_xx - centroid_x
-        rel_y = base_yy - centroid_y
-        radius = np.sqrt(rel_x**2 + rel_y**2) + 1e-3
-
-        slice_artifact = np.zeros_like(result[:, :, iz], dtype=np.float32)
-        metal_voxels = int(np.count_nonzero(source_mask))
-        streak_count = int(num_streaks if num_streaks > 0 else max(6, min(32, metal_voxels // 25)))
-
-        for _ in range(streak_count):
-            angle = generator.uniform(0.0, math.pi)
-            cos_a = math.cos(angle)
-            sin_a = math.sin(angle)
-            parallel = rel_x * cos_a + rel_y * sin_a
-            perpendicular = -rel_x * sin_a + rel_y * cos_a
-            line_sigma = generator.uniform(0.018, 0.055) / max(0.5, float(falloff) / 6.0)
-            profile = np.exp(-0.5 * (perpendicular / line_sigma) ** 2)
-            envelope = 1.0 / (1.0 + 1.5 * np.abs(parallel) + 2.5 * radius)
-            phase = generator.uniform(-math.pi, math.pi)
-            banding = np.cos(8.0 * parallel + phase)
-            amplitude = generator.uniform(0.7, 1.2) * float(intensity) * float(source_strength)
-
-            starvation_shadow = -0.65 * profile * envelope
-            beam_hardening_band = 0.35 * profile * banding * envelope
-            slice_artifact += amplitude * (starvation_shadow + beam_hardening_band)
-
+        # Broad beam-hardening shading immediately around the dense object.
         halo_kernel = max(3, min(21, (min(width, height) // 10) * 2 + 1))
         halo = _gaussian_blur(source_mask.astype(np.float32), halo_kernel)
         halo_max = float(np.max(halo))
         if halo_max > 0.0:
             halo /= halo_max
-            slice_artifact -= 0.12 * float(intensity) * float(source_strength) * halo
+            slice_artifact -= 0.15 * float(intensity) * halo
+
+        # Do not let streaks corrupt the metal voxels themselves.
+        slice_artifact[source_mask] = 0.0
 
         result[:, :, iz] = np.clip(result[:, :, iz] + slice_artifact, MIN_HU_VALUE, MAX_HU_VALUE)
 
@@ -585,6 +720,214 @@ def add_bias_field_shading(
     return biased.astype(intensity_array.dtype, copy=False)
 
 
+def add_rician_noise(
+    intensity_array: np.ndarray,
+    sigma: float,
+    rng: GeneratorLike = None,
+) -> np.ndarray:
+    """Add Rician-distributed noise appropriate for MR magnitude images.
+
+    An MR magnitude image is the modulus of a complex signal whose real and
+    imaginary channels each carry independent zero-mean Gaussian noise of
+    standard deviation ``sigma``. The magnitude therefore follows a Rician
+    distribution: at high signal it looks Gaussian, but as the true signal
+    approaches zero the noise mean rises to ``sigma * sqrt(pi/2)`` and the
+    background never reaches zero. This elevated noise floor is the reason plain
+    additive Gaussian noise is unphysical for MR, especially in dark regions.
+
+    Parameters
+    ----------
+    intensity_array:
+        Input magnitude volume. Values are treated as non-negative signal.
+    sigma:
+        Standard deviation of the underlying complex-channel Gaussian noise, in
+        image-intensity units. ``sigma <= 0`` returns the input unchanged.
+    rng:
+        Optional seed or :class:`numpy.random.Generator` for reproducibility.
+
+    Returns
+    -------
+    numpy.ndarray
+        Noisy magnitude volume, preserving the input dtype.
+    """
+
+    if sigma <= 0.0:
+        return intensity_array
+
+    generator = _get_generator(rng)
+    signal = np.clip(intensity_array.astype(np.float32, copy=False), 0.0, None)
+
+    real = signal + generator.normal(0.0, float(sigma), signal.shape).astype(np.float32, copy=False)
+    imag = generator.normal(0.0, float(sigma), signal.shape).astype(np.float32, copy=False)
+    magnitude = np.sqrt(real * real + imag * imag)
+
+    if np.issubdtype(intensity_array.dtype, np.integer):
+        info = np.iinfo(intensity_array.dtype)
+        magnitude = np.clip(np.round(magnitude), max(0, info.min), info.max)
+    return magnitude.astype(intensity_array.dtype, copy=False)
+
+
+def add_mri_geometric_distortion(
+    intensity_array: np.ndarray,
+    gradient_strength: float = 0.05,
+    b0_strength: float = 3.0,
+    b0_scale: float = 0.35,
+    readout_axis: int = 1,
+    rng: GeneratorLike = None,
+) -> np.ndarray:
+    """Warp an MR volume to mimic geometric distortion.
+
+    Two dominant, physically distinct mechanisms are modelled, both applied
+    in-plane (per axial slice) where their clinical effect is greatest:
+
+    * **Gradient non-linearity** - the spatial encoding gradients are only
+      linear near iso-centre, so voxels are increasingly mis-mapped towards the
+      edges of the field of view. This is modelled as a radial polynomial
+      displacement (barrel/pincushion warp) that grows with the square of the
+      distance from the image centre.
+    * **B0 (static field) inhomogeneity** - off-resonance spins are mis-assigned
+      along the frequency-encode (readout) direction by an amount proportional
+      to the local field offset divided by the receiver bandwidth. This is
+      modelled as a smooth off-resonance field that shifts voxels only along the
+      readout axis, reproducing the characteristic local stretching/compression
+      near air-tissue interfaces.
+
+    Parameters
+    ----------
+    intensity_array:
+        Input volume with shape ``(width, height, depth)``.
+    gradient_strength:
+        Radial gradient-non-linearity coefficient. Positive values push the
+        periphery outward (pincushion), negative inward (barrel). Roughly the
+        fractional displacement at the FOV corner. ``0`` disables it.
+    b0_strength:
+        Peak B0 off-resonance displacement in **voxels** along the readout axis.
+        ``0`` disables it.
+    b0_scale:
+        Relative spatial smoothness of the off-resonance field (0-1); larger
+        values vary more slowly across the volume.
+    readout_axis:
+        In-plane axis of the frequency-encode direction: ``0`` (x) or ``1`` (y).
+    rng:
+        Optional seed or generator for the off-resonance field.
+
+    Returns
+    -------
+    numpy.ndarray
+        Geometrically distorted volume, preserving the input dtype.
+    """
+
+    if intensity_array.ndim != 3:
+        return intensity_array
+    if abs(gradient_strength) <= 0.0 and b0_strength <= 0.0:
+        return intensity_array
+    if readout_axis not in (0, 1):
+        raise ValueError("readout_axis must be 0 (x) or 1 (y)")
+
+    generator = _get_generator(rng)
+    source = intensity_array.astype(np.float32, copy=False)
+    width, height, depth = source.shape
+
+    c0 = (width - 1) / 2.0
+    c1 = (height - 1) / 2.0
+    o0, o1 = np.indices((width, height), dtype=np.float32)
+    rel0 = o0 - c0
+    rel1 = o1 - c1
+    r_max_sq = (c0 * c0 + c1 * c1) + 1e-3
+    rho_sq = (rel0 * rel0 + rel1 * rel1) / r_max_sq
+
+    # Inverse-map radial factor: output pixel at radius r samples the source at
+    # ``(1 + k*rho^2)`` times its radius, warping the periphery.
+    grad_factor = (1.0 + float(gradient_strength) * rho_sq).astype(np.float32)
+    base0 = c0 + grad_factor * rel0
+    base1 = c1 + grad_factor * rel1
+
+    if b0_strength > 0.0:
+        b0_field = _smooth_random_field((width, height, depth), float(b0_scale), generator)
+    else:
+        b0_field = None
+
+    result = np.empty_like(source)
+    for iz in range(depth):
+        coord0 = base0.copy()
+        coord1 = base1.copy()
+        if b0_field is not None:
+            shift = float(b0_strength) * b0_field[:, :, iz]
+            if readout_axis == 0:
+                coord0 = coord0 + shift
+            else:
+                coord1 = coord1 + shift
+        result[:, :, iz] = _remap_bilinear(source[:, :, iz], coord0, coord1, fill=0.0)
+
+    if np.issubdtype(intensity_array.dtype, np.integer):
+        info = np.iinfo(intensity_array.dtype)
+        result = np.clip(np.round(result), info.min, info.max)
+    return result.astype(intensity_array.dtype, copy=False)
+
+
+def add_gibbs_ringing(
+    intensity_array: np.ndarray,
+    strength: float = 0.6,
+    truncation: float = 0.2,
+) -> np.ndarray:
+    """Add Gibbs (truncation) ringing from finite k-space sampling.
+
+    MR images are reconstructed from a finite region of k-space, so sharp edges
+    are effectively convolved with a sinc, producing parallel bright/dark ripples
+    that run alongside high-contrast boundaries (e.g. skull/CSF, fat/muscle).
+    This is reproduced faithfully by transforming each slice to the frequency
+    domain, discarding the outer fraction of k-space, and transforming back.
+
+    Parameters
+    ----------
+    intensity_array:
+        Input volume with shape ``(width, height, depth)``.
+    strength:
+        Blend factor (0-1) between the original slice and the truncated
+        reconstruction. ``0`` disables the effect.
+    truncation:
+        Fraction of the k-space extent removed from each in-plane edge
+        (0-0.49). Larger values give coarser, stronger ringing.
+
+    Returns
+    -------
+    numpy.ndarray
+        Volume with truncation ringing, preserving the input dtype.
+    """
+
+    if strength <= 0.0 or truncation <= 0.0:
+        return intensity_array
+    if intensity_array.ndim != 3:
+        return intensity_array
+
+    strength = float(np.clip(strength, 0.0, 1.0))
+    truncation = float(np.clip(truncation, 0.0, 0.49))
+    source = intensity_array.astype(np.float32, copy=False)
+    width, height, depth = source.shape
+
+    # Build a centred rectangular k-space mask keeping the inner (1-2*trunc) band
+    # along each in-plane axis. The hard edge is what generates the ringing.
+    keep0 = max(1, int(round(width * (1.0 - 2.0 * truncation))))
+    keep1 = max(1, int(round(height * (1.0 - 2.0 * truncation))))
+    mask = np.zeros((width, height), dtype=np.float32)
+    lo0 = (width - keep0) // 2
+    lo1 = (height - keep1) // 2
+    mask[lo0:lo0 + keep0, lo1:lo1 + keep1] = 1.0
+
+    result = source.copy()
+    for iz in range(depth):
+        spectrum = np.fft.fftshift(np.fft.fft2(source[:, :, iz]))
+        truncated = np.fft.ifft2(np.fft.ifftshift(spectrum * mask))
+        # MR images are magnitude data, so take the modulus of the result.
+        truncated = np.abs(truncated).astype(np.float32)
+        result[:, :, iz] = (1.0 - strength) * source[:, :, iz] + strength * truncated
+
+    if np.issubdtype(intensity_array.dtype, np.integer):
+        info = np.iinfo(intensity_array.dtype)
+        result = np.clip(np.round(result), info.min, info.max)
+    return result.astype(intensity_array.dtype, copy=False)
+
+
 __all__ = [
     "add_gaussian_noise",
     "apply_partial_volume_effect",
@@ -593,4 +936,7 @@ __all__ = [
     "add_motion_artifact",
     "add_poisson_noise",
     "add_bias_field_shading",
+    "add_rician_noise",
+    "add_mri_geometric_distortion",
+    "add_gibbs_ringing",
 ]

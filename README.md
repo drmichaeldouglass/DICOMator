@@ -25,8 +25,8 @@ Blender add-on that converts selected mesh objects into DICOM outputs for synthe
   - Optional evaluation of modifiers/shape keys/armatures during voxelization
   - BVH-based +Z column fill for solid voxelization with consistent grid dimensions
 - **Synthetic artifact suite**
-  - CT modality exposes Gaussian noise, scanner point-spread partial volume, projection-like metal streaks, detector-channel rings, motion blur, and quantum noise
-  - MRI modalities expose Gaussian noise, coil-shaped bias-field shading, and motion blur tuned for MR appearance
+  - CT modality exposes Gaussian noise, scanner point-spread partial volume, projection-domain metal streaks (Radon forward/back-projection with photon starvation and beam hardening), detector-channel rings, motion blur, and quantum (Poisson) noise
+  - MRI modalities expose Rician noise, coil-shaped bias-field shading, geometric distortion (gradient non-linearity and B0 off-resonance), Gibbs/truncation ringing, and motion blur tuned for MR appearance
   - Artifact order matches the UI and adapts per modality so effects apply consistently
 - **Patient and orientation metadata**
   - Patient Name, MRN (Patient ID), Sex, and Patient Position (HFS/FFS/HFP/FFP/HFDR/HFDL/FFDR/FFDL)
@@ -110,8 +110,8 @@ Dependency note:
    - **Series** – Set the series description, patient name, MRN, sex, and patient position in one place.
    - **Estimate** – Inspect selection size, estimated grid resolution, voxel count, memory, and DRR detector dimensions.
    - **Artifacts** – Optional and collapsed by default for Image output:
-     - *CT*: Gaussian noise, partial volume, metal streaks, rings, motion, and quantum noise
-     - *MRI (T1/T2)*: Gaussian noise, coil bias-field shading, and motion
+     - *CT*: Gaussian noise, partial volume, projection-domain metal streaks, rings, motion, and quantum noise
+     - *MRI (T1/T2)*: Rician noise, coil bias-field shading, geometric distortion (gradient non-linearity + B0 off-resonance), Gibbs ringing, and motion
 3. Click **Export DICOM**.
    - For single-phase exports the mesh selection is voxelized once and written directly in HU.
    - For 4D exports the timeline advances through the configured frame range, re-voxelizing each phase inside a fixed padded bounding box so every phase shares identical grid dimensions. Each phase receives its own Series Instance UID and the series description is suffixed with the phase number and percent completion.
