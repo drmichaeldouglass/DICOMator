@@ -171,6 +171,32 @@ def test_golden_seed_regressions():
         assert np.array_equal(outputs[key], expected), f"golden mismatch for {key!r}"
 
 
+def test_gradient_only_distortion_matches_per_slice_remap():
+    """The batched gather used when no B0 field is present must equal the
+    per-slice bilinear remap it replaced."""
+    volume = _volume(shape=(20, 16, 5), seed=3, low=0, high=300).astype(np.float32)
+    out = artifacts.add_mri_geometric_distortion(
+        volume, gradient_strength=0.08, b0_strength=0.0
+    )
+
+    width, height, depth = volume.shape
+    c0 = (width - 1) / 2.0
+    c1 = (height - 1) / 2.0
+    o0, o1 = np.indices((width, height), dtype=np.float32)
+    rel0 = o0 - c0
+    rel1 = o1 - c1
+    r_max_sq = (c0 * c0 + c1 * c1) + 1e-3
+    rho_sq = (rel0 * rel0 + rel1 * rel1) / r_max_sq
+    grad_factor = (1.0 + 0.08 * rho_sq).astype(np.float32)
+    base0 = c0 + grad_factor * rel0
+    base1 = c1 + grad_factor * rel1
+    expected = np.empty_like(volume)
+    for iz in range(depth):
+        expected[:, :, iz] = artifacts._remap_bilinear(volume[:, :, iz], base0, base1, fill=0.0)
+
+    np.testing.assert_array_equal(out, expected)
+
+
 def test_ring_artifact_statistics():
     """Ring artifacts are checked statistically: the vectorized rewrite draws
     per-slice randoms in batches, which changes the RNG stream order."""

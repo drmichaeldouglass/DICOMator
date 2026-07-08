@@ -31,6 +31,9 @@ ProgressCallback = Optional[Callable[[int, int], None]]
 Bounds = Tuple[float, float, float, float, float, float]
 VoxelizeResult = Tuple[np.ndarray, Vector, Tuple[int, int, int]]
 VoxelizeGenerator = Generator[Tuple[int, int], None, VoxelizeResult]
+#: ``(bvh, world_bounds)`` pair produced by :func:`_object_geometry` /
+#: :func:`prepare_object_geometry_iter`.
+PreparedGeometry = Tuple[BVHTree, Bounds]
 
 #: Ray hits closer together than this distance (metres) are merged before
 #: entry/exit pairing. A ray grazing an edge shared by two faces reports the
@@ -52,35 +55,66 @@ def _resolve_voxel_size(voxel_size: VoxelSize | float) -> Tuple[float, float, fl
     return (float(voxel_size),) * 3
 
 
+def _world_vertex_array(mesh: bpy.types.Mesh, matrix_world) -> np.ndarray:
+    """Return the mesh vertices as an ``(N, 3)`` world-space float64 array.
+
+    Uses ``foreach_get`` plus one NumPy matrix multiply instead of a Python
+    loop over vertices, which is dramatically faster on dense meshes. The
+    returned buffer is caller-owned, so it stays valid after
+    ``to_mesh_clear()``.
+    """
+    count = len(mesh.vertices)
+    coords = np.empty(count * 3, dtype=np.float64)
+    mesh.vertices.foreach_get("co", coords)
+    matrix = np.array(matrix_world, dtype=np.float64)
+    return coords.reshape(count, 3) @ matrix[:3, :3].T + matrix[:3, 3]
+
+
+def _mesh_polygon_indices(mesh: bpy.types.Mesh) -> list[list[int]]:
+    """Return per-polygon vertex index lists via ``foreach_get`` batch reads."""
+    poly_count = len(mesh.polygons)
+    if poly_count == 0:
+        return []
+    loop_start = np.empty(poly_count, dtype=np.int32)
+    mesh.polygons.foreach_get("loop_start", loop_start)
+    loop_verts = np.empty(len(mesh.loops), dtype=np.int32)
+    mesh.loops.foreach_get("vertex_index", loop_verts)
+    return [segment.tolist() for segment in np.split(loop_verts, loop_start[1:])]
+
+
 def _object_geometry(
     obj: Object,
     depsgraph: Optional[bpy.types.Depsgraph] = None,
     *,
     apply_modifiers: bool = False,
-) -> Optional[Tuple[BVHTree, Tuple[float, float, float, float]]]:
-    """Build a world-space BVH for ``obj`` plus its world-space XY extent.
+) -> Optional[PreparedGeometry]:
+    """Build a world-space BVH for ``obj`` plus its world-space bounds.
 
-    Returns ``None`` when the (evaluated) mesh has no vertices or faces.
+    Returns ``(bvh, (min_x, max_x, min_y, max_y, min_z, max_z))``, or ``None``
+    when the (evaluated) mesh has no vertices or faces.
     """
     if apply_modifiers and depsgraph is not None:
         obj_eval = obj.evaluated_get(depsgraph)
         mesh = obj_eval.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
         try:
-            verts_world = [obj_eval.matrix_world @ vert.co for vert in mesh.vertices]
-            polygons = [list(poly.vertices) for poly in mesh.polygons]
+            verts_world = _world_vertex_array(mesh, obj_eval.matrix_world)
+            polygons = _mesh_polygon_indices(mesh)
         finally:
             obj_eval.to_mesh_clear()
     else:
         mesh = obj.data
-        verts_world = [obj.matrix_world @ vert.co for vert in mesh.vertices]
-        polygons = [list(poly.vertices) for poly in mesh.polygons]
-    if not verts_world or not polygons:
+        verts_world = _world_vertex_array(mesh, obj.matrix_world)
+        polygons = _mesh_polygon_indices(mesh)
+    if verts_world.size == 0 or not polygons:
         return None
-    min_x = min(vert.x for vert in verts_world)
-    max_x = max(vert.x for vert in verts_world)
-    min_y = min(vert.y for vert in verts_world)
-    max_y = max(vert.y for vert in verts_world)
-    return BVHTree.FromPolygons(verts_world, polygons), (min_x, max_x, min_y, max_y)
+    mins = verts_world.min(axis=0)
+    maxs = verts_world.max(axis=0)
+    bounds: Bounds = (
+        float(mins[0]), float(maxs[0]),
+        float(mins[1]), float(maxs[1]),
+        float(mins[2]), float(maxs[2]),
+    )
+    return BVHTree.FromPolygons(verts_world.tolist(), polygons), bounds
 
 
 def _objects_world_bounds(
@@ -97,16 +131,18 @@ def _objects_world_bounds(
             obj_eval = obj.evaluated_get(depsgraph)
             mesh = obj_eval.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
             try:
-                for vertex in mesh.vertices:
-                    world_vertex = obj_eval.matrix_world @ vertex.co
-                    min_x = min(min_x, world_vertex.x)
-                    max_x = max(max_x, world_vertex.x)
-                    min_y = min(min_y, world_vertex.y)
-                    max_y = max(max_y, world_vertex.y)
-                    min_z = min(min_z, world_vertex.z)
-                    max_z = max(max_z, world_vertex.z)
+                verts_world = _world_vertex_array(mesh, obj_eval.matrix_world)
             finally:
                 obj_eval.to_mesh_clear()
+            if verts_world.size:
+                mins = verts_world.min(axis=0)
+                maxs = verts_world.max(axis=0)
+                min_x = min(min_x, float(mins[0]))
+                max_x = max(max_x, float(maxs[0]))
+                min_y = min(min_y, float(mins[1]))
+                max_y = max(max_y, float(maxs[1]))
+                min_z = min(min_z, float(mins[2]))
+                max_z = max(max_z, float(maxs[2]))
         else:
             for corner in obj.bound_box:
                 world_corner = obj.matrix_world @ Vector(corner)
@@ -133,6 +169,7 @@ def _voxelize_objects_iter(
     accumulate: bool,
     label: str,
     messages: Optional[list[str]] = None,
+    prepared: Optional[dict[str, PreparedGeometry]] = None,
 ) -> VoxelizeGenerator:
     """Shared ray-casting voxelizer.
 
@@ -143,6 +180,11 @@ def _voxelize_objects_iter(
 
     When ``messages`` is provided, human-readable warnings about skipped
     objects are appended to it so callers can surface them in the UI.
+
+    ``prepared`` optionally supplies pre-built world-space geometry (from
+    :func:`prepare_object_geometry_iter`) keyed by object name, avoiding a
+    second mesh evaluation and BVH build; objects missing from the cache are
+    treated as skipped (they had no usable geometry when prepared).
     """
     if not objects:
         raise ValueError(f"No objects provided for {label} voxelization")
@@ -184,12 +226,15 @@ def _voxelize_objects_iter(
     skipped_names: list[str] = []
     object_data: list[tuple[BVHTree, float, int, int, int, int]] = []
     for obj in sorted_objects:
-        geometry = _object_geometry(obj, depsgraph=depsgraph, apply_modifiers=apply_modifiers)
+        if prepared is not None:
+            geometry = prepared.get(obj.name)
+        else:
+            geometry = _object_geometry(obj, depsgraph=depsgraph, apply_modifiers=apply_modifiers)
         if geometry is None:
             skipped_names.append(obj.name)
             _skip(f"Skipped '{obj.name}' during {label} voxelization: mesh has no faces")
             continue
-        bvh, (obj_min_x, obj_max_x, obj_min_y, obj_max_y) = geometry
+        bvh, (obj_min_x, obj_max_x, obj_min_y, obj_max_y, _obj_min_z, _obj_max_z) = geometry
         # Rays outside the object's XY footprint cannot intersect it, so only
         # the covered column range (plus one voxel of slack) is visited. For
         # small objects inside a large grid this skips almost all columns.
@@ -211,8 +256,8 @@ def _voxelize_objects_iter(
 
     print(f"Voxelizing {len(object_data)} object(s) into {width}x{height}x{depth} {label} grid...")
 
-    xs = min_x + (np.arange(width) + 0.5) * vx
-    ys = min_y + (np.arange(height) + 0.5) * vy
+    xs = [float(min_x + (index + 0.5) * vx) for index in range(width)]
+    ys = [float(min_y + (index + 0.5) * vy) for index in range(height)]
     z0_center = min_z + 0.5 * vz
     inv_dz = 1.0 / vz
     ray_dir = Vector((0.0, 0.0, 1.0))
@@ -227,14 +272,15 @@ def _voxelize_objects_iter(
     processed = 0
 
     for bvh, value, ix0, ix1, iy0, iy1 in object_data:
+        ray_cast = bvh.ray_cast
         for ix in range(ix0, ix1 + 1):
-            x_world = float(xs[ix])
+            x_world = xs[ix]
             for iy in range(iy0, iy1 + 1):
-                y_world = float(ys[iy])
+                y_world = ys[iy]
                 origin_ray = Vector((x_world, y_world, ray_start_z))
                 hits_z: list[float] = []
                 while True:
-                    location, _normal, _face_index, _distance = bvh.ray_cast(origin_ray, ray_dir, max_dist)
+                    location, _normal, _face_index, _distance = ray_cast(origin_ray, ray_dir, max_dist)
                     if location is None:
                         break
                     hits_z.append(location.z)
@@ -269,6 +315,29 @@ def _voxelize_objects_iter(
     return grid, origin, (width, height, depth)
 
 
+def prepare_object_geometry_iter(
+    objects: Sequence[Object],
+    depsgraph: Optional[bpy.types.Depsgraph],
+    *,
+    apply_modifiers: bool,
+) -> Generator[Tuple[int, int], None, dict[str, PreparedGeometry]]:
+    """Evaluate each object's world-space BVH and bounds exactly once.
+
+    Yields ``(objects_done, total_objects)`` and returns a dict keyed by
+    object name; objects without usable geometry are omitted. The cache is
+    only valid for the frame/depsgraph it was built with — callers must not
+    reuse it across animation frames.
+    """
+    prepared: dict[str, PreparedGeometry] = {}
+    total = max(1, len(objects))
+    for index, obj in enumerate(objects, start=1):
+        geometry = _object_geometry(obj, depsgraph=depsgraph, apply_modifiers=apply_modifiers)
+        if geometry is not None:
+            prepared[obj.name] = geometry
+        yield index, total
+    return prepared
+
+
 def _drive(generator: VoxelizeGenerator, progress_callback: ProgressCallback) -> VoxelizeResult:
     """Run a voxelize generator to completion, forwarding progress."""
     while True:
@@ -290,12 +359,14 @@ def voxelize_objects_to_hu_iter(
     depsgraph: Optional[bpy.types.Depsgraph] = None,
     background_value: float = AIR_DENSITY,
     messages: Optional[list[str]] = None,
+    prepared: Optional[dict[str, PreparedGeometry]] = None,
 ) -> VoxelizeGenerator:
     """Generator variant of :func:`voxelize_objects_to_hu`.
 
     ``background_value`` fills voxels not covered by any mesh. CT exports use
     air (-1000 HU); MR exports should pass 0 (signal void) instead.
-    ``messages`` collects skipped-object warnings for the caller's UI.
+    ``messages`` collects skipped-object warnings for the caller's UI;
+    ``prepared`` reuses geometry from :func:`prepare_object_geometry_iter`.
     """
     def hu_for_object(obj: Object) -> float:
         hu_value = float(getattr(obj, "dicomator_hu", DEFAULT_DENSITY))
@@ -314,6 +385,7 @@ def voxelize_objects_to_hu_iter(
         accumulate=False,
         label="HU",
         messages=messages,
+        prepared=prepared,
     )
 
 
@@ -358,6 +430,7 @@ def voxelize_objects_to_dose_iter(
     depsgraph: Optional[bpy.types.Depsgraph] = None,
     accumulate: bool = True,
     messages: Optional[list[str]] = None,
+    prepared: Optional[dict[str, PreparedGeometry]] = None,
 ) -> VoxelizeGenerator:
     """Generator variant of :func:`voxelize_objects_to_dose`."""
     def dose_for_object(obj: Object) -> float:
@@ -377,6 +450,7 @@ def voxelize_objects_to_dose_iter(
         accumulate=accumulate,
         label="dose",
         messages=messages,
+        prepared=prepared,
     )
 
 
@@ -438,6 +512,7 @@ def voxelize_mesh(
 
 
 __all__ = [
+    "prepare_object_geometry_iter",
     "voxelize_mesh",
     "voxelize_objects_to_hu",
     "voxelize_objects_to_hu_iter",
