@@ -230,9 +230,12 @@ def export_rtdose_to_dicom(
     # row-major convention (rows first).
     # Clip before casting: float32 precision on a uint32-range scale can
     # push values a fraction above uint32_max, which silently wraps on
-    # cast. Clamping keeps the maximum dose as 0xFFFFFFFF.
-    uint32_max_value = np.iinfo(np.uint32).max
-    scaled = np.clip(dose_f32 / dose_grid_scaling, 0.0, uint32_max_value)
+    # cast. The clip bound itself must be a float32 value that does not
+    # exceed uint32_max — uint32_max is not representable in float32 and
+    # rounds up to 2**32, which would defeat the clamp and wrap the
+    # maximum-dose voxels to 0.
+    safe_uint32_max = np.nextafter(np.float32(np.iinfo(np.uint32).max), np.float32(0.0))
+    scaled = np.clip(dose_f32 / np.float32(dose_grid_scaling), np.float32(0.0), safe_uint32_max)
     pixel_frames = np.ascontiguousarray(
         scaled.astype(np.uint32).transpose(2, 1, 0)
     )

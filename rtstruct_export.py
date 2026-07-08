@@ -352,11 +352,11 @@ def export_rtstruct_to_dicom_iter(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Resolve voxel dimensions.
+    # Resolve the voxel Z dimension (only Z is needed for contour planes).
     if isinstance(voxel_size, (list, tuple)) and len(voxel_size) == 3:
-        vx_m, vy_m, vz_m = (float(v) for v in voxel_size)
+        vz_m = float(voxel_size[2])
     else:
-        vx_m = vy_m = vz_m = float(voxel_size)
+        vz_m = float(voxel_size)
 
     # Z positions at the voxel centre for each slice (metres).
     bbox_min_z_m = float(bbox_min.z)

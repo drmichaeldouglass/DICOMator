@@ -1,0 +1,8 @@
+# Minimal lint gate: syntax errors and pyflakes findings only, so lint stays a
+# correctness check rather than a style-churn generator.
+target-version = "py311"
+line-length = 120
+exclude = ["wheels"]
+
+[lint]
+select = ["E9", "F"]
