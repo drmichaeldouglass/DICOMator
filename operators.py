@@ -524,7 +524,7 @@ class MESH_OT_export_dicom(Operator):
         self._job = self._export_job(context, config)
         window_manager = context.window_manager
         window_manager.progress_begin(0, 1)
-        window_manager.status_text_set("DICOMator: exporting... (ESC to cancel)")
+        context.workspace.status_text_set("DICOMator: exporting... (ESC to cancel)")
         self._timer = window_manager.event_timer_add(0.02, window=context.window)
         window_manager.modal_handler_add(self)
         MESH_OT_export_dicom._running = True
@@ -570,7 +570,7 @@ class MESH_OT_export_dicom(Operator):
             # Closing the generator runs its finally blocks (frame restore).
             self._job.close()
             self._job = None
-        window_manager.status_text_set(None)
+        context.workspace.status_text_set(None)
         window_manager.progress_end()
 
     def _export_job(self, context: bpy.types.Context, config: dict) -> Generator[float, None, dict[str, str]]:
