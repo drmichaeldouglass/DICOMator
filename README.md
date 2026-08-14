@@ -1,5 +1,9 @@
 # DICOMator
 
+<p align="center">
+  <img src="docs/assets/dicomator-logo.png" alt="DICOMator voxel cube logo" width="256" />
+</p>
+
 Blender add-on that converts selected mesh objects into DICOM outputs for synthetic CT/MR image series, camera-based digitally reconstructed radiographs (DRRs), RT Dose grids, and RT Structure Sets. It voxelizes the active mesh selection directly into modality-appropriate intensities, supports single-phase or 4D acquisitions, and layers in synthetic artifacts tailored to the chosen modality for training or visualization workflows.
 
 > [!WARNING]
