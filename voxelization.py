@@ -45,6 +45,29 @@ _HIT_MERGE_TOLERANCE_M = 1e-5
 #: Number of voxel columns processed between progress yields.
 _PROGRESS_CHUNK = 2048
 
+#: Hard cap on surface crossings recorded for one voxel column. A closed mesh
+#: produces a handful; a runaway count means the marching ray stopped making
+#: progress, so the column is abandoned rather than looping forever.
+_MAX_COLUMN_HITS = 4096
+
+#: Smallest absolute distance (metres) a restarted ray is pushed past the face
+#: it just hit.
+_RAY_RESTART_EPSILON_M = 1e-6
+
+
+def restart_z_past_hit(hit_z: float) -> float:
+    """Return a Z just past ``hit_z`` so a restarted +Z ray clears that face.
+
+    ``mathutils.Vector`` stores single-precision floats, whose spacing already
+    swallows a fixed 1e-6 m nudge once ``|z|`` reaches 32 metres: the restarted
+    ray would round straight back onto the face it just hit and report the same
+    crossing forever. Scaling the step with the coordinate magnitude keeps it
+    ahead of the surface anywhere in the scene, while staying well below the
+    finest voxel spacing the add-on offers (0.1 mm).
+    """
+
+    return hit_z + max(_RAY_RESTART_EPSILON_M, abs(hit_z) * 1e-6)
+
 
 def _resolve_voxel_size(voxel_size: VoxelSize | float) -> Tuple[float, float, float]:
     """Return ``(vx, vy, vz)`` in metres from a scalar or 3-sequence."""
@@ -266,7 +289,6 @@ def _voxelize_objects_iter(
     ray_dir = Vector((0.0, 0.0, 1.0))
     ray_start_z = min_z - 2.0 * vz
     max_dist = (max_z - min_z) + 4.0 * vz
-    epsilon = 1e-6
 
     total_columns = max(
         1,
@@ -281,8 +303,10 @@ def _voxelize_objects_iter(
         ray_cast = bvh.ray_cast
         odd_columns = 0
         recovered_columns = 0
+        stalled_rays = 0
 
         def _merged_hits(x_world: float, y_world: float) -> list[float]:
+            nonlocal stalled_rays
             origin_ray = Vector((x_world, y_world, ray_start_z))
             hits_z: list[float] = []
             while True:
@@ -292,7 +316,18 @@ def _voxelize_objects_iter(
                 if location is None:
                     break
                 hits_z.append(location.z)
-                origin_ray = Vector((location.x, location.y, location.z + epsilon))
+                if len(hits_z) >= _MAX_COLUMN_HITS:
+                    stalled_rays += 1
+                    break
+                next_origin = Vector(
+                    (location.x, location.y, restart_z_past_hit(float(location.z)))
+                )
+                if next_origin.z <= origin_ray.z:
+                    # The restart point rounded back onto the face just hit, so
+                    # the next cast would report the same crossing forever.
+                    stalled_rays += 1
+                    break
+                origin_ray = next_origin
             hits_z.sort()
             merged: list[float] = []
             for hit_z in hits_z:
@@ -346,6 +381,14 @@ def _voxelize_objects_iter(
                 processed += 1
                 if processed % _PROGRESS_CHUNK == 0:
                     yield processed, total_columns
+
+        if stalled_rays:
+            _skip(
+                f"'{object_name}' abandoned {stalled_rays} ray(s) during {label} "
+                "voxelization after they stopped advancing past a surface; the "
+                "affected columns may be incompletely filled (check for "
+                "coincident faces or geometry far from the world origin)"
+            )
 
         if odd_columns:
             unresolved = odd_columns - recovered_columns
@@ -562,6 +605,7 @@ def voxelize_mesh(
 
 __all__ = [
     "prepare_object_geometry_iter",
+    "restart_z_past_hit",
     "voxelize_mesh",
     "voxelize_objects_to_hu",
     "voxelize_objects_to_hu_iter",

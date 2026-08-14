@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import math
 from datetime import datetime
 
 import numpy as np
@@ -220,6 +221,58 @@ def truncate_dicom_text(value: str | None, max_bytes: int, default: str = "") ->
     if len(encoded) <= max_bytes:
         return text
     return encoded[:max_bytes].decode("utf-8", errors="ignore").rstrip()
+
+
+def format_ds(value: float) -> str:
+    """Return ``value`` as a DICOM DS (Decimal String) of at most 16 bytes.
+
+    DICOM limits every Decimal String value to 16 characters (PS3.5 Table
+    6.2-1), but Python's shortest round-trip float representation regularly
+    needs more: a voxel centre at -122.75 mm reprs as ``-122.74999999999999``
+    (19 characters) and a 1.3 mm pixel spacing as ``1.3000000000000003`` (18).
+    Writing those verbatim produces files that strict parsers and treatment
+    planning systems reject, so the value is re-formatted here to the most
+    precise fixed-point (or, for very small/large magnitudes, scientific)
+    representation that fits. Roughly 14 significant digits survive, which is
+    far more than millimetre geometry needs.
+    """
+
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("DS values must be finite")
+
+    text = repr(number)
+    if len(text) <= 16:
+        return text
+
+    sign_chars = 1 if number < 0.0 else 0
+    exponent = math.log10(abs(number))
+    # Below 1e-4 the fixed-point form spends its budget on leading zeros, and
+    # above ~1e14 it can no longer hold a fractional digit; both are better
+    # served by scientific notation.
+    if exponent < -4.0 or exponent >= (14 - sign_chars):
+        digits = 10 - sign_chars
+        scientific = f"{number:.{digits}e}"
+        if len(scientific) > 16:
+            # Three-digit exponents (e.g. 1e-200) need one more character.
+            scientific = f"{number:.{digits - 1}e}"
+        return scientific
+
+    integer_digits = int(math.floor(exponent)) if exponent >= 1.0 else 0
+    decimals = max(0, 14 - sign_chars - integer_digits)
+    fixed = f"{number:.{decimals}f}"
+    while len(fixed) > 16 and decimals > 0:
+        # Rounding can carry into an extra integer digit, e.g. 9.999999999999998
+        # formats as '10.00000000000000'; give the carry its character back.
+        decimals = max(0, decimals - (len(fixed) - 16))
+        fixed = f"{number:.{decimals}f}"
+    return fixed
+
+
+def format_ds_sequence(values) -> list[str]:
+    """Return ``values`` as a list of conformant DS strings."""
+
+    return [format_ds(value) for value in values]
 
 
 def truncate_sh(value: str | None, default: str = "") -> str:
@@ -453,6 +506,8 @@ __all__ = [
     "get_material_intensity",
     "apply_synthetic_metadata",
     "estimate_peak_memory_bytes",
+    "format_ds",
+    "format_ds_sequence",
     "normalize_dicom_date",
     "resolve_positive_voxel_size",
     "sanitize_dicom_text",

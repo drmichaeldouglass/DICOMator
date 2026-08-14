@@ -40,6 +40,8 @@ from .constants import (
     RTDOSE_SOP_CLASS,
     RTPLAN_SOP_CLASS,
     apply_synthetic_metadata,
+    format_ds,
+    format_ds_sequence,
     normalize_dicom_date,
     resolve_positive_voxel_size,
     truncate_lo,
@@ -263,13 +265,27 @@ def export_rtdose_to_dicom(
 
     # Compute the linear scaling factor.  Each pixel encodes:
     #   actual_dose = pixel_value × DoseGridScaling
+    #
+    # DoseGridScaling has VR DS, so the factor that is written to the file is
+    # limited to 16 characters and generally cannot hold the full float
+    # precision of ``max_dose / uint32_max``.  The encoded factor is therefore
+    # resolved *first* and the pixel values are derived from it, so that
+    # ``pixel_value × DoseGridScaling`` reproduces the intended dose instead
+    # of the un-representable ideal factor.
     max_dose = float(dose_f32.max())
     uint32_max = float(np.iinfo(np.uint32).max)  # 4 294 967 295
     if max_dose > 0.0:
-        dose_grid_scaling = max_dose / uint32_max
+        dose_grid_scaling_text = format_ds(max_dose / uint32_max)
+        dose_grid_scaling = float(dose_grid_scaling_text)
+        if dose_grid_scaling <= 0.0 or max_dose / dose_grid_scaling > uint32_max:
+            # The DS rounding went down, which would push the peak voxel past
+            # the uint32 range; step the last retained digit up instead.
+            dose_grid_scaling_text = format_ds(dose_grid_scaling * (1.0 + 1e-9))
+            dose_grid_scaling = float(dose_grid_scaling_text)
     else:
         # Grid is all-zero; use 1.0 Gy/count as a nominal scale so the
         # file round-trips correctly (all pixels remain zero).
+        dose_grid_scaling_text = format_ds(1.0)
         dose_grid_scaling = 1.0
 
     # Encode all frames into a (D × H × W) uint32 array: transpose the
@@ -382,18 +398,20 @@ def export_rtdose_to_dicom(
         # ImagePositionPatient is the center of the first voxel (PS3.3
         # C.7.6.2.1.1), not the grid corner.  Offset by half a voxel so the
         # dose grid aligns with the co-exported CT/RT Structure Set.
-        ds.ImagePositionPatient = [
-            float(bbox_min_mm.x + 0.5 * vx_mm),
-            float(bbox_min_mm.y + 0.5 * vy_mm),
-            float(bbox_min_mm.z + 0.5 * vz_mm),
-        ]
-        ds.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-        ds.PixelSpacing = [float(vy_mm), float(vx_mm)]
-        ds.SliceThickness = float(vz_mm)
+        ds.ImagePositionPatient = format_ds_sequence((
+            bbox_min_mm.x + 0.5 * vx_mm,
+            bbox_min_mm.y + 0.5 * vy_mm,
+            bbox_min_mm.z + 0.5 * vz_mm,
+        ))
+        ds.ImageOrientationPatient = format_ds_sequence((1.0, 0.0, 0.0, 0.0, 1.0, 0.0))
+        ds.PixelSpacing = format_ds_sequence((vy_mm, vx_mm))
+        ds.SliceThickness = format_ds(vz_mm)
 
         # GridFrameOffsetVector: Z offsets in mm for each frame relative to
         # ImagePositionPatient Z.  Frame 0 is at offset 0.
-        ds.GridFrameOffsetVector = [float(iz * vz_mm) for iz in range(depth)]
+        ds.GridFrameOffsetVector = format_ds_sequence(
+            iz * vz_mm for iz in range(depth)
+        )
 
         # --- Pixel dimensions ---
         ds.Rows = int(height)
@@ -409,7 +427,7 @@ def export_rtdose_to_dicom(
         ds.DoseUnits = "GY"
         ds.DoseType = resolved_dose_type
         ds.DoseSummationType = summation_type
-        ds.DoseGridScaling = float(dose_grid_scaling)
+        ds.DoseGridScaling = dose_grid_scaling_text
         if plan_sop_instance_uid is not None:
             ref_plan = Dataset()
             ref_plan.ReferencedSOPClassUID = RTPLAN_SOP_CLASS

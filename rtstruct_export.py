@@ -584,7 +584,6 @@ def export_rtstruct_to_dicom_iter(
     patient_id: str = "12345678",
     patient_sex: str = "M",
     patient_birth_date: str = "",
-    patient_position: str = "HFS",
     series_description: str = "RT Structure Set from DICOMator",
     study_id: str = "1",
     accession_number: str = "1",
@@ -625,8 +624,10 @@ def export_rtstruct_to_dicom_iter(
         Absolute path to the output directory.
     depsgraph:
         Evaluated dependency graph from the current Blender context.
-    patient_name, patient_id, patient_sex, patient_position:
-        Standard DICOM patient module attributes.
+    patient_name, patient_id, patient_sex, patient_birth_date:
+        Standard DICOM Patient module attributes. Patient Position is
+        deliberately absent: an RT Structure Set uses the RT Series module
+        (PS3.3 C.8.8.1), which has no Patient Position attribute.
     series_description:
         Human-readable label placed in ``SeriesDescription`` /
         ``StructureSetLabel``.

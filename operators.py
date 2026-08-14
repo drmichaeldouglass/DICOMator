@@ -710,6 +710,20 @@ class DICOMATOR_OT_export_dicom(Operator):
             context.window_manager.progress_update(float(progress))
         return {'RUNNING_MODAL'}
 
+    def cancel(self, context: bpy.types.Context) -> None:  # pragma: no cover - Blender runtime
+        """Clean up when Blender aborts the modal run from outside.
+
+        Blender calls this when the modal handler is removed without the
+        operator finishing (loading another .blend, closing the window). The
+        job, timer, and staging directory would otherwise leak, and the
+        class-level ``_running`` flag would stay set and keep :meth:`poll`
+        returning False for the rest of the session.
+        """
+
+        if not DICOMATOR_OT_export_dicom._running and self._job is None:
+            return
+        self._finish(context, commit=False)
+
     def _finish(
         self,
         context: bpy.types.Context,
@@ -1164,7 +1178,6 @@ class DICOMATOR_OT_export_dicom(Operator):
                             patient_id=props.patient_id,
                             patient_sex=props.patient_sex,
                             patient_birth_date=getattr(props, "patient_birth_date", ""),
-                            patient_position=props.patient_position,
                             series_description=f"{phase_description} - RT Structure",
                             study_id=getattr(props, "study_id", "1"),
                             accession_number=getattr(props, "accession_number", "1"),
