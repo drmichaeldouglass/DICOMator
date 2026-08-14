@@ -56,9 +56,28 @@ jobs:
             --strip-components=1 \
             -C "$HOME/blender-${{ matrix.blender-version }}"
 
+      - name: Validate and build extension package
+        if: matrix.blender-version == '5.2.0'
+        run: |
+          "$HOME/blender-${{ matrix.blender-version }}/blender" \
+            --command extension validate
+          "$HOME/blender-${{ matrix.blender-version }}/blender" \
+            --command extension build \
+            --output-filepath /tmp/dicomator.zip
+
+      - name: Prepare bundled dependency for source-tree smoke test
+        run: |
+          python -m pip install \
+            --no-deps \
+            --target /tmp/dicomator-python \
+            wheels/pydicom-3.0.1-py3-none-any.whl
+
       - name: Register add-on in Blender
         run: |
           "$HOME/blender-${{ matrix.blender-version }}/blender" \
             --background \
             --factory-startup \
+            --python-use-system-env \
             --python tests/blender_smoke.py
+        env:
+          PYTHONPATH: /tmp/dicomator-python

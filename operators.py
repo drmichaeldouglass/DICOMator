@@ -487,10 +487,10 @@ def _finalize_atomic_output_directory(
     os.replace(staging_dir, final_output_dir)
 
 
-class MESH_OT_export_dicom(Operator):
+class DICOMATOR_OT_export_dicom(Operator):
     """Export selected meshes to enabled DICOM outputs (ESC cancels)."""
 
-    bl_idname = "mesh.export_dicom"
+    bl_idname = "dicomator.export_dicom"
     bl_label = "Export to DICOM"
     bl_options = {'REGISTER'}
 
@@ -511,7 +511,7 @@ class MESH_OT_export_dicom(Operator):
         )
 
     def execute(self, context: bpy.types.Context):  # pragma: no cover - Blender runtime
-        if MESH_OT_export_dicom._running:
+        if DICOMATOR_OT_export_dicom._running:
             self.report({'ERROR'}, "A DICOM export is already running")
             return {'CANCELLED'}
 
@@ -673,7 +673,7 @@ class MESH_OT_export_dicom(Operator):
             window_manager.progress_end()
             self.report({'ERROR'}, f"Cannot start background export: {exc}")
             return {'CANCELLED'}
-        MESH_OT_export_dicom._running = True
+        DICOMATOR_OT_export_dicom._running = True
         return {'RUNNING_MODAL'}
 
     def modal(self, context: bpy.types.Context, event: bpy.types.Event):  # pragma: no cover - Blender runtime
@@ -716,7 +716,7 @@ class MESH_OT_export_dicom(Operator):
         *,
         commit: bool,
     ) -> str | None:  # pragma: no cover - Blender runtime
-        MESH_OT_export_dicom._running = False
+        DICOMATOR_OT_export_dicom._running = False
         window_manager = context.window_manager
         if self._timer is not None:
             window_manager.event_timer_remove(self._timer)
@@ -1199,4 +1199,4 @@ class MESH_OT_export_dicom(Operator):
         return {'success': f"Successfully exported {num_phases} phase(s) [{types_label}] to {final_output_dir}"}
 
 
-__all__ = ["MESH_OT_export_dicom"]
+__all__ = ["DICOMATOR_OT_export_dicom"]

@@ -4,6 +4,3 @@
 
 # macOS metadata
 .DS_Store
-
-# Extracted pydicom wheel (generated at runtime by constants.py)
-wheels/*_extracted/

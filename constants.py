@@ -3,13 +3,7 @@ from __future__ import annotations
 
 import importlib
 import logging
-import os
-import shutil
-import sys
-import tempfile
-import zipfile
 from datetime import datetime
-from pathlib import Path
 
 import numpy as np
 
@@ -392,7 +386,7 @@ def ensure_pydicom_available(*, force_retry: bool = False) -> bool:
     """Import ``pydicom`` on demand and cache the resolved module globals.
 
     The result (including failure) is cached; pass ``force_retry=True`` to
-    attempt the import again after e.g. installing pydicom manually.
+    attempt the import again after the Python environment changes.
     """
 
     global PYDICOM_AVAILABLE
@@ -410,53 +404,6 @@ def ensure_pydicom_available(*, force_retry: bool = False) -> bool:
         return False
 
     _PYDICOM_IMPORT_ATTEMPTED = True
-
-    # Wheels are zip archives; pydicom uses open() on __file__-relative paths
-    # (e.g. data/urls.json), which fails when the module lives inside a zip.
-    # Extract the wheel to a real directory alongside the wheel file so that
-    # normal filesystem I/O works correctly.
-    #
-    # Extraction is strictly best-effort: the extension directory may be
-    # read-only (system-wide installs), the archive may be corrupt, or two
-    # Blender instances may race on the same directory. Blender >= 4.2
-    # normally installs manifest-declared wheels itself, so on any failure we
-    # fall through to the plain import below instead of breaking add-on
-    # registration.
-    _wheels_dir = Path(__file__).parent / "wheels"
-    if _wheels_dir.is_dir():
-        for _whl in _wheels_dir.glob("pydicom*.whl"):
-            _extract_dir = _whl.parent / (_whl.stem + "_extracted")
-            _complete_marker = _extract_dir / ".dicomator-complete"
-            _temporary_dir = None
-            try:
-                if not _complete_marker.is_file():
-                    if _extract_dir.exists():
-                        shutil.rmtree(_extract_dir)
-                    _temporary_dir = Path(tempfile.mkdtemp(
-                        prefix=f".{_whl.stem}-",
-                        dir=str(_whl.parent),
-                    ))
-                    with zipfile.ZipFile(_whl) as _zf:
-                        _zf.extractall(_temporary_dir)
-                    (_temporary_dir / ".dicomator-complete").write_text(
-                        "complete\n", encoding="utf-8"
-                    )
-                    try:
-                        os.replace(_temporary_dir, _extract_dir)
-                    except OSError:
-                        # Another Blender instance completed the same atomic
-                        # extraction first. Use its verified directory.
-                        if not _complete_marker.is_file():
-                            raise
-            except Exception:
-                LOGGER.warning("Could not extract bundled wheel %s", _whl, exc_info=True)
-                continue
-            finally:
-                if _temporary_dir is not None and _temporary_dir.exists():
-                    shutil.rmtree(_temporary_dir, ignore_errors=True)
-            _extract_str = str(_extract_dir)
-            if _extract_str not in sys.path:
-                sys.path.insert(0, _extract_str)
 
     try:
         module = importlib.import_module("pydicom")
