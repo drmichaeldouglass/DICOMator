@@ -65,14 +65,14 @@ Blender add-on that converts selected mesh objects into DICOM outputs for synthe
 
 - Blender 5.1+ (Python 3.13 runtime); `blender_version_min` in the extension manifest is `5.1.0`
 - NumPy (bundled with Blender, used for grid operations)
-- pydicom 3.0.1 (bundled as an unmodified PyPI wheel and installed automatically by Blender)
+- pydicom 3.0.2 (bundled as an unmodified PyPI wheel and installed automatically by Blender)
 
 ## Blender 5.1 compatibility
 
 - Targets the Blender 5.1 Python 3.13 runtime (VFX Platform 2026).
 - The add-on has **no OpenVDB dependency**. Voxelization is performed with Blender mesh evaluation, `mathutils.bvhtree.BVHTree`, and NumPy arrays.
 - NumPy 2.x compatibility is maintained by using `np.asarray(...)` rather than `np.array(..., copy=False)` throughout.
-- Extension packaging advertises only the vendored `pydicom 3.0.1` (`py3-none-any`) wheel, which requires Python 3.10+ and is compatible with NumPy 2.x and Python 3.13.
+- Extension packaging advertises only the vendored `pydicom 3.0.2` (`py3-none-any`) wheel, which requires Python 3.10+ and is compatible with NumPy 2.x and Python 3.13.
 
 ## Installation
 

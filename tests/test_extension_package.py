@@ -44,10 +44,10 @@ def test_manifest_wheels_exist_and_are_valid_archives():
 
 
 def test_bundled_pydicom_wheel_matches_pypi():
-    wheel = ROOT / "wheels" / "pydicom-3.0.1-py3-none-any.whl"
+    wheel = ROOT / "wheels" / "pydicom-3.0.2-py3-none-any.whl"
 
     assert hashlib.sha256(wheel.read_bytes()).hexdigest() == (
-        "db32f78b2641bd7972096b8289111ddab01fb221610de8d7afa835eb938adb41"
+        "abf971a5440f84dbaf42c4b6758e30e62480902584f8b270b9a5d146e278a07b"
     )
 
 

@@ -70,7 +70,7 @@ jobs:
           python -m pip install \
             --no-deps \
             --target /tmp/dicomator-python \
-            wheels/pydicom-3.0.1-py3-none-any.whl
+            wheels/pydicom-3.0.2-py3-none-any.whl
 
       - name: Register add-on in Blender
         run: |
