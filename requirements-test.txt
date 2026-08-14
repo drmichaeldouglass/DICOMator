@@ -1,4 +1,4 @@
 numpy==2.2.6
 pydicom==3.0.2
-pytest==8.4.1
+pytest==9.0.3
 ruff==0.12.1
