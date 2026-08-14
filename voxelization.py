@@ -10,7 +10,7 @@ the generator to completion and forward progress to an optional callback.
 from __future__ import annotations
 
 import math
-from typing import Callable, Generator, Iterable, Optional, Sequence, Tuple
+from typing import Callable, Generator, Optional, Sequence, Tuple
 
 import bpy
 import numpy as np
@@ -23,6 +23,7 @@ from .constants import (
     DEFAULT_DENSITY,
     MAX_HU_VALUE,
     MIN_HU_VALUE,
+    resolve_positive_voxel_size,
 )
 
 VectorLike = Sequence[float]
@@ -47,12 +48,17 @@ _PROGRESS_CHUNK = 2048
 
 def _resolve_voxel_size(voxel_size: VoxelSize | float) -> Tuple[float, float, float]:
     """Return ``(vx, vy, vz)`` in metres from a scalar or 3-sequence."""
-    if isinstance(voxel_size, Iterable):
-        components = [float(component) for component in voxel_size]
-        if len(components) != 3:
-            raise ValueError("voxel_size must be a scalar or a 3-component sequence")
-        return components[0], components[1], components[2]
-    return (float(voxel_size),) * 3
+    return resolve_positive_voxel_size(voxel_size)
+
+
+def _object_priority_key(obj: Object) -> tuple[int, str, str]:
+    """Sort low-priority objects first so higher priorities overwrite them."""
+
+    return (
+        int(getattr(obj, "dicomator_priority", 0)),
+        obj.name.casefold(),
+        obj.name,
+    )
 
 
 def _world_vertex_array(mesh: bpy.types.Mesh, matrix_world) -> np.ndarray:
@@ -174,8 +180,8 @@ def _voxelize_objects_iter(
     """Shared ray-casting voxelizer.
 
     Fills a ``(width, height, depth)`` grid of ``dtype`` initialized to
-    ``background_value``. Meshes are processed in alphabetical name order;
-    when ``accumulate`` is False the alphabetically last mesh wins any
+    ``background_value``. Meshes are processed by ``dicomator_priority`` then
+    name; when ``accumulate`` is False the highest-priority mesh wins any
     overlapping voxels, when True the per-object values are summed.
 
     When ``messages`` is provided, human-readable warnings about skipped
@@ -214,17 +220,14 @@ def _voxelize_objects_iter(
 
     grid = np.full((width, height, depth), background_value, dtype=dtype)
 
-    sorted_objects = sorted(
-        objects,
-        key=lambda obj: (obj.name.casefold(), obj.name),
-    )
+    sorted_objects = sorted(objects, key=_object_priority_key)
     def _skip(reason: str) -> None:
         print(reason)
         if messages is not None:
             messages.append(reason)
 
     skipped_names: list[str] = []
-    object_data: list[tuple[BVHTree, float, int, int, int, int]] = []
+    object_data: list[tuple[str, BVHTree, float, int, int, int, int]] = []
     for obj in sorted_objects:
         if prepared is not None:
             geometry = prepared.get(obj.name)
@@ -246,7 +249,7 @@ def _voxelize_objects_iter(
             skipped_names.append(obj.name)
             _skip(f"Skipped '{obj.name}' during {label} voxelization: outside the voxel grid")
             continue
-        object_data.append((bvh, float(value_for_object(obj)), ix0, ix1, iy0, iy1))
+        object_data.append((obj.name, bvh, float(value_for_object(obj)), ix0, ix1, iy0, iy1))
 
     if not object_data:
         raise ValueError(
@@ -267,31 +270,65 @@ def _voxelize_objects_iter(
 
     total_columns = max(
         1,
-        sum((ix1 - ix0 + 1) * (iy1 - iy0 + 1) for _bvh, _value, ix0, ix1, iy0, iy1 in object_data),
+        sum(
+            (ix1 - ix0 + 1) * (iy1 - iy0 + 1)
+            for _name, _bvh, _value, ix0, ix1, iy0, iy1 in object_data
+        ),
     )
     processed = 0
 
-    for bvh, value, ix0, ix1, iy0, iy1 in object_data:
+    for object_name, bvh, value, ix0, ix1, iy0, iy1 in object_data:
         ray_cast = bvh.ray_cast
+        odd_columns = 0
+        recovered_columns = 0
+
+        def _merged_hits(x_world: float, y_world: float) -> list[float]:
+            origin_ray = Vector((x_world, y_world, ray_start_z))
+            hits_z: list[float] = []
+            while True:
+                location, _normal, _face_index, _distance = ray_cast(
+                    origin_ray, ray_dir, max_dist
+                )
+                if location is None:
+                    break
+                hits_z.append(location.z)
+                origin_ray = Vector((location.x, location.y, location.z + epsilon))
+            hits_z.sort()
+            merged: list[float] = []
+            for hit_z in hits_z:
+                if not merged or (hit_z - merged[-1]) > _HIT_MERGE_TOLERANCE_M:
+                    merged.append(hit_z)
+            return merged
+
         for ix in range(ix0, ix1 + 1):
             x_world = xs[ix]
             for iy in range(iy0, iy1 + 1):
                 y_world = ys[iy]
-                origin_ray = Vector((x_world, y_world, ray_start_z))
-                hits_z: list[float] = []
-                while True:
-                    location, _normal, _face_index, _distance = ray_cast(origin_ray, ray_dir, max_dist)
-                    if location is None:
-                        break
-                    hits_z.append(location.z)
-                    origin_ray = Vector((location.x, location.y, location.z + epsilon))
+                merged = _merged_hits(x_world, y_world)
+                if len(merged) % 2:
+                    odd_columns += 1
+                    # Retry edge/vertex-grazing rays with a small deterministic
+                    # sub-voxel offset. The first even result preserves stable
+                    # output while avoiding arbitrary unpaired surface loss.
+                    jittered_hits = None
+                    for x_fraction, y_fraction in (
+                        (0.173, 0.271),
+                        (-0.173, 0.271),
+                        (0.173, -0.271),
+                        (-0.173, -0.271),
+                    ):
+                        candidate = _merged_hits(
+                            x_world + x_fraction * vx,
+                            y_world + y_fraction * vy,
+                        )
+                        if candidate and len(candidate) % 2 == 0:
+                            jittered_hits = candidate
+                            break
+                    if jittered_hits is not None:
+                        merged = jittered_hits
+                        recovered_columns += 1
 
-                if hits_z:
-                    hits_z.sort()
-                    merged: list[float] = []
-                    for hit_z in hits_z:
-                        if not merged or (hit_z - merged[-1]) > _HIT_MERGE_TOLERANCE_M:
-                            merged.append(hit_z)
+                if merged:
                     for start in range(0, len(merged) - 1, 2):
                         lower = merged[start]
                         upper = merged[start + 1]
@@ -309,6 +346,17 @@ def _voxelize_objects_iter(
                 processed += 1
                 if processed % _PROGRESS_CHUNK == 0:
                     yield processed, total_columns
+
+        if odd_columns:
+            unresolved = odd_columns - recovered_columns
+            warning = (
+                f"'{object_name}' produced {odd_columns} odd ray-intersection "
+                f"column(s) during {label} voxelization; {recovered_columns} "
+                f"recovered with deterministic sub-voxel rays"
+            )
+            if unresolved:
+                warning += f", {unresolved} remained ambiguous and may need mesh repair"
+            _skip(warning)
 
     print(f"Voxelization complete ({label} grid).")
     yield total_columns, total_columns
@@ -402,9 +450,9 @@ def voxelize_objects_to_hu(
 ) -> VoxelizeResult:
     """Voxelize multiple objects into a single intensity grid.
 
-    Overlapping solids resolve deterministically: meshes are processed in
-    alphabetical order by name and the alphabetically last mesh wins any
-    conflicting voxels.
+    Overlapping solids resolve deterministically: meshes are processed by
+    ``dicomator_priority`` and then by name, so the highest-priority mesh wins
+    conflicting voxels and names break ties.
     """
     return _drive(
         voxelize_objects_to_hu_iter(
@@ -470,8 +518,9 @@ def voxelize_objects_to_dose(
     Reads ``obj.dicomator_dose`` (float, Gy) per object and returns a
     ``float32`` array (background = 0.0 Gy). When ``accumulate`` is True
     (default) overlapping dose volumes sum, which matches how physical dose
-    from multiple sources combines; when False the alphabetically last mesh
-    overwrites earlier assignments wherever voxels overlap.
+    from multiple sources combines; when False the highest-priority mesh
+    overwrites earlier assignments wherever voxels overlap, with names used
+    to break equal-priority ties.
     """
     return _drive(
         voxelize_objects_to_dose_iter(

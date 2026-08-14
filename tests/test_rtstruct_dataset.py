@@ -67,6 +67,10 @@ def test_sequences_and_cross_references():
 
     assert ds.SOPClassUID == constants.RTSTRUCT_SOP_CLASS
     assert ds.Modality == "RTSTRUCT"
+    assert ds.SyntheticData == "YES"
+    assert ds.SpecificCharacterSet == "ISO_IR 192"
+    assert "OperatorsName" in ds
+    assert "Blender geometry" in ds.DerivationDescription
     assert ds.StudyInstanceUID == kwargs["study_instance_uid"]
     assert (
         ds.ReferencedFrameOfReferenceSequence[0].FrameOfReferenceUID

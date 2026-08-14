@@ -167,8 +167,41 @@ def test_golden_seed_regressions():
         pytest.skip("golden capture file not generated")
     golden = np.load(GOLDEN_PATH)
     outputs = _golden_outputs()
-    for key, expected in golden.items():
-        assert np.array_equal(outputs[key], expected), f"golden mismatch for {key!r}"
+    # Motion deliberately changed from circular to physical padding, so its
+    # legacy capture remains in the archive for history but is not compared.
+    for key, actual in outputs.items():
+        if key == "motion":
+            continue
+        assert np.array_equal(actual, golden[key]), f"golden mismatch for {key!r}"
+
+
+def test_bilinear_remap_preserves_last_row_and_column():
+    image = np.arange(12, dtype=np.float32).reshape(3, 4)
+    coord0, coord1 = np.indices(image.shape, dtype=np.float32)
+    out = artifacts._remap_bilinear(image, coord0, coord1, fill=-99.0)
+    np.testing.assert_array_equal(out, image)
+
+
+@pytest.mark.parametrize("shape", [(1, 5), (5, 1), (1, 1)])
+def test_bilinear_remap_supports_singleton_dimensions(shape):
+    image = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+    coord0, coord1 = np.indices(shape, dtype=np.float32)
+    out = artifacts._remap_bilinear(image, coord0, coord1, fill=-99.0)
+    np.testing.assert_array_equal(out, image)
+
+
+def test_motion_does_not_wrap_anatomy_across_image_edges():
+    volume = np.full((9, 7, 2), -1000, dtype=np.int16)
+    volume[0, 3, :] = 3000
+    out = artifacts.add_motion_artifact(
+        volume,
+        blur_size=5,
+        severity=1.0,
+        axis=0,
+        rng=np.random.default_rng(4),
+        fill_value=-1000.0,
+    )
+    assert np.all(out[-1, :, :] == -1000)
 
 
 def test_gradient_only_distortion_matches_per_slice_remap():

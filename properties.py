@@ -200,6 +200,17 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
         max=2.0,
         precision=2,
     )
+    drr_water_attenuation_m_inv: bpy.props.FloatProperty(
+        name="Water Attenuation (1/m)",
+        description=(
+            "Effective linear attenuation coefficient of water used by the "
+            "monoenergetic Beer-Lambert DRR approximation"
+        ),
+        default=20.0,
+        min=0.01,
+        soft_max=50.0,
+        precision=3,
+    )
     export_directory: bpy.props.StringProperty(
         name="Export Directory",
         description="Directory to save DICOM files",
@@ -210,6 +221,12 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
         name="Series Description",
         description="Description for the DICOM series",
         default="DICOMator Export",
+    )
+    artifact_seed: bpy.props.IntProperty(
+        name="Artifact Seed",
+        description="Seed used to reproduce random artifacts; each 4D phase receives a deterministic sub-seed",
+        default=0,
+        min=0,
     )
     enable_noise: bpy.props.BoolProperty(
         name="Add Gaussian Noise",
@@ -467,7 +484,7 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
     )
     dose_summation_type: bpy.props.EnumProperty(
         name="Dose Summation Type",
-        description="Whether the dose grid represents a plan total, a single fraction, or a single beam",
+        description="Synthetic dose is exported only as a plan total until full fraction and beam modules are supported",
         items=DOSE_SUMMATION_TYPE_ITEMS,
         default="PLAN",
     )
@@ -476,7 +493,7 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
         description="How overlapping RT Dose meshes combine in the exported grid",
         items=[
             ("SUM", "Sum", "Overlapping dose volumes accumulate, matching how physical dose combines"),
-            ("OVERWRITE", "Overwrite", "The alphabetically last mesh wins in overlapping voxels"),
+            ("OVERWRITE", "Overwrite", "The mesh with the highest overlap priority wins; names break ties"),
         ],
         default="SUM",
     )

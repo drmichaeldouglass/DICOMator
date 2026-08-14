@@ -72,3 +72,21 @@ def test_normalize_projection_percentile_spans_uint16_range():
     assert out.dtype == np.uint16
     assert int(out.min()) == 0
     assert int(out.max()) == 65535
+
+
+def test_hu_to_linear_attenuation_uses_physical_water_scale():
+    hu = np.array([-1000.0, 0.0, 1000.0], dtype=np.float32)
+    attenuation = drr._hu_to_linear_attenuation(hu, 20.0)
+    np.testing.assert_allclose(attenuation, [0.0, 20.0, 40.0], atol=1e-6)
+    assert attenuation.dtype == np.float32
+
+
+def test_hu_to_linear_attenuation_rejects_invalid_water_coefficient():
+    hu = np.zeros((2, 2), dtype=np.float32)
+    for value in (0.0, -1.0, np.nan, np.inf):
+        try:
+            drr._hu_to_linear_attenuation(hu, value)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"Expected invalid water coefficient {value!r} to fail")

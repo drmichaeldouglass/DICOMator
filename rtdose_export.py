@@ -39,8 +39,13 @@ from . import constants as shared_constants
 from .constants import (
     RTDOSE_SOP_CLASS,
     RTPLAN_SOP_CLASS,
+    apply_synthetic_metadata,
     normalize_dicom_date,
+    resolve_positive_voxel_size,
+    truncate_lo,
+    truncate_pn,
     truncate_sh,
+    validate_numeric_array,
 )
 
 
@@ -60,13 +65,13 @@ def _export_minimal_rtplan(
     date_str: str,
     time_str: str,
     phase_index: Optional[int],
+    derivation_description: Optional[str] = None,
 ) -> tuple[str, str]:
     """Write a minimal RT Plan that the RT Dose object can reference.
 
-    ``ReferencedRTPlanSequence`` is Type 1C in the RT Dose IOD whenever
-    ``DoseSummationType`` is PLAN/FRACTION/BEAM, so a syntactically valid
-    plan object is required for strict importers. ``RTPlanGeometry`` is set
-    to TREATMENT_DEVICE because no structure set is referenced.
+    ``ReferencedRTPlanSequence`` is Type 1C for a plan-level RT Dose, so a
+    companion plan object is required for strict importers. ``RTPlanGeometry``
+    is set to TREATMENT_DEVICE because no structure set is referenced.
 
     Returns ``(sop_instance_uid, filename)``.
     """
@@ -87,9 +92,14 @@ def _export_minimal_rtplan(
 
     plan.SOPClassUID = RTPLAN_SOP_CLASS
     plan.SOPInstanceUID = plan_sop_instance_uid
+    apply_synthetic_metadata(
+        plan,
+        derivation_description
+        or "Synthetic unapproved RT Plan generated to reference a DICOMator plan dose",
+    )
 
-    plan.PatientName = patient_name
-    plan.PatientID = patient_id
+    plan.PatientName = truncate_pn(patient_name, "Anonymous")
+    plan.PatientID = truncate_lo(patient_id, "12345678")
     plan.PatientBirthDate = normalize_dicom_date(patient_birth_date)
     plan.PatientSex = patient_sex
 
@@ -105,7 +115,7 @@ def _export_minimal_rtplan(
     # Offset so the companion plan series does not share the dose series'
     # number within the study.
     plan.SeriesNumber = int(series_number) + 1000
-    plan.SeriesDescription = f"{series_description} - RT Plan"
+    plan.SeriesDescription = truncate_lo(f"{series_description} - RT Plan")
     plan.SeriesDate = date_str
     plan.SeriesTime = time_str
     plan.Manufacturer = "DICOMator"
@@ -156,6 +166,7 @@ def export_rtdose_to_dicom(
     series_number: int = 1,
     phase_index: Optional[int] = None,
     write_rtplan: bool = True,
+    derivation_description: Optional[str] = None,
 ) -> dict[str, str]:
     """Write ``dose_grid`` to a single multi-frame DICOM RT Dose file.
 
@@ -180,8 +191,9 @@ def export_rtdose_to_dicom(
     dose_type:
         DICOM ``DoseType`` attribute — ``'PHYSICAL'`` or ``'EFFECTIVE'``.
     dose_summation_type:
-        DICOM ``DoseSummationType`` attribute — ``'PLAN'``, ``'FRACTION'``,
-        or ``'BEAM'``.
+        DICOM ``DoseSummationType`` attribute. Only ``'PLAN'`` is supported;
+        fraction and beam dose require treatment geometry that DICOMator does
+        not currently model.
     study_instance_uid, frame_of_reference_uid, series_instance_uid:
         Pre-generated UIDs to share with a co-exported CT or RT Structure
         Set.  New UIDs are generated if *None*.
@@ -191,9 +203,9 @@ def export_rtdose_to_dicom(
         Optional 1-based phase index used in the output filename when
         exporting a 4D sequence.
     write_rtplan:
-        When True (default) a minimal companion RT Plan file is written and
-        referenced via ``ReferencedRTPlanSequence``, which the RT Dose IOD
-        requires (Type 1C) for the supported ``DoseSummationType`` values.
+        Must remain True. A minimal companion RT Plan file is written and
+        referenced via ``ReferencedRTPlanSequence``, which a plan-level RT
+        Dose requires.
 
     Returns
     -------
@@ -208,21 +220,44 @@ def export_rtdose_to_dicom(
     FileDataset = shared_constants.FileDataset
     generate_uid = shared_constants.generate_uid
 
-    os.makedirs(output_dir, exist_ok=True)
+    summation_type = str(dose_summation_type or "PLAN").upper()
+    if summation_type != "PLAN":
+        return {
+            "error": (
+                "Only PLAN DoseSummationType is supported. FRACTION and BEAM "
+                "require a referenced fraction scheme and treatment beam geometry."
+            )
+        }
+    if not write_rtplan:
+        return {
+            "error": (
+                "PLAN dose requires a referenced RT Plan; write_rtplan=False "
+                "would create a non-conformant RT Dose object"
+            )
+        }
+    resolved_dose_type = str(dose_type or "PHYSICAL").upper()
+    if resolved_dose_type not in {"PHYSICAL", "EFFECTIVE"}:
+        return {"error": "dose_type must be PHYSICAL or EFFECTIVE"}
 
-    if isinstance(voxel_size, (list, tuple)) and len(voxel_size) == 3:
-        vx_m, vy_m, vz_m = (float(v) for v in voxel_size)
-    else:
-        vx_m = vy_m = vz_m = float(voxel_size)
+    try:
+        source_grid = validate_numeric_array(dose_grid, name="dose_grid", ndim=3)
+        vx_m, vy_m, vz_m = resolve_positive_voxel_size(voxel_size)
+        bbox_components = [float(bbox_min.x), float(bbox_min.y), float(bbox_min.z)]
+        if not all(np.isfinite(component) for component in bbox_components):
+            raise ValueError("bbox_min components must be finite")
+    except (AttributeError, TypeError, ValueError) as exc:
+        return {"error": str(exc)}
+
+    os.makedirs(output_dir, exist_ok=True)
 
     vx_mm = vx_m * 1000.0
     vy_mm = vy_m * 1000.0
     vz_mm = vz_m * 1000.0
 
-    bbox_min_mm = Vector((bbox_min.x * 1000.0, bbox_min.y * 1000.0, bbox_min.z * 1000.0))
+    bbox_min_mm = Vector(tuple(component * 1000.0 for component in bbox_components))
 
     # Ensure we have a float32 array in (W, H, D) order; clamp negatives.
-    dose_f32 = np.clip(np.asarray(dose_grid, dtype=np.float32), 0.0, None)
+    dose_f32 = np.clip(source_grid, 0.0, None).astype(np.float32, copy=False)
 
     width, height, depth = dose_f32.shape  # (W, H, D)
 
@@ -279,6 +314,7 @@ def export_rtdose_to_dicom(
                 date_str=date_str,
                 time_str=time_str,
                 phase_index=phase_index,
+                derivation_description=derivation_description,
             )
         except Exception as exc:
             return {"error": f"Error saving companion RT Plan DICOM file: {exc}"}
@@ -295,10 +331,15 @@ def export_rtdose_to_dicom(
         # --- SOP common ---
         ds.SOPClassUID = RTDOSE_SOP_CLASS
         ds.SOPInstanceUID = sop_instance_uid
+        apply_synthetic_metadata(
+            ds,
+            derivation_description
+            or "Synthetic RT Dose voxelized from Blender geometry",
+        )
 
         # --- Patient module ---
-        ds.PatientName = patient_name
-        ds.PatientID = patient_id
+        ds.PatientName = truncate_pn(patient_name, "Anonymous")
+        ds.PatientID = truncate_lo(patient_id, "12345678")
         ds.PatientBirthDate = normalize_dicom_date(patient_birth_date)
         ds.PatientSex = patient_sex
 
@@ -314,22 +355,24 @@ def export_rtdose_to_dicom(
         ds.Modality = "RTDOSE"
         ds.SeriesInstanceUID = series_instance_uid
         ds.SeriesNumber = int(series_number)
-        ds.SeriesDescription = series_description
+        ds.SeriesDescription = truncate_lo(series_description, "RT Dose from DICOMator")
         ds.SeriesDate = date_str
         ds.SeriesTime = time_str
         ds.Manufacturer = "DICOMator"
         ds.InstitutionName = "Virtual Hospital"
         ds.StationName = "Blender"
+        ds.OperatorsName = ""
 
         # --- Frame of reference ---
         ds.FrameOfReferenceUID = frame_of_reference_uid
+        ds.PositionReferenceIndicator = ""
         ds.PatientPosition = str(patient_position)
 
         # --- General image / multi-frame ---
         ds.InstanceNumber = "1"
         ds.ContentDate = date_str
         ds.ContentTime = time_str
-        ds.ImageType = ["ORIGINAL", "PRIMARY", "AXIAL"]
+        ds.ImageType = ["DERIVED", "PRIMARY", "DOSE"]
         ds.NumberOfFrames = int(depth)
         # Multi-frame module (PS3.3 C.7.6.6): FrameIncrementPointer is Type 1
         # and for RT Dose must point at GridFrameOffsetVector (3004,000C).
@@ -364,8 +407,8 @@ def export_rtdose_to_dicom(
 
         # --- RT Dose specific ---
         ds.DoseUnits = "GY"
-        ds.DoseType = str(dose_type or "PHYSICAL").upper()
-        ds.DoseSummationType = str(dose_summation_type or "PLAN").upper()
+        ds.DoseType = resolved_dose_type
+        ds.DoseSummationType = summation_type
         ds.DoseGridScaling = float(dose_grid_scaling)
         if plan_sop_instance_uid is not None:
             ref_plan = Dataset()

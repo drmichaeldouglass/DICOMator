@@ -8,6 +8,8 @@ import bpy
 import numpy as np
 from mathutils import Vector
 
+from .constants import resolve_positive_voxel_size, validate_numeric_array
+
 ProgressCallback = Optional[Callable[[int, int], None]]
 DRRResult = tuple[np.ndarray, dict[str, object]]
 DRRGenerator = Generator[tuple[int, int], None, DRRResult]
@@ -89,6 +91,21 @@ def _normalize_projection(line_integrals: np.ndarray, fixed: bool = False) -> np
     return np.round(normalized * 65535.0).astype(np.uint16, copy=False)
 
 
+def _hu_to_linear_attenuation(
+    hu_volume: np.ndarray,
+    water_attenuation_coefficient_m_inv: float,
+) -> np.ndarray:
+    """Convert HU to a non-negative linear attenuation coefficient in m^-1."""
+
+    mu_water = float(water_attenuation_coefficient_m_inv)
+    if not np.isfinite(mu_water) or mu_water <= 0.0:
+        raise ValueError("water_attenuation_coefficient_m_inv must be finite and greater than zero")
+    return np.maximum(
+        0.0,
+        np.float32(mu_water) * (1.0 + (hu_volume.astype(np.float32) / 1000.0)),
+    ).astype(np.float32, copy=False)
+
+
 def generate_drr_from_hu_volume(
     hu_volume: np.ndarray,
     voxel_size: Sequence[float] | float,
@@ -99,6 +116,7 @@ def generate_drr_from_hu_volume(
     resolution_scale: float = 1.0,
     progress_callback: ProgressCallback = None,
     fixed_normalization: bool = False,
+    water_attenuation_coefficient_m_inv: float = 20.0,
 ) -> DRRResult:
     """Project ``hu_volume`` into a DRR using the active camera geometry.
 
@@ -112,6 +130,7 @@ def generate_drr_from_hu_volume(
         camera_obj,
         resolution_scale=resolution_scale,
         fixed_normalization=fixed_normalization,
+        water_attenuation_coefficient_m_inv=water_attenuation_coefficient_m_inv,
     )
     while True:
         try:
@@ -131,18 +150,15 @@ def generate_drr_from_hu_volume_iter(
     *,
     resolution_scale: float = 1.0,
     fixed_normalization: bool = False,
+    water_attenuation_coefficient_m_inv: float = 20.0,
 ) -> DRRGenerator:
     """Generator variant: yields ``(rows_done, total_rows)`` per detector chunk."""
 
     if camera_obj is None or camera_obj.type != 'CAMERA':
         raise ValueError("Scene must have an active camera for DRR export")
-    if hu_volume.ndim != 3:
-        raise ValueError("DRR generation requires a 3D HU volume")
-
-    if isinstance(voxel_size, Sequence) and len(voxel_size) == 3:
-        vx, vy, vz = (float(component) for component in voxel_size)
-    else:
-        vx = vy = vz = float(voxel_size)
+    hu_volume = validate_numeric_array(hu_volume, name="hu_volume", ndim=3)
+    vx, vy, vz = resolve_positive_voxel_size(voxel_size)
+    mu_water = float(water_attenuation_coefficient_m_inv)
 
     detector_width, detector_height = resolve_drr_detector_size(scene, resolution_scale=resolution_scale)
     bounds_min = np.array((float(origin.x), float(origin.y), float(origin.z)), dtype=np.float32)
@@ -155,8 +171,10 @@ def generate_drr_from_hu_volume_iter(
         dtype=np.float32,
     )
 
-    # Approximate linear attenuation from CT HU using mu/mu_water = 1 + HU / 1000.
-    attenuation_volume = np.maximum(0.0, 1.0 + (hu_volume.astype(np.float32) / 1000.0))
+    # Convert CT HU to a true linear attenuation coefficient in m^-1 using
+    # mu = mu_water * (1 + HU / 1000). The configurable monoenergetic water
+    # coefficient keeps the Beer-Lambert line integral dimensionless.
+    attenuation_volume = _hu_to_linear_attenuation(hu_volume, mu_water)
     step_size = max(1e-5, min(vx, vy, vz))
 
     bottom_left, bottom_right, top_left, top_right = _camera_frame_corners(scene, camera_obj)
@@ -246,29 +264,42 @@ def generate_drr_from_hu_volume_iter(
 
     projection_image = _normalize_projection(line_integrals, fixed=fixed_normalization)
 
-    detector_origin_world = camera_obj.matrix_world @ top_left
     row_direction_world = (camera_obj.matrix_world.to_3x3() @ (top_right - top_left)).normalized()
     column_direction_world = (camera_obj.matrix_world.to_3x3() @ (bottom_left - top_left)).normalized()
 
-    metadata = {
-        "detector_size": (detector_width, detector_height),
-        "pixel_spacing_mm": (
-            (frame_height_m / max(1, detector_height)) * 1000.0,
-            (frame_width_m / max(1, detector_width)) * 1000.0,
-        ),
-        "image_position_patient": (
-            float(detector_origin_world.x * 1000.0),
-            float(detector_origin_world.y * 1000.0),
-            float(detector_origin_world.z * 1000.0),
-        ),
-        "image_orientation_patient": (
+    pixel_spacing_mm = None
+    image_position_patient = None
+    image_orientation_patient = None
+    if is_orthographic:
+        row_step_local = (top_right - top_left) / float(detector_width)
+        column_step_local = (bottom_left - top_left) / float(detector_height)
+        first_pixel_center_local = top_left + 0.5 * row_step_local + 0.5 * column_step_local
+        first_pixel_center_world = camera_obj.matrix_world @ first_pixel_center_local
+        pixel_spacing_mm = (
+            (frame_height_m / float(detector_height)) * 1000.0,
+            (frame_width_m / float(detector_width)) * 1000.0,
+        )
+        image_position_patient = (
+            float(first_pixel_center_world.x * 1000.0),
+            float(first_pixel_center_world.y * 1000.0),
+            float(first_pixel_center_world.z * 1000.0),
+        )
+        image_orientation_patient = (
             float(row_direction_world.x),
             float(row_direction_world.y),
             float(row_direction_world.z),
             float(column_direction_world.x),
             float(column_direction_world.y),
             float(column_direction_world.z),
-        ),
+        )
+
+    metadata = {
+        "detector_size": (detector_width, detector_height),
+        "pixel_spacing_mm": pixel_spacing_mm,
+        "image_position_patient": image_position_patient,
+        "image_orientation_patient": image_orientation_patient,
+        "spatial_geometry_valid": bool(is_orthographic),
+        "water_attenuation_coefficient_m_inv": mu_water,
     }
     return projection_image, metadata
 

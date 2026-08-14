@@ -36,7 +36,15 @@ import bmesh
 import bpy
 
 from . import constants as shared_constants
-from .constants import RTSTRUCT_SOP_CLASS, normalize_dicom_date, truncate_sh
+from .constants import (
+    RTSTRUCT_SOP_CLASS,
+    apply_synthetic_metadata,
+    normalize_dicom_date,
+    resolve_positive_voxel_size,
+    truncate_lo,
+    truncate_pn,
+    truncate_sh,
+)
 
 # ---------------------------------------------------------------------------
 # Default colour palette used when an object has no material assigned.
@@ -356,6 +364,7 @@ def build_rtstruct_dataset(
     referenced_ct_series_instance_uid: Optional[str] = None,
     referenced_ct_sop_class_uid: Optional[str] = None,
     referenced_ct_sop_instance_uids: Optional[Sequence[str]] = None,
+    derivation_description: Optional[str] = None,
 ):
     """Build an RT Structure Set ``FileDataset`` from plain contour data.
 
@@ -382,10 +391,15 @@ def build_rtstruct_dataset(
     # --- SOP common ---
     ds.SOPClassUID = RTSTRUCT_SOP_CLASS
     ds.SOPInstanceUID = sop_instance_uid
+    apply_synthetic_metadata(
+        ds,
+        derivation_description
+        or "Synthetic RT Structure Set contoured from Blender geometry",
+    )
 
     # --- Patient module ---
-    ds.PatientName = patient_name
-    ds.PatientID = patient_id
+    ds.PatientName = truncate_pn(patient_name, "Anonymous")
+    ds.PatientID = truncate_lo(patient_id, "12345678")
     ds.PatientBirthDate = normalize_dicom_date(patient_birth_date)
     ds.PatientSex = patient_sex
 
@@ -401,18 +415,19 @@ def build_rtstruct_dataset(
     ds.Modality = "RTSTRUCT"
     ds.SeriesInstanceUID = series_instance_uid
     ds.SeriesNumber = int(series_number)
-    ds.SeriesDescription = series_description
+    ds.SeriesDescription = truncate_lo(series_description, "RT Structure Set from DICOMator")
     ds.SeriesDate = date_str
     ds.SeriesTime = time_str
     ds.Manufacturer = "DICOMator"
     ds.InstitutionName = "Virtual Hospital"
     ds.StationName = "Blender"
+    ds.OperatorsName = ""
 
     # --- Structure Set Identification ---
     # StructureSetLabel has VR SH (max 16 characters); longer values are
     # non-conformant and trigger pydicom warnings.
-    ds.StructureSetLabel = str(series_description)[:16]
-    ds.StructureSetName = series_description
+    ds.StructureSetLabel = truncate_sh(series_description, "DICOMator")
+    ds.StructureSetName = truncate_lo(series_description, "DICOMator")
     ds.StructureSetDate = date_str
     ds.StructureSetTime = time_str
 
@@ -453,8 +468,8 @@ def build_rtstruct_dataset(
         roi_item = Dataset()
         roi_item.ROINumber = roi_number
         roi_item.ReferencedFrameOfReferenceUID = frame_of_reference_uid
-        # ROIName has VR LO (max 64 characters).
-        roi_item.ROIName = str(roi_name)[:64]
+        # ROIName has VR LO (max 64 encoded bytes).
+        roi_item.ROIName = truncate_lo(roi_name, f"ROI {roi_number}")
         roi_item.ROIGenerationAlgorithm = "MANUAL"
         roi_sequence.append(roi_item)
     ds.StructureSetROISequence = roi_sequence
@@ -520,8 +535,11 @@ def build_rtstruct_dataset(
         obs_item.ObservationNumber = obs_number
         obs_item.ReferencedROINumber = obs_number
         # ROIObservationLabel has VR SH (max 16 characters).
-        obs_item.ROIObservationLabel = str(roi_name)[:16]
-        obs_item.RTROIInterpretedType = str(roi_type or "OAR").upper()
+        obs_item.ROIObservationLabel = truncate_sh(roi_name, f"ROI{obs_number}")
+        obs_item.RTROIInterpretedType = truncate_sh(
+            str(roi_type or "OAR").upper(),
+            "OAR",
+        )
         obs_item.ROIInterpreter = ""
         observations_sequence.append(obs_item)
 
@@ -580,6 +598,7 @@ def export_rtstruct_to_dicom_iter(
     referenced_ct_series_instance_uid: Optional[str] = None,
     referenced_ct_sop_class_uid: Optional[str] = None,
     referenced_ct_sop_instance_uids: Optional[Sequence[str]] = None,
+    derivation_description: Optional[str] = None,
 ) -> Generator[tuple[int, int], None, dict[str, str]]:
     """Write an RT Structure Set DICOM file for the supplied mesh objects.
 
@@ -630,17 +649,23 @@ def export_rtstruct_to_dicom_iter(
 
     generate_uid = shared_constants.generate_uid
 
+    try:
+        _vx_m, _vy_m, vz_m = resolve_positive_voxel_size(voxel_size)
+        resolved_slices = int(n_slices)
+        if resolved_slices <= 0:
+            raise ValueError("n_slices must be greater than zero")
+        bbox_min_z_m = float(bbox_min.z)
+        if not math.isfinite(bbox_min_z_m):
+            raise ValueError("bbox_min.z must be finite")
+    except (AttributeError, TypeError, ValueError) as exc:
+        return {"error": str(exc)}
+
     os.makedirs(output_dir, exist_ok=True)
 
-    # Resolve the voxel Z dimension (only Z is needed for contour planes).
-    if isinstance(voxel_size, (list, tuple)) and len(voxel_size) == 3:
-        vz_m = float(voxel_size[2])
-    else:
-        vz_m = float(voxel_size)
-
     # Z positions at the voxel centre for each slice (metres).
-    bbox_min_z_m = float(bbox_min.z)
-    z_positions_m: list[float] = [bbox_min_z_m + (i + 0.5) * vz_m for i in range(n_slices)]
+    z_positions_m: list[float] = [
+        bbox_min_z_m + (i + 0.5) * vz_m for i in range(resolved_slices)
+    ]
 
     now = study_datetime or datetime.now()
     date_str = now.strftime("%Y%m%d")
@@ -710,6 +735,7 @@ def export_rtstruct_to_dicom_iter(
             referenced_ct_series_instance_uid=referenced_ct_series_instance_uid,
             referenced_ct_sop_class_uid=referenced_ct_sop_class_uid,
             referenced_ct_sop_instance_uids=referenced_ct_sop_instance_uids,
+            derivation_description=derivation_description,
         )
 
         if phase_index is not None:

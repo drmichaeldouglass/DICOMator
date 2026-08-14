@@ -5,7 +5,7 @@ import importlib
 import sys
 
 import bpy
-from bpy.props import EnumProperty, FloatProperty, PointerProperty
+from bpy.props import EnumProperty, FloatProperty, IntProperty, PointerProperty
 
 # Blender keeps add-on submodules alive in sys.modules across disable/enable
 # cycles. Reload any that are already present (a no-op on first load) before
@@ -62,11 +62,11 @@ from .voxelization import voxelize_mesh, voxelize_objects_to_dose, voxelize_obje
 bl_info = {
     "name": "DICOMator",
     "author": "Michael Douglass",
-    "version": (3, 5, 0),
+    "version": (3, 6, 0),
     "blender": (5, 1, 0),
     "location": "View3D > Sidebar > DICOMator",
     "description": "Converts mesh objects into synthetic CT/MR series or camera-based DRR DICOM images",
-    "warning": "",
+    "warning": "Synthetic research data only; not validated for clinical use",
     "doc_url": "https://github.com/drmichaeldouglass/DICOMator",
     "category": "3D View",
 }
@@ -117,6 +117,14 @@ def register() -> None:  # pragma: no cover - Blender registration
         default="CT",
     )
 
+    bpy.types.Object.dicomator_priority = IntProperty(
+        name="Overlap Priority",
+        description="Higher-priority image or dose meshes overwrite lower-priority meshes in overlapping voxels",
+        default=0,
+        min=-1000,
+        max=1000,
+    )
+
     bpy.types.Object.dicomator_dose = FloatProperty(
         name="Dose (Gy)",
         description="Absorbed dose assigned to voxels within this mesh when exported as RT Dose",
@@ -148,6 +156,9 @@ def unregister() -> None:  # pragma: no cover - Blender registration
 
     if hasattr(bpy.types.Object, "dicomator_object_type"):
         del bpy.types.Object.dicomator_object_type
+
+    if hasattr(bpy.types.Object, "dicomator_priority"):
+        del bpy.types.Object.dicomator_priority
 
     if hasattr(bpy.types.Object, "dicomator_material"):
         del bpy.types.Object.dicomator_material
