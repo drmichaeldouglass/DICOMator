@@ -40,6 +40,12 @@ def test_rtdose_roundtrip(tmp_path):
     assert int(ds.Rows) == height
     assert int(ds.Columns) == width
     assert ds.DoseUnits == "GY"
+    assert ds.DoseSummationType == "PLAN"
+    assert list(ds.ImageType) == ["DERIVED", "PRIMARY", "DOSE"]
+    assert ds.SyntheticData == "YES"
+    assert ds.SpecificCharacterSet == "ISO_IR 192"
+    assert "PositionReferenceIndicator" in ds
+    assert "OperatorsName" in ds
 
     scaling = float(ds.DoseGridScaling)
     recon = ds.pixel_array.astype(np.float64) * scaling  # (frames, rows, cols)
@@ -75,6 +81,8 @@ def test_rtdose_references_companion_plan(tmp_path):
     dose = pydicom.dcmread(str(tmp_path / "RTDose.dcm"))
 
     assert plan.Modality == "RTPLAN"
+    assert plan.SyntheticData == "YES"
+    assert dose.SyntheticData == "YES"
     ref = dose.ReferencedRTPlanSequence[0]
     assert ref.ReferencedSOPInstanceUID == plan.SOPInstanceUID
     assert plan.StudyInstanceUID == dose.StudyInstanceUID
@@ -114,3 +122,48 @@ def test_rtdose_shares_provided_study_uid(tmp_path):
     assert "success" in result, result
     ds = pydicom.dcmread(str(tmp_path / "RTDose.dcm"))
     assert ds.StudyInstanceUID == study_uid
+
+
+@pytest.mark.parametrize("summation_type", ["FRACTION", "BEAM", "INVALID"])
+def test_rtdose_rejects_unsupported_summation_types(tmp_path, summation_type):
+    result = rtdose_export.export_rtdose_to_dicom(
+        _dose_grid(),
+        VOXEL_SIZE_M,
+        BBOX_MIN,
+        str(tmp_path),
+        dose_summation_type=summation_type,
+    )
+    assert "Only PLAN" in result["error"]
+    assert not list(tmp_path.glob("*.dcm"))
+
+
+def test_rtdose_rejects_missing_required_plan_reference(tmp_path):
+    result = rtdose_export.export_rtdose_to_dicom(
+        _dose_grid(),
+        VOXEL_SIZE_M,
+        BBOX_MIN,
+        str(tmp_path),
+        write_rtplan=False,
+    )
+    assert "requires a referenced RT Plan" in result["error"]
+    assert not list(tmp_path.glob("*.dcm"))
+
+
+@pytest.mark.parametrize(
+    "grid,voxel_size,error_text",
+    [
+        (np.empty((0, 2, 2)), VOXEL_SIZE_M, "must not be empty"),
+        (np.zeros((2, 2)), VOXEL_SIZE_M, "must be a 3D array"),
+        (np.full((2, 2, 2), np.inf), VOXEL_SIZE_M, "NaN or infinite"),
+        (np.zeros((2, 2, 2)), -0.002, "greater than zero"),
+    ],
+)
+def test_rtdose_rejects_invalid_inputs(tmp_path, grid, voxel_size, error_text):
+    result = rtdose_export.export_rtdose_to_dicom(
+        grid,
+        voxel_size,
+        BBOX_MIN,
+        str(tmp_path),
+    )
+    assert error_text in result["error"]
+    assert not list(tmp_path.glob("*.dcm"))

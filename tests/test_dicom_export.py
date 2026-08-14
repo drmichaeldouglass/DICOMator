@@ -57,6 +57,12 @@ def test_ct_series_geometry_and_pixels(tmp_path):
     for index, ds in enumerate(datasets):
         assert int(ds.InstanceNumber) == index + 1
         assert ds.Modality == "CT"
+        assert list(ds.ImageType) == ["DERIVED", "PRIMARY", "AXIAL"]
+        assert ds.SyntheticData == "YES"
+        assert ds.SpecificCharacterSet == "ISO_IR 192"
+        assert "Blender geometry" in ds.DerivationDescription
+        assert "PositionReferenceIndicator" in ds
+        assert ds.RescaleType == "HU"
         # ImagePositionPatient is the centre of the first voxel.
         np.testing.assert_allclose(
             [float(v) for v in ds.ImagePositionPatient],
@@ -91,6 +97,7 @@ def test_mr_series_has_mr_module(tmp_path):
     _, datasets = _export(tmp_path, _grid(), dicom_modality="MR")
     for ds in datasets:
         assert ds.Modality == "MR"
+        assert list(ds.ImageType) == ["DERIVED", "PRIMARY", "OTHER"]
         assert ds.ScanningSequence == "SE"
         assert float(ds.RepetitionTime) > 0.0
         assert float(ds.EchoTime) > 0.0
@@ -159,6 +166,28 @@ def test_invalid_birth_date_written_empty(tmp_path):
         assert str(ds.PatientBirthDate) == ""
 
 
+def test_impossible_birth_date_written_empty(tmp_path):
+    _, datasets = _export(tmp_path, _grid(), patient_birth_date="2023-02-31")
+    assert all(str(ds.PatientBirthDate) == "" for ds in datasets)
+
+
+def test_text_is_utf8_sanitized_and_byte_limited(tmp_path):
+    _, datasets = _export(
+        tmp_path,
+        _grid(),
+        patient_name="Müller\\Injected\x7f" + "患者" * 30,
+        patient_id="患者" * 30,
+        series_description="Séries\\Second value",
+    )
+    ds = datasets[0]
+    assert "\\" not in str(ds.PatientName)
+    assert "\x7f" not in str(ds.PatientName)
+    assert "\\" not in str(ds.SeriesDescription)
+    assert len(str(ds.PatientName).encode("utf-8")) <= 64
+    assert len(str(ds.PatientID).encode("utf-8")) <= 64
+    assert ds.SpecificCharacterSet == "ISO_IR 192"
+
+
 def test_long_study_id_truncated_to_sh_limit(tmp_path):
     _, datasets = _export(tmp_path, _grid(), study_id="X" * 40)
     for ds in datasets:
@@ -169,11 +198,52 @@ def test_normalize_and_truncate_helpers():
     assert constants.normalize_dicom_date("1980-02-01") == "19800201"
     assert constants.normalize_dicom_date("19800201") == "19800201"
     assert constants.normalize_dicom_date("1980") == ""
+    assert constants.normalize_dicom_date("20230231") == ""
     assert constants.normalize_dicom_date(None) == ""
     assert constants.truncate_sh("A" * 20) == "A" * 16
     assert constants.truncate_sh("", "1") == "1"
     assert constants.truncate_sh("  ", "1") == "1"
     assert constants.truncate_sh(None, "1") == "1"
+    assert len(constants.truncate_sh("患者" * 20).encode("utf-8")) <= 16
+
+
+def test_direct_hu_clips_before_int16_cast(tmp_path):
+    grid = np.array([40000.0, -40000.0, 5000.0], dtype=np.float32).reshape(1, 1, 3)
+    _, datasets = _export(tmp_path, grid)
+    assert [int(ds.pixel_array[0, 0]) for ds in datasets] == [3071, -1024, 3071]
+
+
+@pytest.mark.parametrize(
+    "grid,voxel_size,error_text",
+    [
+        (np.empty((0, 2, 2)), VOXEL_SIZE_M, "must not be empty"),
+        (np.zeros((2, 2)), VOXEL_SIZE_M, "must be a 3D array"),
+        (np.full((2, 2, 2), np.nan), VOXEL_SIZE_M, "NaN or infinite"),
+        (np.zeros((2, 2, 2)), (0.002, 0.0, 0.004), "greater than zero"),
+    ],
+)
+def test_image_writer_rejects_invalid_inputs(tmp_path, grid, voxel_size, error_text):
+    result = dicom_export.export_voxel_grid_to_dicom(
+        grid,
+        voxel_size,
+        str(tmp_path),
+        BBOX_MIN,
+        direct_hu=True,
+    )
+    assert error_text in result["error"]
+    assert not list(tmp_path.glob("*.dcm"))
+
+
+def test_image_writer_rejects_nonfinite_origin(tmp_path):
+    result = dicom_export.export_voxel_grid_to_dicom(
+        _grid(),
+        VOXEL_SIZE_M,
+        str(tmp_path),
+        Vector((0.0, float("inf"), 0.0)),
+        direct_hu=True,
+    )
+    assert "bbox_min components must be finite" in result["error"]
+    assert not list(tmp_path.glob("*.dcm"))
 
 
 def test_drr_projection_roundtrip(tmp_path):
@@ -187,6 +257,9 @@ def test_drr_projection_roundtrip(tmp_path):
     assert "success" in result, result
     ds = pydicom.dcmread(str(tmp_path / "DRR_test.dcm"))
     assert ds.Modality == "OT"
+    assert ds.SyntheticData == "YES"
+    assert ds.SpecificCharacterSet == "ISO_IR 192"
+    assert "PositionReferenceIndicator" in ds
     assert int(ds.Rows) == 6
     assert int(ds.Columns) == 8
     np.testing.assert_allclose([float(v) for v in ds.PixelSpacing], [1.5, 2.5])

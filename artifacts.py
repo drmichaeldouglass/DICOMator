@@ -5,7 +5,7 @@ import math
 
 import numpy as np
 
-from .constants import MAX_HU_VALUE, MIN_HU_VALUE
+from .constants import AIR_DENSITY, MAX_HU_VALUE, MIN_HU_VALUE
 
 GeneratorLike = np.random.Generator | int | None
 
@@ -131,27 +131,32 @@ def _remap_bilinear(
     """Sample ``image`` at floating-point coordinates using bilinear interpolation.
 
     ``coord0``/``coord1`` give, for every output pixel, the source position in
-    the first/second axis of ``image``. Positions whose 2x2 support falls
-    outside the image are set to ``fill``. This is a lightweight, NumPy-only
+    the first/second axis of ``image``. Positions outside the image are set to
+    ``fill``; samples on the last row or column use a clamped neighbour. This
+    is a lightweight, NumPy-only
     stand-in for ``scipy.ndimage.map_coordinates`` (SciPy is not bundled with
     Blender's Python).
     """
 
     n0, n1 = image.shape
+    if n0 <= 0 or n1 <= 0:
+        raise ValueError("image must not be empty")
     x0 = np.floor(coord0).astype(np.int64)
     x1 = np.floor(coord1).astype(np.int64)
     f0 = (coord0 - x0).astype(np.float32)
     f1 = (coord1 - x1).astype(np.float32)
 
-    valid = (x0 >= 0) & (x0 < n0 - 1) & (x1 >= 0) & (x1 < n1 - 1)
-    x0c = np.clip(x0, 0, n0 - 2)
-    x1c = np.clip(x1, 0, n1 - 2)
+    valid = (coord0 >= 0.0) & (coord0 <= n0 - 1) & (coord1 >= 0.0) & (coord1 <= n1 - 1)
+    x0c = np.clip(x0, 0, n0 - 1)
+    x1c = np.clip(x1, 0, n1 - 1)
+    x0n = np.minimum(x0c + 1, n0 - 1)
+    x1n = np.minimum(x1c + 1, n1 - 1)
 
     img = image.astype(np.float32, copy=False)
     v00 = img[x0c, x1c]
-    v01 = img[x0c, x1c + 1]
-    v10 = img[x0c + 1, x1c]
-    v11 = img[x0c + 1, x1c + 1]
+    v01 = img[x0c, x1n]
+    v10 = img[x0n, x1c]
+    v11 = img[x0n, x1n]
     top = v00 * (1.0 - f1) + v01 * f1
     bot = v10 * (1.0 - f1) + v11 * f1
     out = top * (1.0 - f0) + bot * f0
@@ -558,6 +563,7 @@ def add_motion_artifact(
     severity: float = 0.5,
     axis: int = 0,
     rng: GeneratorLike = None,
+    fill_value: float = AIR_DENSITY,
 ) -> np.ndarray:
     """Simulate in-plane patient motion as directional blurring and ghosting.
 
@@ -577,6 +583,9 @@ def add_motion_artifact(
         blurs along the x-axis (first dimension), ``1`` along the y-axis.
     rng:
         Optional seed or generator for deterministic ghost strength variation.
+    fill_value:
+        Signal used where motion shifts pixels beyond the field of view. Use
+        air for CT and zero signal for MR; values never wrap across an edge.
 
     Returns
     -------
@@ -603,17 +612,34 @@ def add_motion_artifact(
     weights /= float(np.sum(weights))
     ghost_shift = max(1, blur_size // 3)
 
-    # Rolling the whole (W, H, D) volume along an in-plane axis shifts every
-    # slice identically, so the per-slice loop collapses into 3D operations.
-    # Average several displaced positions. This better represents object
-    # motion during acquisition than a flat box blur.
+    def _shift_without_wrap(volume: np.ndarray, offset: int) -> np.ndarray:
+        shifted = np.full_like(volume, float(fill_value), dtype=np.float32)
+        if offset == 0:
+            shifted[...] = volume
+            return shifted
+        amount = abs(int(offset))
+        if amount >= volume.shape[axis]:
+            return shifted
+        source = [slice(None)] * volume.ndim
+        target = [slice(None)] * volume.ndim
+        if offset > 0:
+            source[axis] = slice(0, -amount)
+            target[axis] = slice(amount, None)
+        else:
+            source[axis] = slice(amount, None)
+            target[axis] = slice(0, -amount)
+        shifted[tuple(target)] = volume[tuple(source)]
+        return shifted
+
+    # Average displaced positions using physical padding. Circular wrapping
+    # would make anatomy leaving one edge reappear at the opposite edge.
     blurred = np.zeros_like(result, dtype=np.float32)
     for offset, weight in zip(offsets, weights, strict=False):
-        blurred += float(weight) * np.roll(result, int(offset), axis=axis)
+        blurred += float(weight) * _shift_without_wrap(result, int(offset))
 
     # Residual ghost edges approximate projection inconsistency.
-    ghost = 0.5 * np.roll(result, ghost_shift, axis=axis)
-    ghost += 0.5 * np.roll(result, -ghost_shift, axis=axis)
+    ghost = 0.5 * _shift_without_wrap(result, ghost_shift)
+    ghost += 0.5 * _shift_without_wrap(result, -ghost_shift)
 
     # Per-slice ghost strength, drawn in slice order (matches the previous
     # scalar-per-slice draws for a given seed) and broadcast over the plane.
@@ -871,18 +897,25 @@ def add_mri_geometric_distortion(
         x1 = np.floor(base1).astype(np.int64)
         f0 = (base0 - x0).astype(np.float32)[:, :, None]
         f1 = (base1 - x1).astype(np.float32)[:, :, None]
-        valid = ((x0 >= 0) & (x0 < width - 1) & (x1 >= 0) & (x1 < height - 1))[:, :, None]
-        x0c = np.clip(x0, 0, width - 2)
-        x1c = np.clip(x1, 0, height - 2)
+        valid = (
+            (base0 >= 0.0)
+            & (base0 <= width - 1)
+            & (base1 >= 0.0)
+            & (base1 <= height - 1)
+        )[:, :, None]
+        x0c = np.clip(x0, 0, width - 1)
+        x1c = np.clip(x1, 0, height - 1)
+        x0n = np.minimum(x0c + 1, width - 1)
+        x1n = np.minimum(x1c + 1, height - 1)
         slice_bytes = width * height * 4
         slab = max(1, min(depth, int(67_108_864 // max(1, slice_bytes))))
         for z0 in range(0, depth, slab):
             z1 = min(depth, z0 + slab)
             block = source[:, :, z0:z1]
             v00 = block[x0c, x1c, :]
-            v01 = block[x0c, x1c + 1, :]
-            v10 = block[x0c + 1, x1c, :]
-            v11 = block[x0c + 1, x1c + 1, :]
+            v01 = block[x0c, x1n, :]
+            v10 = block[x0n, x1c, :]
+            v11 = block[x0n, x1n, :]
             top = v00 * (1.0 - f1) + v01 * f1
             bot = v10 * (1.0 - f1) + v11 * f1
             out = top * (1.0 - f0) + bot * f0

@@ -16,16 +16,18 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name }}
 
-      - name: Create extension zip (manifest at zip root)
+      - name: Download Blender extension tools
         run: |
-          zip -r dicomator.zip . \
-            -x ".git/**" \
-               ".github/**" \
-               ".gitignore" \
-               "AGENTS.md" \
-               "download_wheels.py" \
-               "tests/**" \
-               "ruff.toml"
+          curl --fail --location --retry 3 \
+            "https://download.blender.org/release/Blender5.2/blender-5.2.0-linux-x64.tar.xz" \
+            --output /tmp/blender.tar.xz
+          mkdir -p /tmp/blender
+          tar -xf /tmp/blender.tar.xz --strip-components=1 -C /tmp/blender
+
+      - name: Validate and build extension
+        run: |
+          /tmp/blender/blender --command extension validate
+          /tmp/blender/blender --command extension build --output-filepath dicomator.zip
 
       - name: Upload dicomator.zip to this release
         uses: softprops/action-gh-release@v2

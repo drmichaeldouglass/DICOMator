@@ -2,14 +2,32 @@
 from __future__ import annotations
 
 import math
+import os
 
 import bpy
 from bpy.types import Context, Panel
 from mathutils import Vector
 
-from .constants import MRI_MODALITIES, ensure_pydicom_available, get_pydicom_error
+from .constants import (
+    MRI_MODALITIES,
+    ensure_pydicom_available,
+    estimate_peak_memory_bytes,
+    get_pydicom_error,
+)
 from .drr import resolve_drr_detector_size
 from .utils import get_float_prop, get_str_prop, resolve_output_directory
+
+_ARTIFACT_FLAGS = (
+    "enable_noise",
+    "enable_partial_volume",
+    "enable_metal_artifacts",
+    "enable_ring_artifacts",
+    "enable_motion_artifact",
+    "enable_poisson_noise",
+    "enable_bias_field",
+    "enable_geometric_distortion",
+    "enable_gibbs_ringing",
+)
 
 
 def _selected_meshes(context: Context) -> list[bpy.types.Object]:
@@ -101,6 +119,25 @@ def _draw_export_action(layout: bpy.types.UILayout, context: Context) -> None:
     if not export_dir or not export_dir.strip():
         layout.label(text="Choose an export folder", icon='FILE_FOLDER')
         return
+    if os.path.exists(export_dir) and not os.path.isdir(export_dir):
+        layout.label(text="Export path must be a folder", icon='ERROR')
+        return
+    if os.path.isdir(export_dir):
+        try:
+            output_has_files = bool(os.listdir(export_dir))
+        except OSError:
+            layout.label(text="Cannot inspect export folder", icon='ERROR')
+            return
+        if output_has_files:
+            layout.label(text="Choose a new or empty export folder", icon='ERROR')
+            return
+
+    unit_scale = float(
+        getattr(getattr(context.scene, "unit_settings", None), "scale_length", 1.0) or 1.0
+    )
+    if not math.isclose(unit_scale, 1.0, rel_tol=0.0, abs_tol=1e-9):
+        layout.label(text="Scene Unit Scale must be 1.0", icon='ERROR')
+        return
 
     if not (context.active_object and context.active_object.type == 'MESH'):
         layout.label(text="Select a mesh", icon='INFO')
@@ -134,7 +171,9 @@ def _draw_export_action(layout: bpy.types.UILayout, context: Context) -> None:
             return
 
     estimate = _grid_estimate(_selection_bounds(selected_meshes), props)
-    if estimate is not None and estimate[3] > 100_000_000:
+    if estimate is not None and (
+        estimate[3] > 100_000_000 or max(estimate[:3]) > 2000
+    ):
         if getattr(props, "allow_oversized_grids", False):
             layout.label(text="Oversized grid allowed", icon='ERROR')
         else:
@@ -154,6 +193,7 @@ class VIEW3D_PT_dicomator_panel(Panel):
     def draw(self, context: Context) -> None:  # pragma: no cover - Blender UI code
         layout = self.layout
         props = context.scene.dicomator_props
+        layout.label(text="Synthetic research data only - not clinical", icon='ERROR')
         if not (context.active_object and context.active_object.type == 'MESH'):
             layout.label(text="Select a mesh object to export", icon='INFO')
             return
@@ -205,32 +245,24 @@ class VIEW3D_PT_dicomator_selection_info(Panel):
             col.label(text=f"Est. Grid: {est_width} x {est_height} x {est_depth}")
             col.label(text=f"Total Voxels: {total_voxels:,}")
 
-            # int16 grid is 2 bytes/voxel; the artifact pipeline works on
-            # float32 copies (~12 bytes/voxel peak) and the DRR keeps a
-            # float32 attenuation volume (4 bytes/voxel).
-            bytes_per_voxel = 2
-            artifacts_enabled = any(
-                getattr(props, flag, False)
-                for flag in (
-                    "enable_noise",
-                    "enable_partial_volume",
-                    "enable_metal_artifacts",
-                    "enable_ring_artifacts",
-                    "enable_motion_artifact",
-                    "enable_poisson_noise",
-                    "enable_bias_field",
-                    "enable_geometric_distortion",
-                    "enable_gibbs_ringing",
-                )
+            artifacts_enabled = any(getattr(props, flag, False) for flag in _ARTIFACT_FLAGS)
+            memory_bytes = estimate_peak_memory_bytes(
+                total_voxels,
+                export_image_series=bool(getattr(props, "export_image_series", True)),
+                export_drr=bool(getattr(props, "export_drr", False)),
+                export_rtdose=bool(getattr(props, "export_rtdose", False)),
+                artifacts_enabled=artifacts_enabled,
+                gibbs_enabled=bool(getattr(props, "enable_gibbs_ringing", False)),
             )
-            if artifacts_enabled:
-                bytes_per_voxel += 12
-            if getattr(props, "export_drr", False):
-                bytes_per_voxel += 4
-            memory_mb = (total_voxels * bytes_per_voxel) / (1024 * 1024)
-            col.label(text=f"Est. Peak Memory: {memory_mb:.1f} MB")
+            memory_mb = memory_bytes / (1024 * 1024)
+            col.label(text=f"Conservative Peak Memory: {memory_mb:.1f} MB")
 
-            if total_voxels > 100_000_000:
+            grid_exceeds_limit = total_voxels > 100_000_000 or max(
+                est_width,
+                est_height,
+                est_depth,
+            ) > 2000 or memory_bytes > 2 * 1024**3
+            if grid_exceeds_limit:
                 if getattr(props, "allow_oversized_grids", False):
                     col.label(text="Oversized grid allowed - may exhaust memory", icon='ERROR')
                 else:
@@ -286,9 +318,11 @@ class VIEW3D_PT_dicomator_per_object_hu(Panel):
                 row = col.row(align=True)
                 row.prop(obj, "dicomator_material", text="Material")
                 row.prop(obj, "dicomator_hu", text="HU")
+                col.prop(obj, "dicomator_priority", text="Overlap Priority")
 
             elif obj_type == "RTDOSE":
                 col.prop(obj, "dicomator_dose", text="Dose (Gy)")
+                col.prop(obj, "dicomator_priority", text="Overlap Priority")
 
             elif obj_type == "RTSTRUCT":
                 col.prop(obj, "dicomator_roi_type", text="ROI Type")
@@ -339,6 +373,7 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
         if getattr(props, "export_drr", False):
             drr_box = layout.column(align=True)
             drr_box.prop(props, "drr_resolution_scale")
+            drr_box.prop(props, "drr_water_attenuation_m_inv")
             camera_obj = context.scene.camera
             if camera_obj and camera_obj.type == 'CAMERA':
                 detector_width, detector_height = resolve_drr_detector_size(
@@ -347,6 +382,8 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
                 )
                 drr_box.label(text=f"Active Camera: {camera_obj.name}", icon='CAMERA_DATA')
                 drr_box.label(text=f"Detector: {detector_width} x {detector_height} px", icon='IMAGE_DATA')
+                if str(getattr(camera_obj.data, "type", "PERSP")).upper() != "ORTHO":
+                    drr_box.label(text="Perspective camera: spatial tags omitted", icon='ERROR')
             else:
                 drr_box.label(text="No active scene camera", icon='ERROR')
 
@@ -385,6 +422,11 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
             dose_box.prop(props, "dose_summation_type", text="Summation Type")
             dose_box.prop(props, "dose_accumulation", text="Dose Overlap")
 
+        unit_scale = float(getattr(getattr(context.scene, "unit_settings", None), "scale_length", 1.0) or 1.0)
+        layout.label(text="Patient axes: +X left, +Y posterior, +Z superior", icon='ORIENTATION_GLOBAL')
+        if not math.isclose(unit_scale, 1.0, rel_tol=0.0, abs_tol=1e-9):
+            layout.label(text="Set Scene Unit Scale to 1.0 before export", icon='ERROR')
+
         modality = getattr(props, "imaging_modality", None)
         is_mri = modality in MRI_MODALITIES
         if getattr(props, "export_drr", False):
@@ -416,6 +458,7 @@ class VIEW3D_PT_dicomator_artifacts(Panel):
         is_mri = modality in MRI_MODALITIES
 
         layout.label(text="MRI artifacts" if is_mri else "CT artifacts", icon='SHADERFX')
+        layout.prop(props, "artifact_seed")
 
         gaussian_box = layout.box()
         gaussian_box.prop(props, "enable_noise", text="Gaussian")

@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import math
 import os
+import shutil
+import tempfile
 import time
 from datetime import datetime
 from functools import partial
+from types import SimpleNamespace
 from typing import Generator, Iterable, Sequence
 
 import bmesh
@@ -38,6 +41,7 @@ from .constants import (
     MODALITY_CT,
     MRI_MODALITIES,
     ensure_pydicom_available,
+    estimate_peak_memory_bytes,
 )
 from .dicom_export import export_projection_to_dicom, export_voxel_grid_to_dicom_iter
 from .drr import generate_drr_from_hu_volume_iter
@@ -53,6 +57,19 @@ from .voxelization import (
 
 #: Wall-clock budget (seconds) spent inside the export job per timer tick.
 _MODAL_TIME_BUDGET_S = 0.1
+_MAX_ESTIMATED_MEMORY_BYTES = 2 * 1024**3
+
+_ARTIFACT_FLAGS = (
+    "enable_noise",
+    "enable_partial_volume",
+    "enable_metal_artifacts",
+    "enable_ring_artifacts",
+    "enable_motion_artifact",
+    "enable_poisson_noise",
+    "enable_bias_field",
+    "enable_geometric_distortion",
+    "enable_gibbs_ringing",
+)
 
 
 def _get_int_prop(props, name: str, default: int) -> int:
@@ -64,7 +81,7 @@ def _get_int_prop(props, name: str, default: int) -> int:
         return int(default)
 
 
-def _configured_artifact_stages(props) -> list:
+def _configured_artifact_stages(props, rng: np.random.Generator | None = None) -> list:
     """Build the ordered artifact operations enabled in ``props``.
 
     Each entry is a callable taking and returning a volume; parameters are
@@ -97,6 +114,7 @@ def _configured_artifact_stages(props) -> list:
             density_threshold=float(threshold),
             num_streaks=streaks,
             falloff=float(falloff),
+            rng=rng,
         ))
 
     if getattr(props, "enable_ring_artifacts", False) and is_ct:
@@ -112,6 +130,7 @@ def _configured_artifact_stages(props) -> list:
             ring_radius=float(ring_radius) if ring_radius is not None else None,
             thickness=float(thickness),
             jitter=float(jitter),
+            rng=rng,
         ))
 
     if getattr(props, "enable_motion_artifact", False):
@@ -126,6 +145,8 @@ def _configured_artifact_stages(props) -> list:
             blur_size=blur_size,
             severity=float(severity),
             axis=axis,
+            rng=rng,
+            fill_value=0.0 if is_mri else AIR_DENSITY,
         ))
 
     if getattr(props, "enable_geometric_distortion", False) and is_mri:
@@ -139,6 +160,7 @@ def _configured_artifact_stages(props) -> list:
             b0_strength=float(b0),
             b0_scale=float(b0_scale),
             readout_axis=readout_axis,
+            rng=rng,
         ))
 
     if getattr(props, "enable_gibbs_ringing", False) and is_mri:
@@ -149,20 +171,25 @@ def _configured_artifact_stages(props) -> list:
     if getattr(props, "enable_bias_field", False) and is_mri:
         strength = max(0.0, min(1.0, get_float_prop(props, "bias_field_strength", 0.25)))
         scale = max(0.05, min(1.0, get_float_prop(props, "bias_field_scale", 0.3)))
-        stages.append(partial(add_bias_field_shading, strength=float(strength), scale=float(scale)))
+        stages.append(partial(
+            add_bias_field_shading,
+            strength=float(strength),
+            scale=float(scale),
+            rng=rng,
+        ))
 
     if getattr(props, "enable_noise", False) and get_float_prop(props, "noise_std_dev_hu", 0.0) > 0.0:
         std_dev = max(0.0, get_float_prop(props, "noise_std_dev_hu", 20.0))
         if is_mri:
             # MR magnitude images carry Rician (not Gaussian) noise; the value is
             # reused as the underlying complex-channel standard deviation.
-            stages.append(partial(add_rician_noise, sigma=float(std_dev)))
+            stages.append(partial(add_rician_noise, sigma=float(std_dev), rng=rng))
         else:
-            stages.append(partial(add_gaussian_noise, std_hu=float(std_dev)))
+            stages.append(partial(add_gaussian_noise, std_hu=float(std_dev), rng=rng))
 
     if getattr(props, "enable_poisson_noise", False) and get_float_prop(props, "poisson_scale", 0.0) > 0.0 and is_ct:
         scale = max(1.0, get_float_prop(props, "poisson_scale", 150.0))
-        stages.append(partial(add_poisson_noise, scale=float(scale)))
+        stages.append(partial(add_poisson_noise, scale=float(scale), rng=rng))
 
     if is_mri and stages:
         # The artifact helpers clamp to the CT HU range, which permits
@@ -172,14 +199,21 @@ def _configured_artifact_stages(props) -> list:
     return stages
 
 
-def _apply_configured_artifacts_iter(hu_array, props) -> Generator[tuple[int, int], None, object]:
+def _apply_configured_artifacts_iter(
+    hu_array,
+    props,
+    *,
+    phase_index: int = 0,
+) -> Generator[tuple[int, int], None, object]:
     """Apply the configured artifacts, yielding ``(stage, total)`` progress.
 
     Yields between artifact stages so the modal operator can update the UI
     instead of running the whole chain inside a single timer tick.
     """
 
-    stages = _configured_artifact_stages(props)
+    base_seed = max(0, _get_int_prop(props, "artifact_seed", 0))
+    rng = np.random.default_rng(np.random.SeedSequence([base_seed, int(phase_index)]))
+    stages = _configured_artifact_stages(props, rng=rng)
     total = max(1, len(stages))
     result = hu_array
     yield 0, total
@@ -302,24 +336,37 @@ def _bounds_across_frames_iter(
 
 def _non_manifold_names_iter(
     objects: Sequence[bpy.types.Object],
+    *,
+    apply_modifiers: bool,
+    depsgraph: bpy.types.Depsgraph | None,
 ) -> Generator[tuple[int, int], None, list[str]]:
-    """Return names of objects whose base mesh has non-manifold edges.
+    """Return names of objects whose exported mesh has non-manifold edges.
 
     Ray-cast voxelization assumes watertight surfaces; non-manifold meshes can
-    produce incorrectly filled columns. The check runs on the base mesh (a
-    modifier stack may change manifoldness either way), so it is a heuristic
-    warning rather than a guarantee.
+    produce incorrectly filled columns. When modifiers are enabled the check
+    runs on the evaluated mesh used for export.
     """
 
     names: list[str] = []
     for index, obj in enumerate(objects, start=1):
         bm = bmesh.new()
+        obj_eval = None
         try:
-            bm.from_mesh(obj.data)
+            if apply_modifiers and depsgraph is not None:
+                obj_eval = obj.evaluated_get(depsgraph)
+                mesh = obj_eval.to_mesh(
+                    preserve_all_data_layers=False,
+                    depsgraph=depsgraph,
+                )
+            else:
+                mesh = obj.data
+            bm.from_mesh(mesh)
             if any(not edge.is_manifold for edge in bm.edges):
                 names.append(obj.name)
         finally:
             bm.free()
+            if obj_eval is not None:
+                obj_eval.to_mesh_clear()
         yield index, len(objects)
     return names
 
@@ -381,6 +428,65 @@ def _series_description(base_description: str) -> str:
     return str(base_description or "DICOMator Export").strip() or "DICOMator Export"
 
 
+def _snapshot_properties(props) -> SimpleNamespace:
+    """Freeze scalar Blender properties so a modal export is consistent."""
+
+    values: dict[str, object] = {}
+    rna_properties = getattr(getattr(props, "bl_rna", None), "properties", ())
+    names = {getattr(item, "identifier", "") for item in rna_properties}
+    names.update(dir(props))
+    for name in names:
+        if name.startswith("_"):
+            continue
+        try:
+            value = getattr(props, name)
+        except Exception:
+            continue
+        if isinstance(value, (bool, int, float, str)) or value is None:
+            values[name] = value
+    return SimpleNamespace(**values)
+
+
+def _prepare_atomic_output_directory(output_dir: str) -> tuple[str, str]:
+    """Return ``(final, staging)`` paths for a new empty export."""
+
+    final_output_dir = os.path.abspath(output_dir)
+    output_parent = os.path.dirname(final_output_dir)
+    os.makedirs(output_parent, exist_ok=True)
+    if os.path.exists(final_output_dir):
+        if not os.path.isdir(final_output_dir):
+            raise ValueError("export path exists and is not a directory")
+        if os.listdir(final_output_dir):
+            raise ValueError(
+                "export directory is not empty; choose a new or empty directory to avoid mixing studies"
+            )
+    if not os.access(output_parent, os.W_OK):
+        raise PermissionError(f"directory is not writable: {output_parent}")
+    staging_dir = tempfile.mkdtemp(
+        prefix=f".{os.path.basename(final_output_dir) or 'DICOMator'}-",
+        dir=output_parent,
+    )
+    return final_output_dir, staging_dir
+
+
+def _finalize_atomic_output_directory(
+    staging_dir: str,
+    final_output_dir: str,
+    *,
+    commit: bool,
+) -> None:
+    """Commit a complete staging directory or remove it after failure."""
+
+    if not os.path.isdir(staging_dir):
+        return
+    if not commit:
+        shutil.rmtree(staging_dir)
+        return
+    if os.path.isdir(final_output_dir):
+        os.rmdir(final_output_dir)
+    os.replace(staging_dir, final_output_dir)
+
+
 class MESH_OT_export_dicom(Operator):
     """Export selected meshes to enabled DICOM outputs (ESC cancels)."""
 
@@ -390,6 +496,8 @@ class MESH_OT_export_dicom(Operator):
 
     _timer = None
     _job = None
+    _staging_dir = None
+    _final_output_dir = None
     # Class-level flag: only one modal export may run at a time.
     _running = False
 
@@ -440,16 +548,6 @@ class MESH_OT_export_dicom(Operator):
             self.report({'ERROR'}, "Please specify an export directory")
             return {'CANCELLED'}
 
-        try:
-            os.makedirs(output_dir, exist_ok=True)
-        except Exception as exc:
-            self.report({'ERROR'}, f"Cannot create output directory: {exc}")
-            return {'CANCELLED'}
-
-        if not os.access(output_dir, os.W_OK):
-            self.report({'ERROR'}, f"Output directory is not writable: {output_dir}")
-            return {'CANCELLED'}
-
         export_image_series = bool(getattr(props, "export_image_series", True))
         export_drr = bool(getattr(props, "export_drr", False))
         export_rtdose = bool(getattr(props, "export_rtdose", False))
@@ -468,6 +566,12 @@ class MESH_OT_export_dicom(Operator):
         if export_rtstruct and not struct_objects:
             self.report({'ERROR'}, "RT Structure export requires at least one RT Structure mesh")
             return {'CANCELLED'}
+        if export_rtdose and str(getattr(props, "dose_summation_type", "PLAN")).upper() != "PLAN":
+            self.report(
+                {'ERROR'},
+                "Only PLAN dose summation is supported until fraction and beam geometry are implemented",
+            )
+            return {'CANCELLED'}
 
         export_objects = []
         if export_image_series or export_drr:
@@ -481,11 +585,25 @@ class MESH_OT_export_dicom(Operator):
         if export_drr and (camera_obj is None or camera_obj.type != 'CAMERA'):
             self.report({'ERROR'}, "Set an active scene camera before exporting a DRR")
             return {'CANCELLED'}
+        if export_drr and str(getattr(camera_obj.data, "type", "PERSP")).upper() != "ORTHO":
+            self.report(
+                {'WARNING'},
+                "Perspective DRR spatial tags will be omitted; use an orthographic camera for patient-space geometry",
+            )
 
         lateral_mm = get_float_prop(props, "lateral_resolution_mm", 2.0)
         axial_mm = get_float_prop(props, "axial_resolution_mm", 2.0)
         if lateral_mm <= 0.0 or axial_mm <= 0.0:
             self.report({'ERROR'}, "Voxel spacing must be greater than zero")
+            return {'CANCELLED'}
+
+        unit_settings = getattr(context.scene, "unit_settings", None)
+        scene_scale = float(getattr(unit_settings, "scale_length", 1.0) or 1.0)
+        if not math.isfinite(scene_scale) or not math.isclose(scene_scale, 1.0, rel_tol=0.0, abs_tol=1e-9):
+            self.report(
+                {'ERROR'},
+                "DICOMator requires Scene Unit Scale = 1.0 because one Blender unit is interpreted as one metre",
+            )
             return {'CANCELLED'}
 
         modality_key = getattr(props, "imaging_modality", MODALITY_CT)
@@ -498,6 +616,16 @@ class MESH_OT_export_dicom(Operator):
             self.report({'ERROR'}, str(exc))
             return {'CANCELLED'}
 
+        try:
+            final_output_dir, staging_dir = _prepare_atomic_output_directory(
+                output_dir
+            )
+        except Exception as exc:
+            self.report({'ERROR'}, f"Cannot prepare output directory: {exc}")
+            return {'CANCELLED'}
+
+        props_snapshot = _snapshot_properties(props)
+
         config = {
             'ct_objects': ct_objects,
             'dose_objects': dose_objects,
@@ -508,7 +636,9 @@ class MESH_OT_export_dicom(Operator):
             'export_rtdose': export_rtdose,
             'export_rtstruct': export_rtstruct,
             'camera_obj': camera_obj,
-            'output_dir': output_dir,
+            'output_dir': staging_dir,
+            'final_output_dir': final_output_dir,
+            'props': props_snapshot,
             'lateral_mm': float(lateral_mm),
             'axial_mm': float(axial_mm),
             'voxel_size_m': (float(lateral_mm) * 0.001, float(lateral_mm) * 0.001, float(axial_mm) * 0.001),
@@ -522,21 +652,37 @@ class MESH_OT_export_dicom(Operator):
         }
 
         self._job = self._export_job(context, config)
+        self._staging_dir = staging_dir
+        self._final_output_dir = final_output_dir
         window_manager = context.window_manager
-        window_manager.progress_begin(0, 1)
-        context.workspace.status_text_set("DICOMator: exporting... (ESC to cancel)")
-        self._timer = window_manager.event_timer_add(0.02, window=context.window)
-        window_manager.modal_handler_add(self)
+        try:
+            window_manager.progress_begin(0, 1)
+            context.workspace.status_text_set("DICOMator: exporting... (ESC to cancel)")
+            self._timer = window_manager.event_timer_add(0.02, window=context.window)
+            window_manager.modal_handler_add(self)
+        except Exception as exc:
+            if self._timer is not None:
+                window_manager.event_timer_remove(self._timer)
+                self._timer = None
+            self._job.close()
+            self._job = None
+            self._staging_dir = None
+            self._final_output_dir = None
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            context.workspace.status_text_set(None)
+            window_manager.progress_end()
+            self.report({'ERROR'}, f"Cannot start background export: {exc}")
+            return {'CANCELLED'}
         MESH_OT_export_dicom._running = True
         return {'RUNNING_MODAL'}
 
     def modal(self, context: bpy.types.Context, event: bpy.types.Event):  # pragma: no cover - Blender runtime
         if event.type == 'ESC':
-            self._finish(context)
+            self._finish(context, commit=False)
             self.report({'WARNING'}, "DICOM export cancelled")
             return {'CANCELLED'}
         if event.type != 'TIMER':
-            return {'PASS_THROUGH'}
+            return {'RUNNING_MODAL'}
 
         deadline = time.monotonic() + _MODAL_TIME_BUDGET_S
         progress = None
@@ -544,15 +690,19 @@ class MESH_OT_export_dicom(Operator):
             while time.monotonic() < deadline:
                 progress = next(self._job)
         except StopIteration as stop:
-            self._finish(context)
             outcome = stop.value or {}
             if 'error' in outcome:
+                self._finish(context, commit=False)
                 self.report({'ERROR'}, outcome['error'])
+                return {'CANCELLED'}
+            finish_error = self._finish(context, commit=True)
+            if finish_error:
+                self.report({'ERROR'}, finish_error)
                 return {'CANCELLED'}
             self.report({'INFO'}, outcome.get('success', "DICOM export complete"))
             return {'FINISHED'}
         except Exception as exc:
-            self._finish(context)
+            self._finish(context, commit=False)
             self.report({'ERROR'}, f"Export failed: {exc}")
             return {'CANCELLED'}
 
@@ -560,7 +710,12 @@ class MESH_OT_export_dicom(Operator):
             context.window_manager.progress_update(float(progress))
         return {'RUNNING_MODAL'}
 
-    def _finish(self, context: bpy.types.Context) -> None:  # pragma: no cover - Blender runtime
+    def _finish(
+        self,
+        context: bpy.types.Context,
+        *,
+        commit: bool,
+    ) -> str | None:  # pragma: no cover - Blender runtime
         MESH_OT_export_dicom._running = False
         window_manager = context.window_manager
         if self._timer is not None:
@@ -570,18 +725,38 @@ class MESH_OT_export_dicom(Operator):
             # Closing the generator runs its finally blocks (frame restore).
             self._job.close()
             self._job = None
-        context.workspace.status_text_set(None)
-        window_manager.progress_end()
+        staging_dir = self._staging_dir
+        final_output_dir = self._final_output_dir
+        self._staging_dir = None
+        self._final_output_dir = None
+        try:
+            if staging_dir and os.path.isdir(staging_dir):
+                if final_output_dir is None:
+                    raise RuntimeError("final output directory was not recorded")
+                _finalize_atomic_output_directory(
+                    staging_dir,
+                    final_output_dir,
+                    commit=commit,
+                )
+        except Exception as exc:
+            if staging_dir and os.path.isdir(staging_dir):
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            return f"Could not finalize DICOM export: {exc}"
+        finally:
+            context.workspace.status_text_set(None)
+            window_manager.progress_end()
+        return None
 
     def _export_job(self, context: bpy.types.Context, config: dict) -> Generator[float, None, dict[str, str]]:
         """Generator that performs the full export, yielding 0..1 progress."""
 
-        props = context.scene.dicomator_props
+        props = config['props']
         frames: list[int] = config['frames']
         num_phases = len(frames)
         voxel_size_m: tuple[float, float, float] = config['voxel_size_m']
         apply_modifiers: bool = config['apply_modifiers']
         output_dir: str = config['output_dir']
+        final_output_dir: str = config['final_output_dir']
         dicom_modality: str = config['dicom_modality']
         export_image_series: bool = config['export_image_series']
         export_drr: bool = config['export_drr']
@@ -596,7 +771,13 @@ class MESH_OT_export_dicom(Operator):
         background_value = 0.0 if dicom_modality == "MR" else AIR_DENSITY
 
         non_manifold = yield from _run_subtask(
-            _non_manifold_names_iter(config['export_objects']), 0.0, 0.01
+            _non_manifold_names_iter(
+                config['export_objects'],
+                apply_modifiers=apply_modifiers,
+                depsgraph=context.evaluated_depsgraph_get(),
+            ),
+            0.0,
+            0.01,
         )
         if non_manifold:
             shown = ", ".join(non_manifold[:5])
@@ -658,23 +839,35 @@ class MESH_OT_export_dicom(Operator):
         estimated_width, estimated_height, estimated_depth = _estimate_grid_dimensions(padded_bounds, voxel_size_m)
 
         total_estimated_voxels = estimated_width * estimated_height * estimated_depth
+        artifacts_enabled = any(getattr(props, flag, False) for flag in _ARTIFACT_FLAGS)
+        estimated_peak_bytes = estimate_peak_memory_bytes(
+            total_estimated_voxels,
+            export_image_series=export_image_series,
+            export_drr=export_drr,
+            export_rtdose=export_rtdose,
+            artifacts_enabled=artifacts_enabled,
+            gibbs_enabled=bool(getattr(props, "enable_gibbs_ringing", False)),
+        )
         oversized = (
             estimated_width > 2000
             or estimated_height > 2000
             or estimated_depth > 2000
             or total_estimated_voxels > 100_000_000
+            or estimated_peak_bytes > _MAX_ESTIMATED_MEMORY_BYTES
         )
         if oversized:
             size_text = (
                 f"{estimated_width}x{estimated_height}x{estimated_depth} "
                 f"({total_estimated_voxels:,} voxels). "
+                f"Estimated peak memory: {estimated_peak_bytes / (1024**3):.2f} GiB. "
                 f"Selection size: {(bounds[1] - bounds[0]):.3f}x{(bounds[3] - bounds[2]):.3f}x{(bounds[5] - bounds[4]):.3f}m."
             )
             if not getattr(props, "allow_oversized_grids", False):
                 return {
                     'error': (
                         f"Voxel grid too large: {size_text} "
-                        "Limits: 2000 voxels per dimension, 100,000,000 total. "
+                        "Limits: 2000 voxels per dimension, 100,000,000 total, "
+                        "and 2 GiB estimated peak array memory. "
                         "Increase the voxel spacing or enable 'Allow Oversized Grids' "
                         "in the Export panel."
                     )
@@ -776,7 +969,11 @@ class MESH_OT_export_dicom(Operator):
                         slot += 1
                         image_series_uid = shared_constants.generate_uid()
                         hu_array_to_export = yield from _run_subtask(
-                            _apply_configured_artifacts_iter(hu_array, props),
+                            _apply_configured_artifacts_iter(
+                                hu_array,
+                                props,
+                                phase_index=phase_index,
+                            ),
                             write_start + type_span * 0.45,
                             write_start + type_span * 0.55,
                         )
@@ -806,6 +1003,10 @@ class MESH_OT_export_dicom(Operator):
                                 temporal_position_index=phase_index if num_phases > 1 else None,
                                 temporal_position_identifier=phase_index if num_phases > 1 else None,
                                 phase_index=phase_index if num_phases > 1 else None,
+                                derivation_description=(
+                                    f"Synthetic {dicom_modality} voxelization from Blender geometry; "
+                                    f"artifact seed {getattr(props, 'artifact_seed', 0)}; phase {phase_index}"
+                                ),
                             ),
                             write_start + type_span * 0.55,
                             write_start + type_span,
@@ -835,6 +1036,11 @@ class MESH_OT_export_dicom(Operator):
                                 # use the fixed physical mapping for 4D so
                                 # intensities are comparable across phases.
                                 fixed_normalization=num_phases > 1,
+                                water_attenuation_coefficient_m_inv=get_float_prop(
+                                    props,
+                                    "drr_water_attenuation_m_inv",
+                                    20.0,
+                                ),
                             ),
                             progress_start,
                             write_start + type_span,
@@ -871,6 +1077,11 @@ class MESH_OT_export_dicom(Operator):
                             number_of_temporal_positions=num_phases if num_phases > 1 else None,
                             temporal_position_index=phase_index if num_phases > 1 else None,
                             temporal_position_identifier=phase_index if num_phases > 1 else None,
+                            derivation_description=(
+                                "Synthetic monoenergetic DRR from Blender geometry; "
+                                f"water attenuation coefficient "
+                                f"{projection_metadata['water_attenuation_coefficient_m_inv']:.6g} m^-1"
+                            ),
                         )
                         if 'error' in result:
                             return result
@@ -923,6 +1134,9 @@ class MESH_OT_export_dicom(Operator):
                         series_instance_uid=dose_series_uid,
                         series_number=phase_index + len(frames) * (int(export_image_series) + int(export_drr)),
                         phase_index=phase_index if num_phases > 1 else None,
+                        derivation_description=(
+                            "Synthetic plan-level RT Dose voxelized from Blender geometry"
+                        ),
                     )
                     if 'error' in result:
                         return result
@@ -966,6 +1180,9 @@ class MESH_OT_export_dicom(Operator):
                             referenced_ct_series_instance_uid=ct_series_uid_for_struct,
                             referenced_ct_sop_class_uid=ct_sop_class_uid_for_struct,
                             referenced_ct_sop_instance_uids=ct_sop_instance_uids_for_struct,
+                            derivation_description=(
+                                "Synthetic RT Structure Set contoured from Blender geometry"
+                            ),
                         ),
                         t_start,
                         t_start + type_span,
@@ -979,7 +1196,7 @@ class MESH_OT_export_dicom(Operator):
         finally:
             context.scene.frame_set(saved_frame, subframe=0.0)
 
-        return {'success': f"Successfully exported {num_phases} phase(s) [{types_label}] to {output_dir}"}
+        return {'success': f"Successfully exported {num_phases} phase(s) [{types_label}] to {final_output_dir}"}
 
 
 __all__ = ["MESH_OT_export_dicom"]

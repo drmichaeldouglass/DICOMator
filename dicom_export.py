@@ -16,8 +16,13 @@ from .constants import (
     MIN_HU_VALUE,
     MODALITY_MRI_T1,
     MR_SEQUENCE_PARAMETERS,
+    apply_synthetic_metadata,
     normalize_dicom_date,
+    resolve_positive_voxel_size,
+    truncate_lo,
+    truncate_pn,
     truncate_sh,
+    validate_numeric_array,
 )
 
 SliceProgressCallback = Optional[Callable[[int, int], None]]
@@ -74,6 +79,7 @@ def export_voxel_grid_to_dicom_iter(
     number_of_temporal_positions: Optional[int] = None,
     phase_index: Optional[int] = None,
     temporal_position_index: Optional[int] = None,
+    derivation_description: Optional[str] = None,
 ) -> ExportGenerator:
     """Export ``voxel_grid`` to DICOM slices, yielding per-slice progress.
 
@@ -93,30 +99,38 @@ def export_voxel_grid_to_dicom_iter(
     FileDataset = shared_constants.FileDataset
     generate_uid = shared_constants.generate_uid
 
-    os.makedirs(output_dir, exist_ok=True)
-
     modality = str(dicom_modality or "CT").upper()
     if modality not in {"CT", "MR"}:
         modality = "CT"
+
+    try:
+        source_grid = validate_numeric_array(voxel_grid, name="voxel_grid", ndim=3)
+        vx_m, vy_m, vz_m = resolve_positive_voxel_size(voxel_size)
+        bbox_components = [float(bbox_min.x), float(bbox_min.y), float(bbox_min.z)]
+        if not all(np.isfinite(component) for component in bbox_components):
+            raise ValueError("bbox_min components must be finite")
+    except (AttributeError, TypeError, ValueError) as exc:
+        return {'error': str(exc)}
+
+    os.makedirs(output_dir, exist_ok=True)
 
     current_datetime = study_datetime or datetime.now()
     date_str = current_datetime.strftime('%Y%m%d')
     time_str = current_datetime.strftime('%H%M%S.%f')
 
-    num_slices = voxel_grid.shape[2]
+    num_slices = source_grid.shape[2]
     if direct_hu:
-        hu_grid = np.asarray(voxel_grid, dtype=np.int16)
+        # Clip before casting so values outside int16 cannot wrap around.
+        hu_grid = np.clip(source_grid, MIN_HU_VALUE, MAX_HU_VALUE).astype(
+            np.int16, copy=False
+        )
     else:
-        hu_grid = np.where(voxel_grid > 0, DEFAULT_DENSITY, AIR_DENSITY).astype(np.int16, copy=False)
-    hu_grid = np.clip(hu_grid, MIN_HU_VALUE, MAX_HU_VALUE).astype(np.int16, copy=False)
-
-    if isinstance(voxel_size, Sequence) and len(voxel_size) == 3:
-        vx_m, vy_m, vz_m = (float(component) for component in voxel_size)
-    else:
-        vx_m = vy_m = vz_m = float(voxel_size)
+        hu_grid = np.where(source_grid > 0, DEFAULT_DENSITY, AIR_DENSITY).astype(
+            np.int16, copy=False
+        )
     vx_mm, vy_mm, vz_mm = vx_m * 1000.0, vy_m * 1000.0, vz_m * 1000.0
 
-    bbox_min_mm = Vector((bbox_min.x * 1000.0, bbox_min.y * 1000.0, bbox_min.z * 1000.0))
+    bbox_min_mm = Vector(tuple(component * 1000.0 for component in bbox_components))
 
     study_instance_uid = study_instance_uid or generate_uid()
     frame_of_reference_uid = frame_of_reference_uid or generate_uid()
@@ -127,9 +141,9 @@ def export_voxel_grid_to_dicom_iter(
         'frame_of_reference_uid': frame_of_reference_uid,
         'series_instance_uid': series_instance_uid,
         'series_number': series_number,
-        'series_description': series_description,
-        'patient_name': patient_name,
-        'patient_id': patient_id,
+        'series_description': truncate_lo(series_description, "DICOMator Export"),
+        'patient_name': truncate_pn(patient_name, "Anonymous"),
+        'patient_id': truncate_lo(patient_id, "12345678"),
         'patient_sex': patient_sex,
         'date_str': date_str,
         'time_str': time_str,
@@ -150,9 +164,18 @@ def export_voxel_grid_to_dicom_iter(
             file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
 
             dataset = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
-            dataset.ImageType = ['ORIGINAL', 'PRIMARY', 'AXIAL']
+            dataset.ImageType = (
+                ['DERIVED', 'PRIMARY', 'AXIAL']
+                if modality == "CT"
+                else ['DERIVED', 'PRIMARY', 'OTHER']
+            )
             dataset.SOPClassUID = file_meta.MediaStorageSOPClassUID
             dataset.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
+            apply_synthetic_metadata(
+                dataset,
+                derivation_description
+                or f"Synthetic {modality} image voxelized from Blender geometry",
+            )
 
             dataset.PatientName = common_metadata['patient_name']
             dataset.PatientID = common_metadata['patient_id']
@@ -162,6 +185,7 @@ def export_voxel_grid_to_dicom_iter(
 
             dataset.StudyInstanceUID = common_metadata['study_instance_uid']
             dataset.FrameOfReferenceUID = common_metadata['frame_of_reference_uid']
+            dataset.PositionReferenceIndicator = ''
             dataset.StudyID = truncate_sh(study_id, '1')
             dataset.AccessionNumber = truncate_sh(accession_number, '1')
             dataset.StudyDate = common_metadata['date_str']
@@ -243,6 +267,7 @@ def export_voxel_grid_to_dicom_iter(
                 # Image IOD does not include them.
                 dataset.RescaleIntercept = 0.0
                 dataset.RescaleSlope = 1.0
+                dataset.RescaleType = 'HU'
             if modality == "MR":
                 dataset.WindowCenter = 128
                 dataset.WindowWidth = 256
@@ -295,6 +320,7 @@ def export_projection_to_dicom(
     temporal_position_identifier: Optional[int] = None,
     temporal_position_index: Optional[int] = None,
     number_of_temporal_positions: Optional[int] = None,
+    derivation_description: Optional[str] = None,
 ) -> dict[str, str]:
     """Export a single DRR projection image to DICOM secondary capture."""
 
@@ -306,11 +332,40 @@ def export_projection_to_dicom(
     FileDataset = shared_constants.FileDataset
     generate_uid = shared_constants.generate_uid
 
-    os.makedirs(output_dir, exist_ok=True)
+    try:
+        image_2d = validate_numeric_array(
+            projection_image,
+            name="projection_image",
+            ndim=2,
+        )
+        if pixel_spacing_mm is not None:
+            if len(pixel_spacing_mm) != 2:
+                raise ValueError("pixel_spacing_mm must contain two values")
+            spacing = [float(value) for value in pixel_spacing_mm]
+            if not all(np.isfinite(value) and value > 0.0 for value in spacing):
+                raise ValueError("pixel_spacing_mm values must be finite and greater than zero")
+        else:
+            spacing = None
+        if image_position_patient is not None:
+            if len(image_position_patient) != 3:
+                raise ValueError("image_position_patient must contain three values")
+            position = [float(value) for value in image_position_patient]
+            if not all(np.isfinite(value) for value in position):
+                raise ValueError("image_position_patient values must be finite")
+        else:
+            position = None
+        if image_orientation_patient is not None:
+            if len(image_orientation_patient) != 6:
+                raise ValueError("image_orientation_patient must contain six values")
+            orientation = [float(value) for value in image_orientation_patient]
+            if not all(np.isfinite(value) for value in orientation):
+                raise ValueError("image_orientation_patient values must be finite")
+        else:
+            orientation = None
+    except (TypeError, ValueError) as exc:
+        return {'error': str(exc)}
 
-    image_2d = np.asarray(projection_image)
-    if image_2d.ndim != 2:
-        return {'error': 'Projection image must be a 2D array'}
+    os.makedirs(output_dir, exist_ok=True)
 
     if image_2d.dtype != np.uint16:
         image_2d = np.clip(image_2d, 0, 65535).astype(np.uint16, copy=False)
@@ -335,16 +390,21 @@ def export_projection_to_dicom(
         dataset.SOPInstanceUID = file_meta.MediaStorageSOPInstanceUID
         dataset.ImageType = ['DERIVED', 'PRIMARY', 'DRR']
         dataset.ConversionType = 'SYN'
-        dataset.DerivationDescription = 'Digital radiograph reconstruction from voxelized Blender geometry'
+        apply_synthetic_metadata(
+            dataset,
+            derivation_description
+            or 'Digital radiograph reconstruction from voxelized Blender geometry',
+        )
 
-        dataset.PatientName = patient_name
-        dataset.PatientID = patient_id
+        dataset.PatientName = truncate_pn(patient_name, "Anonymous")
+        dataset.PatientID = truncate_lo(patient_id, "12345678")
         dataset.PatientBirthDate = normalize_dicom_date(patient_birth_date)
         dataset.PatientSex = patient_sex
         dataset.PatientPosition = str(patient_position)
 
         dataset.StudyInstanceUID = study_instance_uid
         dataset.FrameOfReferenceUID = frame_of_reference_uid
+        dataset.PositionReferenceIndicator = ''
         dataset.StudyID = truncate_sh(study_id, '1')
         dataset.AccessionNumber = truncate_sh(accession_number, '1')
         dataset.StudyDate = date_str
@@ -353,7 +413,7 @@ def export_projection_to_dicom(
 
         dataset.SeriesInstanceUID = series_instance_uid
         dataset.SeriesNumber = int(series_number)
-        dataset.SeriesDescription = series_description
+        dataset.SeriesDescription = truncate_lo(series_description, "DRR from DICOMator")
         dataset.SeriesDate = date_str
         dataset.SeriesTime = time_str
 
@@ -377,12 +437,12 @@ def export_projection_to_dicom(
         dataset.AcquisitionDate = date_str
         dataset.AcquisitionTime = time_str
 
-        if image_position_patient is not None:
-            dataset.ImagePositionPatient = [float(value) for value in image_position_patient]
-        if image_orientation_patient is not None:
-            dataset.ImageOrientationPatient = [float(value) for value in image_orientation_patient]
-        if pixel_spacing_mm is not None:
-            dataset.PixelSpacing = [float(pixel_spacing_mm[0]), float(pixel_spacing_mm[1])]
+        if position is not None:
+            dataset.ImagePositionPatient = position
+        if orientation is not None:
+            dataset.ImageOrientationPatient = orientation
+        if spacing is not None:
+            dataset.PixelSpacing = spacing
 
         rows, cols = image_2d.shape
         dataset.SamplesPerPixel = 1
@@ -403,7 +463,10 @@ def export_projection_to_dicom(
         dataset.WindowWidth = int(window_width)
         dataset.PixelData = image_2d.tobytes()
 
-        output_path = os.path.join(output_dir, filename)
+        safe_filename = os.path.basename(str(filename))
+        if not safe_filename:
+            return {'error': 'filename must not be empty'}
+        output_path = os.path.join(output_dir, safe_filename)
         dataset.save_as(output_path, enforce_file_format=True)
     except Exception as exc:  # pragma: no cover - Blender runtime feedback
         return {'error': f"Error saving DRR DICOM file: {exc}"}
