@@ -49,7 +49,7 @@ def update_object_material(self, context: bpy.types.Context) -> None:
     apply_material_intensity(self, modality)
 
 
-class DICOMatorProperties(bpy.types.PropertyGroup):
+class DICOMATOR_PG_properties(bpy.types.PropertyGroup):
     """Properties exposed in the DICOMator UI."""
 
     export_image_series: bpy.props.BoolProperty(
@@ -500,7 +500,7 @@ class DICOMatorProperties(bpy.types.PropertyGroup):
 
 
 __all__ = [
-    "DICOMatorProperties",
+    "DICOMATOR_PG_properties",
     "apply_material_intensity",
     "update_imaging_modality",
     "update_object_material",

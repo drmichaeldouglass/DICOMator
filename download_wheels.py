@@ -1,4 +1,4 @@
-"""Download optional wheels that match Blender's bundled Python."""
+"""Download unmodified PyPI wheels for the Blender extension package."""
 from __future__ import annotations
 
 import os

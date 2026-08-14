@@ -178,7 +178,7 @@ def _draw_export_action(layout: bpy.types.UILayout, context: Context) -> None:
             layout.label(text="Oversized grid allowed", icon='ERROR')
         else:
             layout.label(text="Grid too large - export will abort", icon='ERROR')
-    layout.operator("mesh.export_dicom", text=button_text, icon='EXPORT')
+    layout.operator("dicomator.export_dicom", text=button_text, icon='EXPORT')
 
 
 class VIEW3D_PT_dicomator_panel(Panel):

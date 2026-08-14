@@ -65,9 +65,7 @@ Blender add-on that converts selected mesh objects into DICOM outputs for synthe
 
 - Blender 5.1+ (Python 3.13 runtime); `blender_version_min` in the extension manifest is `5.1.0`
 - NumPy (bundled with Blender, used for grid operations)
-- pydicom 3.0.1+ (required for DICOM export; vendored in `wheels/`; the add-on warns and disables export if missing)
-- Optional helper wheels
-  - Run `download_wheels.py` to download a Blender-targeted `pydicom` wheel into `./wheels` (defaults to Blender 5.1 / Python 3.13 tags, overrideable via environment variables)
+- pydicom 3.0.1 (bundled as an unmodified PyPI wheel and installed automatically by Blender)
 
 ## Blender 5.1 compatibility
 
@@ -78,22 +76,26 @@ Blender add-on that converts selected mesh objects into DICOM outputs for synthe
 
 ## Installation
 
-Blender uses the **Extensions** workflow for add-ons.
+Once DICOMator is listed on the official Blender Extensions platform:
 
-1. Create an extension zip from this repository root (the zip must include `blender_manifest.toml` at the top level).
+1. Open **Edit → Preferences → Get Extensions**.
+2. Search for **DICOMator**.
+3. Select **Install**.
+
+To install a development or pre-release build from this repository:
+
+1. Build the extension from the repository root:
+
+   ```bash
+   blender --command extension validate
+   blender --command extension build --output-filepath dicomator.zip
+   ```
+
 2. In Blender, open **Edit → Preferences → Extensions**.
-3. Open the Extensions menu (top-right caret) and choose **Install from Disk...**.
-4. Select the zip file and install.
-5. Enable **DICOMator** if it is not enabled automatically.
+3. Open the Extensions menu and choose **Install from Disk...**.
+4. Select `dicomator.zip`.
 
-Development fallback (unpacked source):
-
-1. Copy or symlink this folder into your Blender user scripts add-ons directory.
-2. In Blender, open **Edit → Preferences → Add-ons**, search for **DICOMator**, and enable it.
-
-Dependency note:
-
-- Ensure `pydicom` is available in Blender's Python environment.
+The built package is self-contained. Blender installs its bundled pydicom wheel; users do not need to modify Blender's Python environment.
 
 ## Usage
 
@@ -214,7 +216,7 @@ Notes:
 ## Troubleshooting
 
 - **“pydicom library not available”**
-  - Install `pydicom` in Blender’s Python or use the helper script to fetch wheels, then restart Blender.
+  - Reinstall the DICOMator extension package. Its pydicom dependency is bundled and should be installed automatically by Blender.
 - **“Voxel grid too large”**
   - Increase voxel spacing (mm), reduce padding/selection size, or limit the frame range. To proceed anyway, enable **Allow Oversized Grids** in the Export panel.
 - **“Set an active scene camera before exporting a DRR”**
@@ -240,7 +242,8 @@ Notes:
   ```
 
 - Continuous integration runs byte-compilation, lint, DICOM/numeric tests, and real Blender registration smoke tests against the minimum supported and current stable Blender series.
+- It also runs Blender's official extension validator and builds the distributable archive. Maintainers can refresh the unmodified PyPI wheel with `download_wheels.py` when updating the pinned pydicom version.
 
 ## License
 
-This project is released under the MIT License. See [LICENSE](LICENSE) for details.
+This project is released under the GNU General Public License v3.0 or later, as required for add-ons distributed on the official Blender Extensions platform. See [LICENSE](LICENSE) for details. The bundled pydicom wheel retains its upstream MIT license.

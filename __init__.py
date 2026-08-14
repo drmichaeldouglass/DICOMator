@@ -43,7 +43,7 @@ from .artifacts import (
 from .constants import DICOM_OBJECT_TYPE_ITEMS, MATERIAL_ITEMS, MAX_HU_VALUE, MIN_HU_VALUE, ROI_TYPE_ITEMS
 from .dicom_export import export_projection_to_dicom, export_voxel_grid_to_dicom
 from .drr import generate_drr_from_hu_volume, resolve_drr_detector_size
-from .operators import MESH_OT_export_dicom
+from .operators import DICOMATOR_OT_export_dicom
 from .rtdose_export import export_rtdose_to_dicom
 from .rtstruct_export import export_rtstruct_to_dicom
 from .panels import (
@@ -54,26 +54,12 @@ from .panels import (
     VIEW3D_PT_dicomator_per_object_hu,
     VIEW3D_PT_dicomator_selection_info,
 )
-from .properties import DICOMatorProperties, update_object_material
+from .properties import DICOMATOR_PG_properties, update_object_material
 from .voxelization import voxelize_mesh, voxelize_objects_to_dose, voxelize_objects_to_hu
 
-# Legacy add-on metadata; ignored when installed as an extension (the
-# blender_manifest.toml is authoritative). Kept in sync per AGENTS.md.
-bl_info = {
-    "name": "DICOMator",
-    "author": "Michael Douglass",
-    "version": (3, 6, 0),
-    "blender": (5, 1, 0),
-    "location": "View3D > Sidebar > DICOMator",
-    "description": "Converts mesh objects into synthetic CT/MR series or camera-based DRR DICOM images",
-    "warning": "Synthetic research data only; not validated for clinical use",
-    "doc_url": "https://github.com/drmichaeldouglass/DICOMator",
-    "category": "3D View",
-}
-
 classes = (
-    DICOMatorProperties,
-    MESH_OT_export_dicom,
+    DICOMATOR_PG_properties,
+    DICOMATOR_OT_export_dicom,
     VIEW3D_PT_dicomator_panel,
     VIEW3D_PT_dicomator_per_object_hu,
     VIEW3D_PT_dicomator_export_settings,
@@ -90,7 +76,7 @@ def register() -> None:  # pragma: no cover - Blender registration
     # Assign unconditionally: guarding with hasattr() would keep a stale
     # definition from a previous registration (e.g. an older add-on version)
     # bound instead of the current one. Re-assignment is idempotent.
-    bpy.types.Scene.dicomator_props = PointerProperty(type=DICOMatorProperties)
+    bpy.types.Scene.dicomator_props = PointerProperty(type=DICOMATOR_PG_properties)
 
     bpy.types.Object.dicomator_hu = FloatProperty(
         name="HU",
