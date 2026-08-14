@@ -15,7 +15,7 @@ copyright = ["2023-2026 Michael Douglass"]
 # The only bundled wheel (pydicom) is pure Python, so all desktop platforms work.
 platforms = ["windows-x64", "macos-arm64", "macos-x64", "linux-x64"]
 wheels = [
-    "./wheels/pydicom-3.0.1-py3-none-any.whl"
+    "./wheels/pydicom-3.0.2-py3-none-any.whl"
 ]
 
 # DICOMator writes only to a folder explicitly selected by the user.
