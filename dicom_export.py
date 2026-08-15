@@ -17,6 +17,8 @@ from .constants import (
     MODALITY_MRI_T1,
     MR_SEQUENCE_PARAMETERS,
     apply_synthetic_metadata,
+    format_ds,
+    format_ds_sequence,
     normalize_dicom_date,
     resolve_positive_voxel_size,
     truncate_lo,
@@ -241,15 +243,17 @@ def export_voxel_grid_to_dicom_iter(
             # Per DICOM PS3.3 C.7.6.2.1.1, ImagePositionPatient is the center
             # of the first transmitted voxel, not the grid corner.
             slice_z_center_mm = bbox_min_mm.z + (index + 0.5) * vz_mm
-            dataset.ImagePositionPatient = [
-                float(bbox_min_mm.x + 0.5 * vx_mm),
-                float(bbox_min_mm.y + 0.5 * vy_mm),
-                float(slice_z_center_mm),
-            ]
-            dataset.ImageOrientationPatient = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-            dataset.SliceLocation = float(slice_z_center_mm)
-            dataset.SliceThickness = float(vz_mm)
-            dataset.SpacingBetweenSlices = float(vz_mm)
+            dataset.ImagePositionPatient = format_ds_sequence((
+                bbox_min_mm.x + 0.5 * vx_mm,
+                bbox_min_mm.y + 0.5 * vy_mm,
+                slice_z_center_mm,
+            ))
+            dataset.ImageOrientationPatient = format_ds_sequence(
+                (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+            )
+            dataset.SliceLocation = format_ds(slice_z_center_mm)
+            dataset.SliceThickness = format_ds(vz_mm)
+            dataset.SpacingBetweenSlices = format_ds(vz_mm)
 
             pixel_array = slice_data.T.astype(np.int16, copy=False)
             rows, cols = pixel_array.shape
@@ -257,7 +261,7 @@ def export_voxel_grid_to_dicom_iter(
             dataset.PhotometricInterpretation = 'MONOCHROME2'
             dataset.Rows = int(rows)
             dataset.Columns = int(cols)
-            dataset.PixelSpacing = [float(vy_mm), float(vx_mm)]
+            dataset.PixelSpacing = format_ds_sequence((vy_mm, vx_mm))
             dataset.BitsAllocated = 16
             dataset.BitsStored = 16
             dataset.HighBit = 15
@@ -265,8 +269,8 @@ def export_voxel_grid_to_dicom_iter(
             if modality == "CT":
                 # Rescale attributes belong to the CT Image module; the MR
                 # Image IOD does not include them.
-                dataset.RescaleIntercept = 0.0
-                dataset.RescaleSlope = 1.0
+                dataset.RescaleIntercept = format_ds(0.0)
+                dataset.RescaleSlope = format_ds(1.0)
                 dataset.RescaleType = 'HU'
             if modality == "MR":
                 dataset.WindowCenter = 128
@@ -438,11 +442,11 @@ def export_projection_to_dicom(
         dataset.AcquisitionTime = time_str
 
         if position is not None:
-            dataset.ImagePositionPatient = position
+            dataset.ImagePositionPatient = format_ds_sequence(position)
         if orientation is not None:
-            dataset.ImageOrientationPatient = orientation
+            dataset.ImageOrientationPatient = format_ds_sequence(orientation)
         if spacing is not None:
-            dataset.PixelSpacing = spacing
+            dataset.PixelSpacing = format_ds_sequence(spacing)
 
         rows, cols = image_2d.shape
         dataset.SamplesPerPixel = 1
@@ -453,8 +457,8 @@ def export_projection_to_dicom(
         dataset.BitsStored = 16
         dataset.HighBit = 15
         dataset.PixelRepresentation = 0
-        dataset.RescaleIntercept = 0.0
-        dataset.RescaleSlope = 1.0
+        dataset.RescaleIntercept = format_ds(0.0)
+        dataset.RescaleSlope = format_ds(1.0)
 
         image_min = int(image_2d.min()) if image_2d.size else 0
         image_max = int(image_2d.max()) if image_2d.size else 0

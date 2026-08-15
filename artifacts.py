@@ -86,42 +86,6 @@ def _gaussian_blur(array: np.ndarray, kernel_size: int, sigma: float | None = No
     return result
 
 
-def _ensure_shape_like(arr: np.ndarray, target_shape: tuple[int, ...]) -> np.ndarray:
-    """Return a view/array with shape exactly equal to target_shape.
-
-    If arr is larger along an axis it is center-cropped; if smaller it is
-    edge-padded. This keeps simple smoothing/resampling operations robust
-    to occasional off-by-one differences.
-    """
-    if arr.shape == target_shape:
-        return arr
-    res = arr
-    # Crop larger axes first (to avoid repeated padding on cropped data).
-    for axis in range(res.ndim):
-        curr = res.shape[axis] if axis < res.ndim else 1
-        target = target_shape[axis] if axis < len(target_shape) else 1
-        if curr > target:
-            start = (curr - target) // 2
-            end = start + target
-            slc = [slice(None)] * res.ndim
-            slc[axis] = slice(start, end)
-            res = res[tuple(slc)]
-    # Then pad smaller axes.
-    if res.shape != target_shape:
-        pad_width = []
-        for axis in range(res.ndim):
-            curr = res.shape[axis]
-            target = target_shape[axis]
-            if curr < target:
-                before = (target - curr) // 2
-                after = target - curr - before
-                pad_width.append((before, after))
-            else:
-                pad_width.append((0, 0))
-        res = np.pad(res, pad_width=pad_width, mode="edge")
-    return res
-
-
 def _remap_bilinear(
     image: np.ndarray,
     coord0: np.ndarray,

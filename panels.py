@@ -9,25 +9,15 @@ from bpy.types import Context, Panel
 from mathutils import Vector
 
 from .constants import (
+    MAX_TOTAL_VOXELS,
     MRI_MODALITIES,
     ensure_pydicom_available,
-    estimate_peak_memory_bytes,
+    estimate_peak_memory_bytes_for_props,
     get_pydicom_error,
+    grid_limits_exceeded,
 )
 from .drr import resolve_drr_detector_size
 from .utils import get_float_prop, get_str_prop, resolve_output_directory
-
-_ARTIFACT_FLAGS = (
-    "enable_noise",
-    "enable_partial_volume",
-    "enable_metal_artifacts",
-    "enable_ring_artifacts",
-    "enable_motion_artifact",
-    "enable_poisson_noise",
-    "enable_bias_field",
-    "enable_geometric_distortion",
-    "enable_gibbs_ringing",
-)
 
 
 def _selected_meshes(context: Context) -> list[bpy.types.Object]:
@@ -171,8 +161,11 @@ def _draw_export_action(layout: bpy.types.UILayout, context: Context) -> None:
             return
 
     estimate = _grid_estimate(_selection_bounds(selected_meshes), props)
-    if estimate is not None and (
-        estimate[3] > 100_000_000 or max(estimate[:3]) > 2000
+    # The estimated peak memory has to be part of this check: the export
+    # operator aborts on it too, so leaving it out let the button look clear
+    # for a grid that would be rejected the moment it was pressed.
+    if estimate is not None and grid_limits_exceeded(
+        *estimate[:3], estimate_peak_memory_bytes_for_props(estimate[3], props)
     ):
         if getattr(props, "allow_oversized_grids", False):
             layout.label(text="Oversized grid allowed", icon='ERROR')
@@ -245,29 +238,16 @@ class VIEW3D_PT_dicomator_selection_info(Panel):
             col.label(text=f"Est. Grid: {est_width} x {est_height} x {est_depth}")
             col.label(text=f"Total Voxels: {total_voxels:,}")
 
-            artifacts_enabled = any(getattr(props, flag, False) for flag in _ARTIFACT_FLAGS)
-            memory_bytes = estimate_peak_memory_bytes(
-                total_voxels,
-                export_image_series=bool(getattr(props, "export_image_series", True)),
-                export_drr=bool(getattr(props, "export_drr", False)),
-                export_rtdose=bool(getattr(props, "export_rtdose", False)),
-                artifacts_enabled=artifacts_enabled,
-                gibbs_enabled=bool(getattr(props, "enable_gibbs_ringing", False)),
-            )
+            memory_bytes = estimate_peak_memory_bytes_for_props(total_voxels, props)
             memory_mb = memory_bytes / (1024 * 1024)
             col.label(text=f"Conservative Peak Memory: {memory_mb:.1f} MB")
 
-            grid_exceeds_limit = total_voxels > 100_000_000 or max(
-                est_width,
-                est_height,
-                est_depth,
-            ) > 2000 or memory_bytes > 2 * 1024**3
-            if grid_exceeds_limit:
+            if grid_limits_exceeded(est_width, est_height, est_depth, memory_bytes):
                 if getattr(props, "allow_oversized_grids", False):
                     col.label(text="Oversized grid allowed - may exhaust memory", icon='ERROR')
                 else:
                     col.label(text="Grid too large - export blocked", icon='CANCEL')
-            elif total_voxels > 50_000_000:
+            elif total_voxels > MAX_TOTAL_VOXELS // 2:
                 col.label(text="Large grid - may be slow", icon='ERROR')
 
         if getattr(props, "export_drr", False):

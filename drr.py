@@ -178,11 +178,20 @@ def generate_drr_from_hu_volume_iter(
     step_size = max(1e-5, min(vx, vy, vz))
 
     bottom_left, bottom_right, top_left, top_right = _camera_frame_corners(scene, camera_obj)
-    frame_width_m = float((bottom_right - bottom_left).length)
-    frame_height_m = float((top_left - bottom_left).length)
 
-    camera_origin = np.array(camera_obj.matrix_world.translation, dtype=np.float32)
-    rotation = np.array(camera_obj.matrix_world.to_3x3(), dtype=np.float32)
+    camera_matrix = camera_obj.matrix_world
+    camera_rotation = camera_matrix.to_3x3()
+    camera_origin = np.array(camera_matrix.translation, dtype=np.float32)
+    rotation = np.array(camera_rotation, dtype=np.float32)
+
+    # Measure the detector in world space. ``view_frame`` reports camera-local
+    # corners, but both the rays cast below and ImagePositionPatient are built
+    # through matrix_world, which also carries the camera object's scale.
+    # Taking the extents from the unscaled local corners would report a
+    # PixelSpacing that disagrees with the geometry actually projected.
+    frame_width_m = float((camera_rotation @ (bottom_right - bottom_left)).length)
+    frame_height_m = float((camera_rotation @ (top_left - bottom_left)).length)
+
     local_bottom_left = np.array(bottom_left, dtype=np.float32)
     local_bottom_right = np.array(bottom_right, dtype=np.float32)
     local_top_left = np.array(top_left, dtype=np.float32)
@@ -191,6 +200,22 @@ def generate_drr_from_hu_volume_iter(
     is_orthographic = str(getattr(camera_obj.data, "type", "PERSP")).upper() == "ORTHO"
     orthographic_direction = rotation @ np.array((0.0, 0.0, -1.0), dtype=np.float32)
     orthographic_direction /= max(np.linalg.norm(orthographic_direction), 1e-8)
+
+    # Blender's view frame sits one unit in front of the camera, so parallel
+    # rays launched from it would start *inside* (or past) a grid placed closer
+    # than that; the entry distance is clamped to zero, silently dropping the
+    # part of the volume nearest the camera. Parallel rays carry no perspective,
+    # so the origins can simply slide back along the view direction until the
+    # whole grid is ahead of them. The projection of the nearest bounding-box
+    # corner onto the view direction is the axis-wise minimum of the two bounds.
+    nearest_corner_projection = float(
+        np.sum(
+            np.minimum(
+                orthographic_direction * bounds_min,
+                orthographic_direction * bounds_max,
+            )
+        )
+    )
 
     line_integrals = np.zeros((detector_height, detector_width), dtype=np.float32)
     rays_per_chunk_target = 4096
@@ -216,6 +241,13 @@ def generate_drr_from_hu_volume_iter(
         if is_orthographic:
             origins = detector_points_local @ rotation.T + camera_origin[None, :]
             directions = np.repeat(orthographic_direction[None, :], ray_count, axis=0)
+            back_off = origins @ orthographic_direction - nearest_corner_projection
+            if np.any(back_off > 0.0):
+                # Only rays that already overshot the grid are moved; the rest
+                # keep their exact origins. Sliding along the ray leaves the
+                # sampled positions unchanged, so this costs no extra samples.
+                back_off = np.maximum(back_off, 0.0) + np.float32(step_size)
+                origins = origins - orthographic_direction[None, :] * back_off[:, None]
         else:
             origins = np.repeat(camera_origin[None, :], ray_count, axis=0)
             directions = detector_points_local @ rotation.T
@@ -264,8 +296,8 @@ def generate_drr_from_hu_volume_iter(
 
     projection_image = _normalize_projection(line_integrals, fixed=fixed_normalization)
 
-    row_direction_world = (camera_obj.matrix_world.to_3x3() @ (top_right - top_left)).normalized()
-    column_direction_world = (camera_obj.matrix_world.to_3x3() @ (bottom_left - top_left)).normalized()
+    row_direction_world = (camera_rotation @ (top_right - top_left)).normalized()
+    column_direction_world = (camera_rotation @ (bottom_left - top_left)).normalized()
 
     pixel_spacing_mm = None
     image_position_patient = None
@@ -274,7 +306,7 @@ def generate_drr_from_hu_volume_iter(
         row_step_local = (top_right - top_left) / float(detector_width)
         column_step_local = (bottom_left - top_left) / float(detector_height)
         first_pixel_center_local = top_left + 0.5 * row_step_local + 0.5 * column_step_local
-        first_pixel_center_world = camera_obj.matrix_world @ first_pixel_center_local
+        first_pixel_center_world = camera_matrix @ first_pixel_center_local
         pixel_spacing_mm = (
             (frame_height_m / float(detector_height)) * 1000.0,
             (frame_width_m / float(detector_width)) * 1000.0,
