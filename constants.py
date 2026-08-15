@@ -341,6 +341,29 @@ def resolve_positive_voxel_size(voxel_size) -> tuple[float, float, float]:
     return components[0], components[1], components[2]
 
 
+#: Property names of the artifact toggles. Shared by the UI, the memory
+#: estimate, and the export pipeline so they cannot drift apart when a new
+#: artifact generator is added.
+ARTIFACT_FLAGS = (
+    "enable_noise",
+    "enable_partial_volume",
+    "enable_metal_artifacts",
+    "enable_ring_artifacts",
+    "enable_motion_artifact",
+    "enable_poisson_noise",
+    "enable_bias_field",
+    "enable_geometric_distortion",
+    "enable_gibbs_ringing",
+)
+
+#: Export guardrails. The export operator refuses grids beyond these unless
+#: 'Allow Oversized Grids' is enabled, and the panels warn about them, so both
+#: read the same numbers from here.
+MAX_GRID_DIMENSION = 2000
+MAX_TOTAL_VOXELS = 100_000_000
+MAX_ESTIMATED_MEMORY_BYTES = 2 * 1024**3
+
+
 def estimate_peak_memory_bytes(
     total_voxels: int,
     *,
@@ -366,6 +389,45 @@ def estimate_peak_memory_bytes(
     # frames can coexist briefly during RT Dose encoding.
     dose_bytes = 16 if export_rtdose else 0
     return total * max(image_bytes, dose_bytes, 2)
+
+
+def estimate_peak_memory_bytes_for_props(total_voxels: int, props) -> int:
+    """Return the peak-memory estimate for the outputs selected in ``props``."""
+
+    return estimate_peak_memory_bytes(
+        total_voxels,
+        export_image_series=bool(getattr(props, "export_image_series", True)),
+        export_drr=bool(getattr(props, "export_drr", False)),
+        export_rtdose=bool(getattr(props, "export_rtdose", False)),
+        artifacts_enabled=any(getattr(props, flag, False) for flag in ARTIFACT_FLAGS),
+        gibbs_enabled=bool(getattr(props, "enable_gibbs_ringing", False)),
+    )
+
+
+def grid_limits_exceeded(
+    width: int,
+    height: int,
+    depth: int,
+    estimated_peak_bytes: int,
+) -> bool:
+    """Return True when a voxel grid is past the export guardrails."""
+
+    dimensions = (int(width), int(height), int(depth))
+    return (
+        max(dimensions) > MAX_GRID_DIMENSION
+        or dimensions[0] * dimensions[1] * dimensions[2] > MAX_TOTAL_VOXELS
+        or int(estimated_peak_bytes) > MAX_ESTIMATED_MEMORY_BYTES
+    )
+
+
+def describe_grid_limits() -> str:
+    """Return a human-readable summary of the export guardrails."""
+
+    return (
+        f"{MAX_GRID_DIMENSION:,} voxels per dimension, "
+        f"{MAX_TOTAL_VOXELS:,} total, and "
+        f"{MAX_ESTIMATED_MEMORY_BYTES / (1024**3):.0f} GiB estimated peak array memory"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -505,7 +567,14 @@ __all__ = [
     "MR_SEQUENCE_PARAMETERS",
     "get_material_intensity",
     "apply_synthetic_metadata",
+    "ARTIFACT_FLAGS",
+    "MAX_GRID_DIMENSION",
+    "MAX_TOTAL_VOXELS",
+    "MAX_ESTIMATED_MEMORY_BYTES",
+    "describe_grid_limits",
     "estimate_peak_memory_bytes",
+    "estimate_peak_memory_bytes_for_props",
+    "grid_limits_exceeded",
     "format_ds",
     "format_ds_sequence",
     "normalize_dicom_date",

@@ -40,8 +40,10 @@ from .constants import (
     AIR_DENSITY,
     MODALITY_CT,
     MRI_MODALITIES,
+    describe_grid_limits,
     ensure_pydicom_available,
-    estimate_peak_memory_bytes,
+    estimate_peak_memory_bytes_for_props,
+    grid_limits_exceeded,
 )
 from .dicom_export import export_projection_to_dicom, export_voxel_grid_to_dicom_iter
 from .drr import generate_drr_from_hu_volume_iter
@@ -57,19 +59,6 @@ from .voxelization import (
 
 #: Wall-clock budget (seconds) spent inside the export job per timer tick.
 _MODAL_TIME_BUDGET_S = 0.1
-_MAX_ESTIMATED_MEMORY_BYTES = 2 * 1024**3
-
-_ARTIFACT_FLAGS = (
-    "enable_noise",
-    "enable_partial_volume",
-    "enable_metal_artifacts",
-    "enable_ring_artifacts",
-    "enable_motion_artifact",
-    "enable_poisson_noise",
-    "enable_bias_field",
-    "enable_geometric_distortion",
-    "enable_gibbs_ringing",
-)
 
 
 def _get_int_prop(props, name: str, default: int) -> int:
@@ -221,17 +210,6 @@ def _apply_configured_artifacts_iter(
         result = stage(result)
         yield index, total
     return result
-
-
-def _apply_configured_artifacts(hu_array, props):
-    """Apply the artifacts configured in ``props`` to ``hu_array`` sequentially."""
-
-    generator = _apply_configured_artifacts_iter(hu_array, props)
-    while True:
-        try:
-            next(generator)
-        except StopIteration as stop:
-            return stop.value
 
 
 def _run_subtask(
@@ -853,21 +831,14 @@ class DICOMATOR_OT_export_dicom(Operator):
         estimated_width, estimated_height, estimated_depth = _estimate_grid_dimensions(padded_bounds, voxel_size_m)
 
         total_estimated_voxels = estimated_width * estimated_height * estimated_depth
-        artifacts_enabled = any(getattr(props, flag, False) for flag in _ARTIFACT_FLAGS)
-        estimated_peak_bytes = estimate_peak_memory_bytes(
-            total_estimated_voxels,
-            export_image_series=export_image_series,
-            export_drr=export_drr,
-            export_rtdose=export_rtdose,
-            artifacts_enabled=artifacts_enabled,
-            gibbs_enabled=bool(getattr(props, "enable_gibbs_ringing", False)),
+        estimated_peak_bytes = estimate_peak_memory_bytes_for_props(
+            total_estimated_voxels, props
         )
-        oversized = (
-            estimated_width > 2000
-            or estimated_height > 2000
-            or estimated_depth > 2000
-            or total_estimated_voxels > 100_000_000
-            or estimated_peak_bytes > _MAX_ESTIMATED_MEMORY_BYTES
+        oversized = grid_limits_exceeded(
+            estimated_width,
+            estimated_height,
+            estimated_depth,
+            estimated_peak_bytes,
         )
         if oversized:
             size_text = (
@@ -880,8 +851,7 @@ class DICOMATOR_OT_export_dicom(Operator):
                 return {
                     'error': (
                         f"Voxel grid too large: {size_text} "
-                        "Limits: 2000 voxels per dimension, 100,000,000 total, "
-                        "and 2 GiB estimated peak array memory. "
+                        f"Limits: {describe_grid_limits()}. "
                         "Increase the voxel spacing or enable 'Allow Oversized Grids' "
                         "in the Export panel."
                     )

@@ -201,6 +201,22 @@ def generate_drr_from_hu_volume_iter(
     orthographic_direction = rotation @ np.array((0.0, 0.0, -1.0), dtype=np.float32)
     orthographic_direction /= max(np.linalg.norm(orthographic_direction), 1e-8)
 
+    # Blender's view frame sits one unit in front of the camera, so parallel
+    # rays launched from it would start *inside* (or past) a grid placed closer
+    # than that; the entry distance is clamped to zero, silently dropping the
+    # part of the volume nearest the camera. Parallel rays carry no perspective,
+    # so the origins can simply slide back along the view direction until the
+    # whole grid is ahead of them. The projection of the nearest bounding-box
+    # corner onto the view direction is the axis-wise minimum of the two bounds.
+    nearest_corner_projection = float(
+        np.sum(
+            np.minimum(
+                orthographic_direction * bounds_min,
+                orthographic_direction * bounds_max,
+            )
+        )
+    )
+
     line_integrals = np.zeros((detector_height, detector_width), dtype=np.float32)
     rays_per_chunk_target = 4096
     rows_per_chunk = max(1, min(detector_height, rays_per_chunk_target // max(1, detector_width)))
@@ -225,6 +241,13 @@ def generate_drr_from_hu_volume_iter(
         if is_orthographic:
             origins = detector_points_local @ rotation.T + camera_origin[None, :]
             directions = np.repeat(orthographic_direction[None, :], ray_count, axis=0)
+            back_off = origins @ orthographic_direction - nearest_corner_projection
+            if np.any(back_off > 0.0):
+                # Only rays that already overshot the grid are moved; the rest
+                # keep their exact origins. Sliding along the ray leaves the
+                # sampled positions unchanged, so this costs no extra samples.
+                back_off = np.maximum(back_off, 0.0) + np.float32(step_size)
+                origins = origins - orthographic_direction[None, :] * back_off[:, None]
         else:
             origins = np.repeat(camera_origin[None, :], ray_count, axis=0)
             directions = detector_points_local @ rotation.T

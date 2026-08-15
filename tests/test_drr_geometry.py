@@ -113,10 +113,10 @@ class _CameraData:
 class _Camera:
     type = "CAMERA"
 
-    def __init__(self, scale=1.0):
+    def __init__(self, scale=1.0, height=10.0):
         self.data = _CameraData()
-        # Looking straight down -Z from well above the volume.
-        self.matrix_world = Mat4(scale, (0.0, 0.0, 10.0))
+        # Looking straight down -Z from above the volume.
+        self.matrix_world = Mat4(scale, (0.0, 0.0, height))
 
 
 class _Scene:
@@ -140,15 +140,20 @@ def patched_vector(monkeypatch):
     monkeypatch.setattr(drr, "Vector", Vec3)
 
 
-def _project(camera_scale: float):
+#: The grid spans z in [-0.2, 1.0] under VOXEL_SIZE_M.
+GRID_ORIGIN = (-0.6, -0.6, -0.2)
+GRID_TOP_Z = GRID_ORIGIN[2] + 2 * VOXEL_SIZE_M[2]
+
+
+def _project(camera_scale: float, camera_height: float = 10.0):
     volume = np.full((2, 2, 2), 500.0, dtype=np.int16)
-    origin = Vec3((-0.6, -0.6, -0.2))
+    origin = Vec3(GRID_ORIGIN)
     return drr.generate_drr_from_hu_volume(
         volume,
         VOXEL_SIZE_M,
         origin,
         _Scene(),
-        _Camera(camera_scale),
+        _Camera(camera_scale, camera_height),
     )
 
 
@@ -182,6 +187,34 @@ def test_pixel_spacing_tracks_camera_object_scale(patched_vector):
     assert scaled["pixel_spacing_mm"][1] == pytest.approx(
         2.0 * unscaled["pixel_spacing_mm"][1]
     )
+
+
+def test_close_orthographic_camera_still_integrates_the_whole_grid(patched_vector):
+    """Parallel rays must not be clipped by the view-frame plane.
+
+    Blender's view frame sits one unit in front of the camera, so a camera
+    less than a unit away launches its rays from below the grid: entry
+    distances clamp to zero and the projection comes out blank. Because
+    orthographic rays carry no perspective, moving the camera along its own
+    axis must not change the image at all.
+    """
+
+    # Frame plane at 0.5 - 1.0 = -0.5, i.e. below the grid's z range entirely.
+    camera_height = 0.5
+    assert camera_height - 1.0 < GRID_ORIGIN[2]
+
+    near_image, _metadata = _project(1.0, camera_height=camera_height)
+    far_image, _metadata = _project(1.0, camera_height=10.0)
+
+    assert int(near_image.max()) > 0
+    np.testing.assert_array_equal(near_image, far_image)
+
+
+def test_orthographic_projection_is_invariant_to_camera_distance(patched_vector):
+    reference, _metadata = _project(1.0, camera_height=10.0)
+    for camera_height in (0.5, 1.0, 1.5, 3.0, 50.0):
+        image, _metadata = _project(1.0, camera_height=camera_height)
+        np.testing.assert_array_equal(image, reference)
 
 
 def test_pixel_spacing_matches_first_pixel_offset_from_the_frame_corner(patched_vector):
