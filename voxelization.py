@@ -91,12 +91,20 @@ def _world_vertex_array(mesh: bpy.types.Mesh, matrix_world) -> np.ndarray:
     loop over vertices, which is dramatically faster on dense meshes. The
     returned buffer is caller-owned, so it stays valid after
     ``to_mesh_clear()``.
+
+    The read buffer must be ``float32``: ``foreach_get`` only takes its bulk
+    C copy path when the buffer's format matches the RNA property's raw type,
+    and ``MeshVertex.co`` is a float32 vector. A float64 buffer silently falls
+    back to a per-vertex Python loop, which is the very cost this helper
+    exists to avoid. Blender stores the coordinates as float32 anyway, so
+    widening afterwards loses nothing.
     """
     count = len(mesh.vertices)
-    coords = np.empty(count * 3, dtype=np.float64)
+    coords = np.empty(count * 3, dtype=np.float32)
     mesh.vertices.foreach_get("co", coords)
     matrix = np.array(matrix_world, dtype=np.float64)
-    return coords.reshape(count, 3) @ matrix[:3, :3].T + matrix[:3, 3]
+    local = coords.reshape(count, 3).astype(np.float64)
+    return local @ matrix[:3, :3].T + matrix[:3, 3]
 
 
 def _mesh_polygon_indices(mesh: bpy.types.Mesh) -> list[list[int]]:
@@ -229,6 +237,19 @@ def _voxelize_objects_iter(
         min_x, max_x, min_y, max_y, min_z, max_z = _objects_world_bounds(
             objects, depsgraph, apply_modifiers=apply_modifiers
         )
+        # Objects that evaluate to an empty mesh contribute no corners, so the
+        # running extremes stay at +/-inf. Report that directly instead of
+        # letting math.ceil() below fail with 'cannot convert float infinity
+        # to integer', which tells the user nothing about their scene.
+        if not all(
+            math.isfinite(value)
+            for value in (min_x, max_x, min_y, max_y, min_z, max_z)
+        ):
+            raise ValueError(
+                f"No voxelizable {label} objects: none of the selected meshes "
+                "have any vertices (a modifier that empties the mesh will do "
+                "this)"
+            )
         min_x -= padding * vx
         max_x += padding * vx
         min_y -= padding * vy
