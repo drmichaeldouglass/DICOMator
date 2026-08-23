@@ -246,3 +246,89 @@ def test_ring_artifact_statistics():
     # The pattern is shared across slices: per-slice peaks stay similar.
     slice_peaks = np.abs(added).max(axis=(0, 1))
     assert slice_peaks.min() > 0.5 * slice_peaks.max()
+
+
+@pytest.mark.parametrize("background_hu", [-800, -75, 50, 400, 1100])
+def test_gaussian_noise_has_no_truncation_bias(background_hu):
+    """The int16 cast must round, not truncate toward zero.
+
+    Truncation shifts every voxel about half a HU toward 0, which turns
+    nominally zero-mean noise into a signed offset whose direction flips
+    with the sign of the tissue's HU.
+    """
+
+    volume = np.full((64, 64, 16), background_hu, dtype=np.int16)
+    out = artifacts.add_gaussian_noise(volume, 20.0, rng=np.random.default_rng(11))
+    bias = float(np.mean(out.astype(np.float64))) - background_hu
+    assert abs(bias) < 0.1, f"mean shifted by {bias:+.3f} HU"
+
+
+@pytest.mark.parametrize("background_hu", [75, 800])
+def test_ring_artifacts_round_symmetrically_about_zero(background_hu):
+    """Mirrored backgrounds must pick up the same ring pattern.
+
+    The ring field depends only on the seed, so ``mean(out) - background``
+    has to agree for +B and -B. Truncation toward zero pulls the positive
+    case down and the negative case up, splitting the two by about 1 HU.
+    """
+
+    shape = (48, 48, 8)
+    above = artifacts.add_ring_artifacts(
+        np.full(shape, background_hu, dtype=np.int16),
+        ring_intensity=80.0,
+        ring_radius=0.5,
+        jitter=0.0,
+        rng=np.random.default_rng(11),
+    )
+    below = artifacts.add_ring_artifacts(
+        np.full(shape, -background_hu, dtype=np.int16),
+        ring_intensity=80.0,
+        ring_radius=0.5,
+        jitter=0.0,
+        rng=np.random.default_rng(11),
+    )
+    shift_above = float(np.mean(above.astype(np.float64))) - background_hu
+    shift_below = float(np.mean(below.astype(np.float64))) + background_hu
+    assert abs(shift_above - shift_below) < 0.05
+
+
+def test_metal_artifacts_round_symmetrically_about_zero():
+    """The streak field is seed-driven, so mirrored backgrounds must match."""
+
+    shape = (48, 48, 4)
+    metal = (slice(22, 26), slice(22, 26), slice(None))
+
+    def run(background_hu: int) -> float:
+        volume = np.full(shape, background_hu, dtype=np.int16)
+        volume[metal] = 3000
+        out = artifacts.add_metal_artifacts(
+            volume,
+            intensity=200.0,
+            density_threshold=2000.0,
+            rng=np.random.default_rng(11),
+        )
+        soft = volume != 3000
+        return float(np.mean(out[soft].astype(np.float64))) - background_hu
+
+    assert abs(run(75) - run(-75)) < 0.05
+
+
+@pytest.mark.parametrize("shape,out_shape", [((1, 6), (8, 8)), ((6, 1), (8, 8)), ((1, 1), (4, 5))])
+def test_resize_bilinear_repeats_a_degenerate_source_axis(shape, out_shape):
+    """A length-1 source axis must broadcast, not fall outside the image.
+
+    ``add_metal_artifacts`` resamples every slice to at least 8x8 for the
+    projection loop, so a one-voxel-thin grid hits this path; stepping along
+    an axis with no span pushed every sample but the first out of bounds,
+    where it was replaced by the zero fill.
+    """
+
+    image = np.arange(1, np.prod(shape) + 1, dtype=np.float32).reshape(shape)
+    out = artifacts._resize_bilinear(image, out_shape)
+    assert out.shape == out_shape
+    assert float(out.min()) > 0.0
+    if shape[0] == 1:
+        # Every output row must reproduce the single source row.
+        np.testing.assert_allclose(out, np.repeat(out[:1, :], out_shape[0], axis=0), rtol=1e-6)
+    if shape[1] == 1:
+        np.testing.assert_allclose(out, np.repeat(out[:, :1], out_shape[1], axis=1), rtol=1e-6)

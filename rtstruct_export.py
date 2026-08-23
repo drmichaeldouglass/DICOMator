@@ -46,6 +46,12 @@ from .constants import (
     truncate_sh,
 )
 
+#: Distance tolerance (metres) passed to ``bmesh.ops.bisect_plane``. Vertices
+#: within this distance of the cut plane are snapped onto it, so a plane this
+#: far outside the mesh can still return cut geometry; the Z-extent test in
+#: :func:`_extract_contours_iter` pads the mesh bounds by the same amount.
+_BISECT_TOLERANCE_M = 1e-5
+
 # ---------------------------------------------------------------------------
 # Default colour palette used when an object has no material assigned.
 # Colours are 0-255 RGB tuples loosely inspired by common TPS conventions.
@@ -234,6 +240,22 @@ def _world_bmesh(
     return bm
 
 
+def _bmesh_z_extent(bm: bmesh.types.BMesh) -> tuple[float, float] | None:
+    """Return the mesh's world-space Z span, or ``None`` when it has no verts.
+
+    The span is padded by the bisect tolerance so a plane that
+    ``bmesh.ops.bisect_plane`` would still snap geometry onto is never
+    considered out of range.
+    """
+    z_values = [float(vert.co.z) for vert in bm.verts]
+    if not z_values:
+        return None
+    return (
+        min(z_values) - _BISECT_TOLERANCE_M,
+        max(z_values) + _BISECT_TOLERANCE_M,
+    )
+
+
 def _slice_plane(
     bm_base: bmesh.types.BMesh, z_m: float
 ) -> tuple[list[list[tuple[float, float, float]]], int]:
@@ -248,7 +270,7 @@ def _slice_plane(
         result = bmesh.ops.bisect_plane(
             bm_slice,
             geom=geom_all,
-            dist=1e-5,
+            dist=_BISECT_TOLERANCE_M,
             plane_co=(0.0, 0.0, float(z_m)),
             plane_no=(0.0, 0.0, 1.0),
             clear_outer=False,
@@ -277,7 +299,16 @@ def _extract_contours_iter(
     try:
         contours: dict[float, list[list[tuple[float, float, float]]]] = {}
         dropped_total = 0
+        # Every bisect copies the whole mesh, so planes that cannot intersect
+        # it are skipped outright. A structure occupying a few centimetres of
+        # a whole-body grid would otherwise pay for hundreds of full-mesh
+        # copies that can only ever return an empty contour.
+        z_extent = _bmesh_z_extent(bm_base)
         for index, z_m in enumerate(z_positions_m, start=1):
+            if z_extent is None or not (z_extent[0] <= float(z_m) <= z_extent[1]):
+                contours[float(z_m)] = []
+                yield index, len(z_positions_m)
+                continue
             loops, dropped = _slice_plane(bm_base, z_m)
             contours[float(z_m)] = loops
             dropped_total += dropped

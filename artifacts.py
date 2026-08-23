@@ -152,8 +152,13 @@ def _resize_bilinear(image: np.ndarray, out_shape: tuple[int, int]) -> np.ndarra
     if (n0, n1) == (m0, m1):
         return image.astype(np.float32, copy=False)
     # Map output pixel centres back to source coordinates (align corners).
-    s0 = (np.arange(m0, dtype=np.float32) * (max(1, n0 - 1) / max(1, m0 - 1)))
-    s1 = (np.arange(m1, dtype=np.float32) * (max(1, n1 - 1) / max(1, m1 - 1)))
+    # A source axis of length 1 spans no distance, so every output sample must
+    # read index 0; walking a non-zero step would push all but the first
+    # row/column outside the image, where they are replaced by the fill value.
+    step0 = (n0 - 1) / (m0 - 1) if m0 > 1 else 0.0
+    step1 = (n1 - 1) / (m1 - 1) if m1 > 1 else 0.0
+    s0 = np.arange(m0, dtype=np.float32) * np.float32(step0)
+    s1 = np.arange(m1, dtype=np.float32) * np.float32(step1)
     coord0 = np.repeat(s0[:, None], m1, axis=1)
     coord1 = np.repeat(s1[None, :], m0, axis=0)
     return _remap_bilinear(image, coord0, coord1, fill=0.0)
@@ -207,9 +212,12 @@ def add_gaussian_noise(hu_array: np.ndarray, std_hu: float, rng: GeneratorLike =
     # Draw a Gaussian-distributed perturbation for each voxel.
     noise = generator.normal(0.0, float(std_hu), noisy.shape).astype(np.float32, copy=False)
 
-    # Apply the perturbation and clamp to valid HU bounds.
+    # Apply the perturbation and clamp to valid HU bounds. Round rather than
+    # let the int16 cast truncate: truncation is toward zero, so it would pull
+    # every voxel half a HU toward 0 and give nominally zero-mean noise a
+    # systematic offset whose sign depends on the tissue's HU.
     noisy += noise
-    noisy = np.clip(noisy, MIN_HU_VALUE, MAX_HU_VALUE)
+    noisy = np.clip(np.round(noisy), MIN_HU_VALUE, MAX_HU_VALUE)
     return noisy.astype(np.int16, copy=False)
 
 
@@ -415,7 +423,9 @@ def add_metal_artifacts(
 
         result[:, :, iz] = np.clip(result[:, :, iz] + slice_artifact, MIN_HU_VALUE, MAX_HU_VALUE)
 
-    return result.astype(np.int16, copy=False)
+    # Round rather than truncate toward zero on the int16 cast, so the streak
+    # field stays zero-mean instead of biasing each voxel half a HU toward 0.
+    return np.round(result).astype(np.int16, copy=False)
 
 
 def add_ring_artifacts(
@@ -516,6 +526,9 @@ def add_ring_artifacts(
     if isinstance(jitter_field, np.ndarray):
         pattern += (abs(ring_intensity) * 0.1) * jitter_field[:, :, None]
     result += pattern
+    # Round rather than truncate toward zero on the int16 cast, so the signed
+    # ring pattern stays zero-mean instead of biasing each voxel toward 0.
+    np.round(result, out=result)
     np.clip(result, MIN_HU_VALUE, MAX_HU_VALUE, out=result)
 
     return result.astype(np.int16, copy=False)
