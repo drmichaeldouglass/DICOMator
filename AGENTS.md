@@ -40,6 +40,7 @@
   ```
   Dependencies for the test run: `pip install numpy pydicom pytest ruff`.
 - CI (`.github/workflows/ci.yml`) runs the same checks, validates and builds the extension package, and performs real Blender registration smoke tests.
+- Publishing a GitHub release runs `.github/workflows/main.yml`, which builds the archive with the same Blender commands and attaches it to the release as `dicomator-<version>.zip`. The asset is named after the `blender_manifest.toml` version, so bump the manifest before tagging; the workflow warns when the tag and the manifest version disagree.
 - For features that touch Blender interaction, perform a quick manual smoke test inside Blender if possible (not enforced here, but recommended).
 
 ## Documentation & Communication
