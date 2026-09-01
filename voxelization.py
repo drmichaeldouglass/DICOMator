@@ -9,6 +9,7 @@ the generator to completion and forward progress to an optional callback.
 """
 from __future__ import annotations
 
+import logging
 import math
 from typing import Callable, Generator, Optional, Sequence, Tuple
 
@@ -25,6 +26,8 @@ from .constants import (
     MIN_HU_VALUE,
     resolve_positive_voxel_size,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 VectorLike = Sequence[float]
 VoxelSize = Sequence[float]
@@ -262,11 +265,22 @@ def _voxelize_objects_iter(
     depth = max(1, int(math.ceil((max_z - min_z) / vz)))
     origin = Vector((min_x, min_y, min_z))
 
-    grid = np.full((width, height, depth), background_value, dtype=dtype)
+    # NumPy casts a float into an integer grid by truncating toward zero, so an
+    # integer-valued grid has to be given values that are already whole. Without
+    # this a mesh set to -75.6 HU would be stored as -75 and one at 50.7 HU as
+    # 50: a sub-HU error whose sign follows the tissue rather than cancelling
+    # out. Rounding here (half-to-even, matching ``artifacts.py``) keeps every
+    # voxel at the nearest value the user actually asked for.
+    stores_integers = np.issubdtype(np.dtype(dtype), np.integer)
+
+    def _grid_value(value: float) -> float:
+        return float(round(float(value))) if stores_integers else float(value)
+
+    grid = np.full((width, height, depth), _grid_value(background_value), dtype=dtype)
 
     sorted_objects = sorted(objects, key=_object_priority_key)
     def _skip(reason: str) -> None:
-        print(reason)
+        LOGGER.warning(reason)
         if messages is not None:
             messages.append(reason)
 
@@ -293,7 +307,7 @@ def _voxelize_objects_iter(
             skipped_names.append(obj.name)
             _skip(f"Skipped '{obj.name}' during {label} voxelization: outside the voxel grid")
             continue
-        object_data.append((obj.name, bvh, float(value_for_object(obj)), ix0, ix1, iy0, iy1))
+        object_data.append((obj.name, bvh, _grid_value(value_for_object(obj)), ix0, ix1, iy0, iy1))
 
     if not object_data:
         raise ValueError(
@@ -301,7 +315,10 @@ def _voxelize_objects_iter(
             f"({', '.join(skipped_names)})"
         )
 
-    print(f"Voxelizing {len(object_data)} object(s) into {width}x{height}x{depth} {label} grid...")
+    LOGGER.info(
+        "Voxelizing %d object(s) into a %dx%dx%d %s grid",
+        len(object_data), width, height, depth, label,
+    )
 
     xs = [float(min_x + (index + 0.5) * vx) for index in range(width)]
     ys = [float(min_y + (index + 0.5) * vy) for index in range(height)]
@@ -422,7 +439,7 @@ def _voxelize_objects_iter(
                 warning += f", {unresolved} remained ambiguous and may need mesh repair"
             _skip(warning)
 
-    print(f"Voxelization complete ({label} grid).")
+    LOGGER.info("Voxelization complete (%s grid)", label)
     yield total_columns, total_columns
     return grid, origin, (width, height, depth)
 

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from mathutils import Vector
 
 from conftest import load_module
 
@@ -131,3 +132,62 @@ def test_vertex_read_uses_a_float32_buffer():
     assert vertices.requested_dtype == np.float32
     assert world.dtype == np.float64
     np.testing.assert_allclose(world, [[1.0, 2.0, 3.0], [-4.0, -5.0, -6.0]])
+
+
+class _SlabBVH:
+    """Ray-cast stand-in for a solid slab spanning the whole XY plane."""
+
+    def __init__(self, z_min: float, z_max: float):
+        self._faces = (float(z_min), float(z_max))
+
+    def ray_cast(self, origin, direction, max_dist):
+        for face_z in self._faces:
+            if face_z > origin.z and (face_z - origin.z) <= max_dist:
+                return Vector((origin.x, origin.y, face_z)), None, 0, face_z - origin.z
+        return None, None, None, None
+
+
+def _voxelize_slab(hu_value: float) -> np.ndarray:
+    """Fill a small grid from one slab mesh carrying ``hu_value``."""
+
+    obj = SimpleNamespace(name="Slab", dicomator_hu=hu_value, dicomator_priority=0)
+    bounds = (0.0, 0.005, 0.0, 0.005, 0.001, 0.004)
+    grid, _origin, _dims = voxelization._drive(
+        voxelization.voxelize_objects_to_hu_iter(
+            [obj],
+            voxel_size=(0.001, 0.001, 0.001),
+            padding=0,
+            bbox_override=(0.0, 0.005, 0.0, 0.005, 0.0, 0.005),
+            prepared={"Slab": (_SlabBVH(0.001, 0.004), bounds)},
+        ),
+        None,
+    )
+    return grid
+
+
+@pytest.mark.parametrize(
+    ("hu_value", "expected"),
+    [(50.7, 51), (-75.6, -76), (-0.9, -1), (300.4, 300), (1100.0, 1100)],
+)
+def test_fractional_hu_is_rounded_not_truncated(hu_value, expected):
+    """A fractional HU must reach the grid as its nearest integer.
+
+    ``dicomator_hu`` is a float property, so dragging the slider stores values
+    such as -75.6. NumPy casts a float into an int16 grid by truncating toward
+    zero, which would store -75 here and 50 for 50.7: an error of up to 1 HU
+    whose sign follows the tissue instead of cancelling out.
+    """
+
+    grid = _voxelize_slab(hu_value)
+    filled = np.unique(grid[grid != voxelization.AIR_DENSITY])
+
+    assert filled.tolist() == [expected]
+
+
+def test_air_background_is_written_exactly():
+    """Voxels no mesh covers stay at the air value the caller asked for."""
+
+    grid = _voxelize_slab(300.0)
+
+    assert grid[0, 0, 0] == voxelization.AIR_DENSITY
+    assert grid.dtype == np.int16

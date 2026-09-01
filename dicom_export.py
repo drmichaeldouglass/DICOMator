@@ -1,6 +1,7 @@
 """DICOM export helpers used by the DICOMator add-on."""
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime
 from typing import Callable, Generator, Optional, Sequence
@@ -26,6 +27,8 @@ from .constants import (
     truncate_sh,
     validate_numeric_array,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 SliceProgressCallback = Optional[Callable[[int, int], None]]
 ExportGenerator = Generator[tuple[int, int], None, dict]
@@ -289,7 +292,10 @@ def export_voxel_grid_to_dicom_iter(
 
             yield index + 1, num_slices
         except Exception as exc:  # pragma: no cover - Blender runtime feedback
-            print(f"Error saving DICOM file for slice {index + 1}: {exc}")
+            # The operator surfaces the returned message in the UI; log the
+            # traceback as well so the console keeps enough detail to debug a
+            # write failure (a full disk, a revoked permission, ...).
+            LOGGER.exception("Error saving DICOM file for slice %d", index + 1)
             return {'error': f"Error saving DICOM file for slice {index + 1}: {exc}"}
 
     return {

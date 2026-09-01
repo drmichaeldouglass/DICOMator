@@ -134,7 +134,9 @@ Sample outputs produced by the add-on:
 - The add-on has **no OpenVDB dependency**. Voxelization is performed with Blender mesh evaluation, `mathutils.bvhtree.BVHTree`, and NumPy arrays.
 - NumPy 2.x compatibility is maintained by using `np.asarray(...)` rather than `np.array(..., copy=False)` throughout.
 - Extension packaging advertises only the vendored `pydicom 3.0.2` (`py3-none-any`) wheel, which requires Python 3.10+ and is compatible with NumPy 2.x and Python 3.13.
+- Because that wheel is pure Python, the manifest declares no `platforms` list, so the extension is offered on every platform Blender ships (including the arm64 Linux and Windows builds).
 - `blender_manifest.toml` is the authoritative release metadata; the add-on carries no legacy `bl_info` block.
+- The built package contains only the add-on modules, the manifest, `README.md`, `LICENSE`, and the wheel; tests, CI configuration, docs assets, and developer tool caches are excluded by `paths_exclude_pattern`.
 
 ## Installation
 

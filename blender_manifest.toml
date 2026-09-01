@@ -1,19 +1,21 @@
 schema_version = "1.0.0"
 id = "dicomator"
-version = "3.6.1"
+version = "3.6.2"
 name = "DICOMator"
 tagline = "Create synthetic CT, MR, DRR and radiotherapy DICOM data"
 maintainer = "Michael Douglass"
 type = "add-on"
-website = "https://extensions.blender.org/add-ons/dicomator/"
+website = "https://github.com/drmichaeldouglass/DICOMator"
 blender_version_min = "5.1.0"
 license = ["SPDX:GPL-3.0-or-later"]
 # Tags must come from Blender's fixed add-on tag vocabulary; free-form tags
 # such as "Medical" fail `blender --command extension validate`.
 tags = ["3D View", "Import-Export", "Mesh"]
 copyright = ["2023-2026 Michael Douglass"]
-# The only bundled wheel (pydicom) is pure Python, so all desktop platforms work.
-platforms = ["windows-x64", "macos-arm64", "macos-x64", "linux-x64"]
+# No "platforms" key on purpose: the only bundled wheel (pydicom) is a pure
+# Python "py3-none-any" wheel, so the extension runs on every platform Blender
+# ships. Listing platforms explicitly would hide the add-on from anyone whose
+# platform is missing from the list (linux-arm64 and windows-arm64 among them).
 wheels = [
     "./wheels/pydicom-3.0.2-py3-none-any.whl"
 ]
@@ -23,13 +25,24 @@ wheels = [
 files = "Write DICOM exports to user-selected folders"
 
 [build]
+# Supplying this list *replaces* Blender's built-in default exclude list, so
+# every development-only path has to be named here or it ships to users. The
+# hidden-file pattern in particular has to be repeated: without it a local
+# `pytest`/`ruff` run before the build puts .pytest_cache/ and .ruff_cache/
+# inside the package.
 paths_exclude_pattern = [
     "__pycache__/",
-    "/.git/",
-    "/.github/",
-    "/.gitignore",
+    # Hidden dot-files and dot-directories: .git/, .github/, .gitignore,
+    # .pytest_cache/, .ruff_cache/, .venv/, .DS_Store, and anything a future
+    # tool drops in the working tree.
+    ".*",
+    # Packages built in-source.
     "/*.zip",
+    # Blender backup files.
+    "*.blend[1-9]",
+    # Development-only files that are not hidden.
     "/AGENTS.md",
+    "/docs/",
     "/download_wheels.py",
     "/requirements-test.txt",
     "/ruff.toml",
