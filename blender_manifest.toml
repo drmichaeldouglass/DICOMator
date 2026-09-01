@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "dicomator"
-version = "3.6.2"
+version = "4.1.1"
 name = "DICOMator"
 tagline = "Create synthetic CT, MR, DRR and radiotherapy DICOM data"
 maintainer = "Michael Douglass"
