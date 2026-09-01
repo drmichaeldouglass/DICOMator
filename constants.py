@@ -356,6 +356,153 @@ ARTIFACT_FLAGS = (
     "enable_gibbs_ringing",
 )
 
+# ---------------------------------------------------------------------------
+# UI complexity modes
+# ---------------------------------------------------------------------------
+
+#: Interface complexity modes. Each mode exposes a superset of the previous
+#: one, so a user producing a plain synthetic image series is not confronted
+#: with the artifact, 4D, and radiotherapy settings until they ask for them.
+UI_MODE_BASIC = "BASIC"
+UI_MODE_INTERMEDIATE = "INTERMEDIATE"
+UI_MODE_ADVANCED = "ADVANCED"
+
+UI_MODE_ITEMS = [
+    (UI_MODE_BASIC, "Basic", "Only the settings needed for a simple synthetic image series"),
+    (UI_MODE_INTERMEDIATE, "Intermediate", "Adds synthetic artifacts and 4D (time series) export"),
+    (UI_MODE_ADVANCED, "Advanced", "Every setting, including DRR, RT Dose, and RT Structure export"),
+]
+
+#: Interface labels keyed by mode identifier, for messages such as
+#: "inactive in Basic mode".
+UI_MODE_LABELS = {identifier: label for identifier, label, _description in UI_MODE_ITEMS}
+
+#: Feature keys gated by the UI mode. The panels use them to decide what to
+#: draw and the export operator uses them to decide what to run, so a hidden
+#: setting can never keep changing the exported data behind the user's back.
+UI_FEATURE_ARTIFACTS = "artifacts"
+UI_FEATURE_FOUR_D = "four_d"
+UI_FEATURE_DRR = "drr"
+UI_FEATURE_RT_DOSE = "rt_dose"
+UI_FEATURE_RT_STRUCT = "rt_struct"
+UI_FEATURE_OBJECT_PRIORITY = "object_priority"
+UI_FEATURE_OVERSIZED_GRIDS = "oversized_grids"
+
+UI_MODE_FEATURES = {
+    UI_MODE_BASIC: frozenset(),
+    UI_MODE_INTERMEDIATE: frozenset({
+        UI_FEATURE_ARTIFACTS,
+        UI_FEATURE_FOUR_D,
+        UI_FEATURE_OBJECT_PRIORITY,
+    }),
+    UI_MODE_ADVANCED: frozenset({
+        UI_FEATURE_ARTIFACTS,
+        UI_FEATURE_FOUR_D,
+        UI_FEATURE_DRR,
+        UI_FEATURE_RT_DOSE,
+        UI_FEATURE_RT_STRUCT,
+        UI_FEATURE_OBJECT_PRIORITY,
+        UI_FEATURE_OVERSIZED_GRIDS,
+    }),
+}
+
+#: Settings that stay stored while their mode hides them, paired with the
+#: label used to tell the user they are currently inactive.
+UI_SUPPRESSIBLE_SETTINGS = (
+    (UI_FEATURE_ARTIFACTS, "Artifacts", ARTIFACT_FLAGS),
+    (UI_FEATURE_FOUR_D, "4D export", ("export_4d",)),
+    (UI_FEATURE_DRR, "DRR", ("export_drr",)),
+    (UI_FEATURE_RT_DOSE, "RT Dose", ("export_rtdose",)),
+    (UI_FEATURE_RT_STRUCT, "RT Structure", ("export_rtstruct",)),
+    (UI_FEATURE_OVERSIZED_GRIDS, "Oversized grids", ("allow_oversized_grids",)),
+)
+
+
+def normalize_ui_mode(value: object) -> str:
+    """Return a known UI mode identifier for ``value``.
+
+    Unknown or missing values resolve to Advanced so property stand-ins that
+    predate the mode selector (older snapshots, test doubles) keep seeing the
+    full feature set rather than being silently restricted.
+    """
+
+    mode = str(value or "").upper()
+    return mode if mode in UI_MODE_FEATURES else UI_MODE_ADVANCED
+
+
+def ui_mode_of(props) -> str:
+    """Return the UI mode selected in ``props``."""
+
+    return normalize_ui_mode(getattr(props, "ui_mode", None))
+
+
+def ui_feature_visible(props, feature: str) -> bool:
+    """Return True when the mode selected in ``props`` exposes ``feature``."""
+
+    return feature in UI_MODE_FEATURES[ui_mode_of(props)]
+
+
+def export_outputs_selectable(props) -> bool:
+    """Return True when the mode lets the user choose between output types."""
+
+    return any(
+        ui_feature_visible(props, feature)
+        for feature in (UI_FEATURE_DRR, UI_FEATURE_RT_DOSE, UI_FEATURE_RT_STRUCT)
+    )
+
+
+def resolve_export_outputs(props) -> dict[str, bool]:
+    """Return the DICOM outputs that ``props`` will actually produce.
+
+    Modes without an output selector always write a single image series: their
+    UI hides the DRR/RT toggles, so a stored value must neither add an
+    unexpected output nor leave the export with nothing to write.
+    """
+
+    outputs = {
+        "image_series": bool(getattr(props, "export_image_series", True)),
+        "drr": bool(getattr(props, "export_drr", False)) and ui_feature_visible(props, UI_FEATURE_DRR),
+        "rtdose": bool(getattr(props, "export_rtdose", False)) and ui_feature_visible(props, UI_FEATURE_RT_DOSE),
+        "rtstruct": bool(getattr(props, "export_rtstruct", False)) and ui_feature_visible(props, UI_FEATURE_RT_STRUCT),
+    }
+    if not export_outputs_selectable(props):
+        outputs["image_series"] = True
+    return outputs
+
+
+def artifacts_enabled_for_props(props) -> bool:
+    """Return True when any artifact is enabled *and* exposed by the mode."""
+
+    return ui_feature_visible(props, UI_FEATURE_ARTIFACTS) and any(
+        bool(getattr(props, flag, False)) for flag in ARTIFACT_FLAGS
+    )
+
+
+def four_d_export_enabled(props) -> bool:
+    """Return True when a multi-frame export is enabled and exposed."""
+
+    return ui_feature_visible(props, UI_FEATURE_FOUR_D) and bool(getattr(props, "export_4d", False))
+
+
+def oversized_grids_allowed(props) -> bool:
+    """Return True when the grid guardrails are waived and exposed."""
+
+    return ui_feature_visible(props, UI_FEATURE_OVERSIZED_GRIDS) and bool(
+        getattr(props, "allow_oversized_grids", False)
+    )
+
+
+def suppressed_feature_labels(props) -> list[str]:
+    """Return labels for settings switched on but held inactive by the mode."""
+
+    return [
+        label
+        for feature, label, flags in UI_SUPPRESSIBLE_SETTINGS
+        if not ui_feature_visible(props, feature)
+        and any(bool(getattr(props, flag, False)) for flag in flags)
+    ]
+
+
 #: Export guardrails. The export operator refuses grids beyond these unless
 #: 'Allow Oversized Grids' is enabled, and the panels warn about them, so both
 #: read the same numbers from here.
@@ -392,15 +539,21 @@ def estimate_peak_memory_bytes(
 
 
 def estimate_peak_memory_bytes_for_props(total_voxels: int, props) -> int:
-    """Return the peak-memory estimate for the outputs selected in ``props``."""
+    """Return the peak-memory estimate for the outputs selected in ``props``.
 
+    The estimate follows the UI mode, so it describes the pipeline the export
+    will really run rather than settings the current mode keeps inactive.
+    """
+
+    outputs = resolve_export_outputs(props)
+    artifacts_enabled = artifacts_enabled_for_props(props)
     return estimate_peak_memory_bytes(
         total_voxels,
-        export_image_series=bool(getattr(props, "export_image_series", True)),
-        export_drr=bool(getattr(props, "export_drr", False)),
-        export_rtdose=bool(getattr(props, "export_rtdose", False)),
-        artifacts_enabled=any(getattr(props, flag, False) for flag in ARTIFACT_FLAGS),
-        gibbs_enabled=bool(getattr(props, "enable_gibbs_ringing", False)),
+        export_image_series=outputs["image_series"],
+        export_drr=outputs["drr"],
+        export_rtdose=outputs["rtdose"],
+        artifacts_enabled=artifacts_enabled,
+        gibbs_enabled=artifacts_enabled and bool(getattr(props, "enable_gibbs_ringing", False)),
     )
 
 
@@ -568,6 +721,29 @@ __all__ = [
     "get_material_intensity",
     "apply_synthetic_metadata",
     "ARTIFACT_FLAGS",
+    "UI_MODE_BASIC",
+    "UI_MODE_INTERMEDIATE",
+    "UI_MODE_ADVANCED",
+    "UI_MODE_ITEMS",
+    "UI_MODE_LABELS",
+    "UI_MODE_FEATURES",
+    "UI_SUPPRESSIBLE_SETTINGS",
+    "UI_FEATURE_ARTIFACTS",
+    "UI_FEATURE_FOUR_D",
+    "UI_FEATURE_DRR",
+    "UI_FEATURE_RT_DOSE",
+    "UI_FEATURE_RT_STRUCT",
+    "UI_FEATURE_OBJECT_PRIORITY",
+    "UI_FEATURE_OVERSIZED_GRIDS",
+    "artifacts_enabled_for_props",
+    "export_outputs_selectable",
+    "four_d_export_enabled",
+    "normalize_ui_mode",
+    "oversized_grids_allowed",
+    "resolve_export_outputs",
+    "suppressed_feature_labels",
+    "ui_feature_visible",
+    "ui_mode_of",
     "MAX_GRID_DIMENSION",
     "MAX_TOTAL_VOXELS",
     "MAX_ESTIMATED_MEMORY_BYTES",

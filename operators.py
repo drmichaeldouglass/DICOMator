@@ -40,10 +40,19 @@ from .constants import (
     AIR_DENSITY,
     MODALITY_CT,
     MRI_MODALITIES,
+    UI_FEATURE_ARTIFACTS,
+    UI_FEATURE_RT_DOSE,
+    UI_MODE_LABELS,
     describe_grid_limits,
     ensure_pydicom_available,
     estimate_peak_memory_bytes_for_props,
+    four_d_export_enabled,
     grid_limits_exceeded,
+    oversized_grids_allowed,
+    resolve_export_outputs,
+    suppressed_feature_labels,
+    ui_feature_visible,
+    ui_mode_of,
 )
 from .dicom_export import export_projection_to_dicom, export_voxel_grid_to_dicom_iter
 from .drr import generate_drr_from_hu_volume_iter
@@ -76,6 +85,11 @@ def _configured_artifact_stages(props, rng: np.random.Generator | None = None) -
     Each entry is a callable taking and returning a volume; parameters are
     read from ``props`` once, when the list is built.
     """
+
+    if not ui_feature_visible(props, UI_FEATURE_ARTIFACTS):
+        # Basic mode hides the Artifacts panel, so stored toggles must not keep
+        # altering the exported images from behind a panel the user cannot see.
+        return []
 
     stages: list = []
     modality = getattr(props, "imaging_modality", MODALITY_CT)
@@ -383,9 +397,13 @@ def _estimate_grid_dimensions(
 
 
 def _frame_sequence(context: bpy.types.Context, props) -> list[int]:
-    """Return the frames selected for export."""
+    """Return the frames selected for export.
 
-    if not bool(props.export_4d):
+    Modes that hide the 4D controls always export the current frame, so a
+    stored frame range cannot silently multiply the exported series.
+    """
+
+    if not four_d_export_enabled(props):
         return [int(context.scene.frame_current)]
 
     if props.use_timeline_range:
@@ -526,17 +544,38 @@ class DICOMATOR_OT_export_dicom(Operator):
             self.report({'ERROR'}, "Please specify an export directory")
             return {'CANCELLED'}
 
-        export_image_series = bool(getattr(props, "export_image_series", True))
-        export_drr = bool(getattr(props, "export_drr", False))
-        export_rtdose = bool(getattr(props, "export_rtdose", False))
-        export_rtstruct = bool(getattr(props, "export_rtstruct", False))
+        # Outputs follow the UI mode: Basic and Intermediate hide the output
+        # selector, so they always write exactly one image series.
+        outputs = resolve_export_outputs(props)
+        export_image_series = outputs['image_series']
+        export_drr = outputs['drr']
+        export_rtdose = outputs['rtdose']
+        export_rtstruct = outputs['rtstruct']
+
+        suppressed = suppressed_feature_labels(props)
+        if suppressed:
+            self.report(
+                {'WARNING'},
+                (
+                    f"{UI_MODE_LABELS[ui_mode_of(props)]} mode is not applying: "
+                    f"{', '.join(suppressed)}. Switch to Advanced mode to use them."
+                ),
+            )
 
         if not (export_image_series or export_drr or export_rtdose or export_rtstruct):
             self.report({'ERROR'}, "Enable at least one DICOM output")
             return {'CANCELLED'}
 
         if (export_image_series or export_drr) and not ct_objects:
-            self.report({'ERROR'}, "Image Series and DRR exports require at least one image-type mesh")
+            hint = (
+                ""
+                if ui_feature_visible(props, UI_FEATURE_RT_DOSE)
+                else "; the DICOM Type of each mesh is set in Advanced mode"
+            )
+            self.report(
+                {'ERROR'},
+                f"Image Series and DRR exports require at least one image-type mesh{hint}",
+            )
             return {'CANCELLED'}
         if export_rtdose and not dose_objects:
             self.report({'ERROR'}, "RT Dose export requires at least one RT Dose mesh")
@@ -847,13 +886,13 @@ class DICOMATOR_OT_export_dicom(Operator):
                 f"Estimated peak memory: {estimated_peak_bytes / (1024**3):.2f} GiB. "
                 f"Selection size: {(bounds[1] - bounds[0]):.3f}x{(bounds[3] - bounds[2]):.3f}x{(bounds[5] - bounds[4]):.3f}m."
             )
-            if not getattr(props, "allow_oversized_grids", False):
+            if not oversized_grids_allowed(props):
                 return {
                     'error': (
                         f"Voxel grid too large: {size_text} "
                         f"Limits: {describe_grid_limits()}. "
                         "Increase the voxel spacing or enable 'Allow Oversized Grids' "
-                        "in the Export panel."
+                        "in the Export panel (Advanced mode)."
                     )
                 }
             self.report(

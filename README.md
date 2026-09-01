@@ -32,6 +32,12 @@ Sample outputs produced by the add-on:
 
 ## Features
 
+- **Basic / Intermediate / Advanced interface modes**
+  - A **Mode** selector at the top of the DICOMator panel controls how much of the interface is shown, so a simple synthetic CT dataset does not require walking past the research features
+  - **Basic** – image series only: material presets and per-object intensities, voxel resolution, patient/series metadata, and the export folder
+  - **Intermediate** – adds the **Artifacts** sub-panel, 4D/time-series export, and per-object overlap priority
+  - **Advanced** – adds every remaining setting: output selection (Image/DRR/Dose/Structures), per-object DICOM type and ROI type, DRR and RT Dose settings, and the oversized-grid override
+  - Settings a mode hides keep their stored values but are **not applied** to the export; anything switched on and currently inactive is listed in the panel and reported when the export starts
 - **Per-object DICOM type and intensities**
   - Each selected mesh is tagged as **Image**, **RT Dose**, or **RT Structure** via the Objects panel
   - Image objects: set HU/intensity value or pick a tissue preset; an explicit overlap priority controls which mesh wins
@@ -57,7 +63,7 @@ Sample outputs produced by the add-on:
   - BVH-based +Z column fill for solid voxelization with consistent grid dimensions
   - Only the columns covering each mesh's XY footprint are ray-cast, so small meshes inside a large grid stay cheap
 - **Synthetic artifact suite** (image series only)
-  - The **Artifacts** sub-panel sits under **Export** and is shown only while **Image** output is enabled; artifacts never reach the DRR, RT Dose, or RT Structure outputs
+  - The **Artifacts** sub-panel sits under **Export** and is shown in Intermediate or Advanced mode while **Image** output is enabled; artifacts never reach the DRR, RT Dose, or RT Structure outputs
   - CT applies, in order: partial volume (scanner point-spread), projection-domain metal streaks (Radon forward/back-projection with photon starvation and beam hardening), detector-channel rings, motion blur, Gaussian noise, and quantum (Poisson) noise
   - MRI applies, in order: motion blur, geometric distortion (gradient non-linearity and B0 off-resonance), Gibbs/truncation ringing, coil-shaped bias-field shading, and Rician noise, after which the magnitude volume is clamped to non-negative values
   - The single **Gaussian** noise toggle switches to Rician noise for the MR modalities, reusing the entered value as the per-channel standard deviation
@@ -156,13 +162,18 @@ The built package is self-contained. Blender installs its bundled pydicom wheel;
 ## Usage
 
 1. Select one or more mesh objects in the 3D Viewport, in Object Mode.
-2. In **Sidebar → DICOMator**, configure the panels:
-   - The main **DICOMator** panel shows the selected object mix, the output checkboxes, and the export button. When something blocks the export (missing pydicom, a non-empty export folder, no scene camera for a DRR, a wrong unit scale, an oversized grid) the reason is shown in place of, or above, the button.
-   - **Objects** – Pick the **Material Presets** modality (CT, T1 MR, or T2 MR), then for each selected mesh choose its **DICOM Type**:
+2. In **Sidebar → DICOMator**, pick the interface **Mode** at the top of the panel:
+   - **Basic** (default) writes a single synthetic image series and hides the artifact, 4D, DRR, RT Dose, and RT Structure settings
+   - **Intermediate** additionally shows the **Artifacts** sub-panel, 4D/time-series export, and per-object overlap priority
+   - **Advanced** shows everything, including the output checkboxes and the per-object DICOM Type selector
+   - Switching modes never discards settings, but a hidden setting is inactive: if artifacts, 4D, DRR, RT Dose, RT Structure, or the oversized-grid override are switched on while the current mode hides them, the panel lists them as inactive and the export reports the same warning
+3. Configure the panels:
+   - The main **DICOMator** panel shows the selected object mix, the output checkboxes (Advanced mode), and the export button. When something blocks the export (missing pydicom, a non-empty export folder, no scene camera for a DRR, a wrong unit scale, an oversized grid) the reason is shown in place of, or above, the button.
+   - **Objects** – Pick the **Material Presets** modality (CT, T1 MR, or T2 MR), then for each selected mesh choose its **DICOM Type** (Advanced mode; Basic and Intermediate treat the panel as image-only and mark any dose or structure mesh as not exported):
      - *Image*: assign HU/intensity values or pick modality-aware tissue presets. Set **Overlap Priority** when meshes overlap; the highest value wins, with names used only as a deterministic tie-breaker.
      - *RT Dose*: assign an absorbed dose in Gy and an overlap priority. Voxels within the mesh receive that dose value when the RT Dose grid is built.
      - *RT Structure*: assign an ROI type (GTV, CTV, PTV, OAR, External, Control, Avoidance, Organ, Treated Volume, Irradiated Volume). The object's material diffuse colour is used as the ROI display colour in the structure set; a clinical-style palette is used if no material is assigned.
-   - Enable the desired outputs in the main panel:
+   - Enable the desired outputs in the main panel (Advanced mode; Basic and Intermediate always write a single image series):
      - **Image** – writes CT or MR slices from Image meshes
      - **DRR** – writes a camera-based projection from Image meshes
      - **Dose** – writes RT Dose from RT Dose meshes
@@ -170,19 +181,19 @@ The built package is self-contained. Blender installs its bundled pydicom wheel;
    - **Export**
      - Configure **Lateral (mm)** and **Axial (mm)** voxel spacing
      - Toggle **Apply Modifiers** to evaluate modifiers, armatures, shape keys, and lattices during voxelization
-     - Toggle **Allow Oversized Grids** to bypass the grid guardrails at your own risk
+     - Toggle **Allow Oversized Grids** (Advanced mode) to bypass the grid guardrails at your own risk
      - When DRR is enabled, set **DRR Resolution Scale** and the effective **Water Attenuation (1/m)** used by the monoenergetic approximation; the resolved camera and detector size are reported here
      - When any RT Dose mesh is selected, dose settings appear for **Dose Type**, plan-level **Summation Type**, and **Dose Overlap**
      - Choose a new or empty **Export Directory** (supports `//` relative paths and defaults to `//DICOM_Export`; the resolved absolute path is displayed)
-     - Toggle **Export 4D/Time Series** to export multiple frames
+     - Toggle **Export 4D/Time Series** (Intermediate and Advanced modes) to export multiple frames
        - Use the timeline range or set a custom `Start`/`End`/`Frame Step`
-     - **Artifacts** – Nested under Export, collapsed by default, and only available while Image output is enabled:
+     - **Artifacts** – Nested under Export, collapsed by default, and only available in Intermediate or Advanced mode while Image output is enabled:
        - Set **Artifact Seed** to reproduce random artifact fields and noise
        - *CT*: Gaussian noise, partial volume, projection-domain metal streaks, rings, quantum noise, and motion
        - *MRI (T1/T2)*: Gaussian (applied as Rician) noise, coil bias-field shading, geometric distortion (gradient non-linearity + B0 off-resonance), Gibbs ringing, and motion
    - **Series** – Set the series description, patient name, MRN, birth date, sex, patient position, study ID, and accession number in one place.
    - **Estimate** – Inspect selection size, estimated grid resolution, voxel count, conservative peak memory, and DRR detector dimensions.
-3. Click **Export DICOM**.
+4. Click **Export DICOM**.
    - For single-phase exports the mesh selection is voxelized once and written directly in HU/intensity values.
    - For 4D exports the timeline advances through the configured frame range, re-voxelizing each phase inside a fixed padded bounding box so every phase shares identical grid dimensions. Each phase receives its own Series Instance UID and the series description is suffixed with the phase number and percent completion.
    - When DRR is enabled, the voxelized HU volume is projected from the active camera into a single DICOM secondary-capture image per phase. CT presets are recommended because the DRR attenuation model assumes HU-like values.
@@ -281,7 +292,7 @@ Every enabled output is written as its own DICOM series inside a single study:
 - **“pydicom library not available”**
   - Reinstall the DICOMator extension package. Its pydicom dependency is bundled and should be installed automatically by Blender.
 - **“Voxel grid too large”**
-  - Increase voxel spacing (mm), reduce padding/selection size, or limit the frame range. To proceed anyway, enable **Allow Oversized Grids** in the Export panel.
+  - Increase voxel spacing (mm), reduce padding/selection size, or limit the frame range. To proceed anyway, switch to **Advanced** mode and enable **Allow Oversized Grids** in the Export panel.
 - **“Set an active scene camera before exporting a DRR”**
   - Assign a camera to the scene (`Scene Properties → Camera`) or make a camera active in the 3D View before DRR export.
 - **“Choose a new or empty export folder”**
@@ -290,8 +301,10 @@ Every enabled output is written as its own DICOM series inside a single study:
   - One Blender unit is interpreted as one metre. Reset **Scene Properties → Units → Unit Scale** to `1.0`.
 - **Export button is missing or greyed out**
   - An export is already running, the active object is not a mesh, or Blender is not in Object Mode.
+- **A setting I enabled is not being applied**
+  - The interface **Mode** at the top of the DICOMator panel hides, and deactivates, part of the add-on. Basic writes a plain image series, Intermediate adds artifacts and 4D export, and Advanced applies everything. Whatever the current mode is holding inactive is listed under the mode selector and repeated as a warning when the export starts.
 - **Artifacts look too strong/weak**
-  - Adjust intensity/severity controls or disable individual artifact toggles to isolate effects.
+  - Adjust intensity/severity controls or disable individual artifact toggles to isolate effects. Artifacts are only applied in Intermediate and Advanced modes.
 - **RT Structure contours missing or incomplete**
   - Ensure structure meshes are closed (manifold) and intersect the image grid Z-planes. Increase axial resolution (decrease voxel spacing) to capture thin structures.
 - **RT Dose grid is all zeros**
@@ -303,7 +316,7 @@ Every enabled output is written as its own DICOM series inside a single study:
 | --- | --- |
 | `__init__.py` | Blender registration entry point, per-object properties, and exported API |
 | `properties.py` | Scene-level `PropertyGroup` backing the add-on UI |
-| `panels.py` | 3D Viewport sidebar panels (DICOMator, Objects, Export, Artifacts, Series, Estimate) |
+| `panels.py` | 3D Viewport sidebar panels (DICOMator, Objects, Export, Artifacts, Series, Estimate) and Basic/Intermediate/Advanced mode gating |
 | `operators.py` | Modal export operator and the staged export pipeline |
 | `voxelization.py` | BVH ray-cast voxelization and selection bounds helpers |
 | `artifacts.py` | Synthetic CT/MR artifact generators |
@@ -311,7 +324,7 @@ Every enabled output is written as its own DICOM series inside a single study:
 | `drr.py` | Camera-based DRR ray casting and detector geometry |
 | `rtdose_export.py` | RT Dose (and companion RT Plan) writer |
 | `rtstruct_export.py` | Mesh-to-contour slicing and RT Structure Set writer |
-| `constants.py` | HU constants, tissue presets, DICOM helpers, and export guardrails |
+| `constants.py` | HU constants, tissue presets, DICOM helpers, export guardrails, and the UI mode feature table |
 | `utils.py` | Property access and export path resolution helpers |
 | `wheels/`, `download_wheels.py` | Vendored pydicom wheel declared in the manifest, and its refresh script |
 | `tests/` | Headless pytest suite plus a Blender registration smoke test |

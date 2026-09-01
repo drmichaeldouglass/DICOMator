@@ -9,7 +9,7 @@
   - `voxelization.py` – Mesh voxelization helpers that populate voxel grids and estimate selection bounds.
   - `artifacts.py` – Synthetic artifact generators (noise, streaks, rings, partial volume, motion). Artifacts should be grounded by physical models where possible. 
   - `dicom_export.py` – Writes voxel grids to DICOM slices via pydicom when available.
-  - `constants.py` – Core HU constants and optional imports (pydicom, Dataset helpers).
+  - `constants.py` – Core HU constants and optional imports (pydicom, Dataset helpers), plus the Basic/Intermediate/Advanced UI mode table and the helpers that resolve which settings a mode applies.
   - `utils.py` – Lightweight helpers for property access and UI refresh.
   - `drr.py` – Digitally Reconstructed Radiograph (DRR) generator; performs ray-casting through the voxel HU grid to simulate planar X-ray projections.
   - `rtdose_export.py` – Exports a synthetic 3D dose distribution as an RT-DOSE DICOM object via pydicom.
