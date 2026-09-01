@@ -243,13 +243,13 @@ class DICOMATOR_PG_properties(bpy.types.PropertyGroup):
         min=0,
     )
     enable_noise: bpy.props.BoolProperty(
-        name="Add Gaussian Noise",
-        description="Add zero-mean Gaussian noise to exported HU images",
+        name="Add Noise",
+        description="Add Gaussian noise to CT images or Rician noise to MR images",
         default=False,
     )
     noise_std_dev_hu: bpy.props.FloatProperty(
-        name="Noise Std. Dev. (HU)",
-        description="Standard deviation of Gaussian noise in Hounsfield Units",
+        name="Noise Std. Dev.",
+        description="Standard deviation of Gaussian CT noise (HU) or Rician MR noise",
         default=20.0,
         min=0.0,
         soft_max=500.0,

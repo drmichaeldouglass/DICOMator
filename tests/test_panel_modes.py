@@ -23,18 +23,26 @@ ADVANCED = constants.UI_MODE_ADVANCED
 class _Layout:
     """Records what a panel draws instead of building Blender widgets."""
 
-    def __init__(self, drawn_props: list[str], labels: list[str], operators: list[str]):
+    def __init__(
+        self,
+        drawn_props: list[str],
+        labels: list[str],
+        operators: list[str],
+        prop_labels: dict[str, list[str]],
+    ):
         self.drawn_props = drawn_props
         self.labels = labels
         self.operators = operators
+        self.prop_labels = prop_labels
         self.use_property_split = False
         self.use_property_decorate = False
 
     def _child(self) -> "_Layout":
-        return _Layout(self.drawn_props, self.labels, self.operators)
+        return _Layout(self.drawn_props, self.labels, self.operators, self.prop_labels)
 
-    def prop(self, _data, name: str, **_kwargs) -> None:
+    def prop(self, _data, name: str, **kwargs) -> None:
         self.drawn_props.append(name)
+        self.prop_labels.setdefault(name, []).append(str(kwargs.get("text", "")))
 
     def label(self, **kwargs) -> None:
         self.labels.append(str(kwargs.get("text", "")))
@@ -63,7 +71,7 @@ class _Matrix:
         return vector
 
 
-def _mesh(name: str, object_type: str = "CT") -> SimpleNamespace:
+def _mesh(name: str, object_type: str = "CT", size: float = 0.1) -> SimpleNamespace:
     return SimpleNamespace(
         name=name,
         type='MESH',
@@ -71,9 +79,9 @@ def _mesh(name: str, object_type: str = "CT") -> SimpleNamespace:
         matrix_world=_Matrix(),
         bound_box=[
             (x, y, z)
-            for x in (0.0, 0.1)
-            for y in (0.0, 0.1)
-            for z in (0.0, 0.1)
+            for x in (0.0, size)
+            for y in (0.0, size)
+            for z in (0.0, size)
         ],
         dicomator_object_type=object_type,
         dicomator_material="CUSTOM",
@@ -126,7 +134,7 @@ def _context(props, objects) -> SimpleNamespace:
     )
 
 
-def _draw(panel_cls, props, objects, tmp_path, monkeypatch) -> dict[str, list[str]]:
+def _draw(panel_cls, props, objects, tmp_path, monkeypatch) -> dict[str, object]:
     """Draw ``panel_cls`` and return the props, labels, and operators emitted."""
 
     monkeypatch.setattr(panels, "ensure_pydicom_available", lambda: True)
@@ -135,10 +143,16 @@ def _draw(panel_cls, props, objects, tmp_path, monkeypatch) -> dict[str, list[st
     drawn_props: list[str] = []
     labels: list[str] = []
     operators: list[str] = []
+    prop_labels: dict[str, list[str]] = {}
     panel = panel_cls.__new__(panel_cls)
-    panel.layout = _Layout(drawn_props, labels, operators)
+    panel.layout = _Layout(drawn_props, labels, operators, prop_labels)
     panel.draw(_context(props, objects))
-    return {"props": drawn_props, "labels": labels, "operators": operators}
+    return {
+        "props": drawn_props,
+        "labels": labels,
+        "operators": operators,
+        "prop_labels": prop_labels,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +374,25 @@ def test_artifacts_panel_draws_its_ct_toggles(tmp_path, monkeypatch):
         assert flag in drawn["props"]
 
 
+def test_artifacts_panel_names_noise_for_the_selected_modality(tmp_path, monkeypatch):
+    ct = _draw(
+        panels.VIEW3D_PT_dicomator_artifacts,
+        _props(ui_mode=INTERMEDIATE, imaging_modality=constants.MODALITY_CT),
+        [_mesh("Body")],
+        tmp_path,
+        monkeypatch,
+    )
+    mr = _draw(
+        panels.VIEW3D_PT_dicomator_artifacts,
+        _props(ui_mode=INTERMEDIATE, imaging_modality=constants.MODALITY_MRI_T1),
+        [_mesh("Body")],
+        tmp_path,
+        monkeypatch,
+    )
+    assert ct["prop_labels"]["enable_noise"] == ["Gaussian"]
+    assert mr["prop_labels"]["enable_noise"] == ["Rician"]
+
+
 # ---------------------------------------------------------------------------
 # Estimate panel
 # ---------------------------------------------------------------------------
@@ -398,3 +431,43 @@ def test_estimate_panel_warns_about_a_missing_drr_camera_in_advanced(tmp_path, m
         monkeypatch,
     )
     assert "Set an active scene camera for DRR export" in drawn["labels"]
+
+
+@pytest.mark.parametrize("mode", [BASIC, INTERMEDIATE])
+def test_estimate_ignores_non_image_meshes_in_simple_modes(mode, tmp_path, monkeypatch):
+    drawn = _draw(
+        panels.VIEW3D_PT_dicomator_selection_info,
+        _props(ui_mode=mode),
+        [_mesh("Body"), _mesh("Far Dose", "RTDOSE", size=100.0)],
+        tmp_path,
+        monkeypatch,
+    )
+    assert "Est. Grid: 52 x 52 x 52" in drawn["labels"]
+
+
+def test_export_action_ignores_meshes_for_disabled_outputs(tmp_path, monkeypatch):
+    drawn = _draw(
+        panels.VIEW3D_PT_dicomator_panel,
+        _props(
+            ui_mode=ADVANCED,
+            export_image_series=True,
+            export_rtdose=False,
+        ),
+        [_mesh("Body"), _mesh("Far Dose", "RTDOSE", size=100.0)],
+        tmp_path,
+        monkeypatch,
+    )
+    assert "Grid too large - export will abort" not in drawn["labels"]
+    assert drawn["operators"] == ["dicomator.export_dicom"]
+
+
+def test_export_action_hides_button_for_a_blocked_grid(tmp_path, monkeypatch):
+    drawn = _draw(
+        panels.VIEW3D_PT_dicomator_panel,
+        _props(),
+        [_mesh("Huge Body", size=100.0)],
+        tmp_path,
+        monkeypatch,
+    )
+    assert "Grid too large - export will abort" in drawn["labels"]
+    assert drawn["operators"] == []
