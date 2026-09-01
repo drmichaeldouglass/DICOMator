@@ -32,6 +32,19 @@ from .drr import resolve_drr_detector_size
 from .utils import get_float_prop, get_str_prop, resolve_output_directory
 
 
+def _directory_has_entries(path: str) -> bool:
+    """Return True when ``path`` contains at least one entry.
+
+    ``draw()`` runs on every redraw of the sidebar, so the emptiness test has
+    to cost the same whether the folder holds one file or a whole previous
+    export. ``os.scandir`` stops after the first entry; ``os.listdir`` would
+    build (and discard) a list of every filename each time the panel repaints.
+    """
+
+    with os.scandir(path) as entries:
+        return next(entries, None) is not None
+
+
 def _selected_meshes(context: Context) -> list[bpy.types.Object]:
     """Return selected mesh objects, falling back to the active mesh."""
 
@@ -147,7 +160,7 @@ def _draw_export_action(layout: bpy.types.UILayout, context: Context) -> None:
         return
     if os.path.isdir(export_dir):
         try:
-            output_has_files = bool(os.listdir(export_dir))
+            output_has_files = _directory_has_entries(export_dir)
         except OSError:
             layout.label(text="Cannot inspect export folder", icon='ERROR')
             return

@@ -708,7 +708,11 @@ def add_bias_field_shading(
         return intensity_array
 
     axes = [np.linspace(-1.0, 1.0, size, dtype=np.float32) for size in source.shape]
-    coords = np.meshgrid(*axes, indexing="ij")
+    # ``sparse=True`` returns broadcastable (W,1,1)/(1,H,1)/(1,1,D) views rather
+    # than three dense coordinate volumes. The accumulation below broadcasts
+    # identically, so the result is unchanged while the coil-field setup drops
+    # from six volume-sized float32 arrays to none.
+    coords = np.meshgrid(*axes, indexing="ij", sparse=True)
     center = [float(generator.normal(0.0, 0.25)) for _ in source.shape]
     coil_width = max(0.35, float(scale) * 1.5)
     radius_sq = np.zeros(source.shape, dtype=np.float32)

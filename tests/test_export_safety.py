@@ -63,17 +63,37 @@ def test_atomic_output_rejects_nonempty_destination(tmp_path):
     assert (final / "old-study.dcm").read_bytes() == b"old"
 
 
-def test_memory_estimate_accounts_for_rtdose_temporaries():
-    total_voxels = 100_000_000
-    estimated = constants.estimate_peak_memory_bytes(
-        total_voxels,
+def _estimate(**kwargs):
+    defaults = dict(
         export_image_series=False,
         export_drr=False,
-        export_rtdose=True,
+        export_rtdose=False,
         artifacts_enabled=False,
         gibbs_enabled=False,
     )
-    assert estimated == total_voxels * 16
+    defaults.update(kwargs)
+    return constants.estimate_peak_memory_bytes(100_000_000, **defaults)
+
+
+def test_memory_estimate_accounts_for_rtdose_temporaries():
+    assert _estimate(export_rtdose=True) == 100_000_000 * 20
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "measured_bytes_per_voxel"),
+    [
+        # Measured with tracemalloc around each pipeline stage; the estimate
+        # has to stay at or above the real high-water mark, because the export
+        # operator refuses a grid on the strength of it.
+        (dict(export_image_series=True), 2),
+        (dict(export_image_series=True, export_drr=True), 10),
+        (dict(export_image_series=True, artifacts_enabled=True), 38),
+        (dict(export_image_series=True, artifacts_enabled=True, gibbs_enabled=True), 58),
+        (dict(export_rtdose=True), 20),
+    ],
+)
+def test_memory_estimate_covers_the_measured_peak(kwargs, measured_bytes_per_voxel):
+    assert _estimate(**kwargs) >= 100_000_000 * measured_bytes_per_voxel
 
 
 def test_property_snapshot_is_independent_of_later_edits():

@@ -520,21 +520,39 @@ def estimate_peak_memory_bytes(
     artifacts_enabled: bool,
     gibbs_enabled: bool,
 ) -> int:
-    """Conservatively estimate peak array memory for the selected pipeline."""
+    """Conservatively estimate peak array memory for the selected pipeline.
+
+    The per-voxel figures below are measured high-water marks (``tracemalloc``
+    around each stage on grids large enough for the fixed overheads to wash
+    out), not guesses, because the export operator refuses a grid on the
+    strength of this number.
+    """
 
     total = max(0, int(total_voxels))
     image_bytes = 0
     if export_image_series or export_drr:
+        # The int16 HU grid itself.
         image_bytes = 2
         if artifacts_enabled:
-            image_bytes += 24
+            # Worst measured non-Gibbs generator: quantum (Poisson) noise on CT
+            # and coil bias-field shading on MR both peak at 36 B/voxel of
+            # temporaries. Stages run one at a time, so the worst one bounds
+            # the chain.
+            image_bytes += 36
         if gibbs_enabled:
-            image_bytes += 16
+            # Gibbs ringing transforms slabs of slices in complex128, which
+            # peaks at 56 B/voxel once a whole moderate volume fits one slab.
+            # Larger volumes are bounded by the slab cap instead, so this stays
+            # the worst case.
+            image_bytes += 20
         if export_drr:
+            # The float32 attenuation volume plus the temporaries of the
+            # HU-to-attenuation conversion.
             image_bytes += 8
-    # Voxel grid, clipped float32 dose, scaled float32 values, and uint32
-    # frames can coexist briefly during RT Dose encoding.
-    dose_bytes = 16 if export_rtdose else 0
+    # Clipped float32 dose, the scaled float32 values, the uint32 frames, their
+    # contiguous copy, and the PixelData bytes can coexist during RT Dose
+    # encoding (measured at 20 B/voxel).
+    dose_bytes = 20 if export_rtdose else 0
     return total * max(image_bytes, dose_bytes, 2)
 
 

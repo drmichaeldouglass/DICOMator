@@ -24,11 +24,13 @@
 - `blender_manifest.toml` is the authoritative release metadata. Extension add-ons must not reintroduce legacy `bl_info` metadata.
 - Keep the add-on licensed as `GPL-3.0-or-later`, use DICOMator-specific Blender identifiers, and declare any new file, network, clipboard, camera, or microphone access in the manifest.
 - Avoid committing large binary assets. The `wheels/` directory already contains prebuilt dependencies; keep additions minimal and justify them in commit messages.
+- `[build] paths_exclude_pattern` in the manifest **replaces** Blender's built-in default exclude list, so every new development-only path (including hidden tool caches) has to be named there or it ships to users. `tests/test_extension_package.py` fails when a repository-root entry is neither packaged nor excluded.
+- Peak-memory figures in `constants.estimate_peak_memory_bytes` are measured with `tracemalloc`, not guessed; re-measure when a pipeline stage changes how many volume-sized arrays it holds.
 - Use python modules packaged with Blender where possible and avoid using third party modules which need to be packaged using wheels.
 - Ensure the code is written and structured in a way that is easily understandable by a medical physicist.
 
 ## Testing & Validation
-- A headless pytest suite lives in `tests/` (stub `bpy`/`bmesh`/`mathutils` modules are installed by `tests/conftest.py`, so no Blender is required). **Before committing changes, run (from the repository root):**
+- A headless pytest suite lives in `tests/` (stub `bpy`/`bmesh`/`mathutils` modules are installed by `tests/conftest.py`, so no Blender is required). Because those stubs make `bpy.props.*` return `None`, `tests/test_blender_wiring.py` checks the Blender-facing surface (property names used in panels/operators, panel parents, register/unregister symmetry) by reading the source instead — keep it in mind when adding a property or panel. **Before committing changes, run (from the repository root):**
   ```bash
   python -m compileall .
   ruff check .

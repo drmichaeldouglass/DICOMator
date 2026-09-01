@@ -2,5 +2,16 @@
 **/__pycache__/
 **/*.pyc
 
+# Developer tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+
+# Built extension packages
+*.zip
+
 # macOS metadata
 .DS_Store
