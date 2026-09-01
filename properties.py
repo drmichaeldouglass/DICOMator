@@ -7,6 +7,8 @@ from .constants import (
     DOSE_SUMMATION_TYPE_ITEMS,
     DOSE_TYPE_ITEMS,
     IMAGING_MODALITY_ITEMS,
+    UI_MODE_BASIC,
+    UI_MODE_ITEMS,
     get_material_intensity,
 )
 
@@ -51,6 +53,18 @@ def update_object_material(self, context: bpy.types.Context) -> None:
 
 class DICOMATOR_PG_properties(bpy.types.PropertyGroup):
     """Properties exposed in the DICOMator UI."""
+
+    ui_mode: bpy.props.EnumProperty(
+        name="Mode",
+        description=(
+            "How much of the DICOMator interface is shown. Basic exports a plain "
+            "synthetic image series, Intermediate adds artifacts and 4D export, and "
+            "Advanced exposes every setting. Settings a mode hides stay stored but "
+            "are not applied to the export"
+        ),
+        items=UI_MODE_ITEMS,
+        default=UI_MODE_BASIC,
+    )
 
     export_image_series: bpy.props.BoolProperty(
         name="Image Series",

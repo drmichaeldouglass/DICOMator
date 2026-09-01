@@ -11,10 +11,22 @@ from mathutils import Vector
 from .constants import (
     MAX_TOTAL_VOXELS,
     MRI_MODALITIES,
+    UI_FEATURE_ARTIFACTS,
+    UI_FEATURE_FOUR_D,
+    UI_FEATURE_OBJECT_PRIORITY,
+    UI_FEATURE_OVERSIZED_GRIDS,
+    UI_FEATURE_RT_DOSE,
+    UI_MODE_LABELS,
     ensure_pydicom_available,
     estimate_peak_memory_bytes_for_props,
+    export_outputs_selectable,
     get_pydicom_error,
     grid_limits_exceeded,
+    oversized_grids_allowed,
+    resolve_export_outputs,
+    suppressed_feature_labels,
+    ui_feature_visible,
+    ui_mode_of,
 )
 from .drr import resolve_drr_detector_size
 from .utils import get_float_prop, get_str_prop, resolve_output_directory
@@ -92,6 +104,27 @@ def _grid_estimate(
     return est_width, est_height, est_depth, total_voxels
 
 
+def _mode_label(props: bpy.types.PropertyGroup) -> str:
+    """Return the human-readable name of the selected interface mode."""
+
+    return UI_MODE_LABELS[ui_mode_of(props)]
+
+
+def _draw_mode_notice(layout: bpy.types.UILayout, props: bpy.types.PropertyGroup) -> None:
+    """Report settings that are switched on but held inactive by the mode.
+
+    Hiding a control must not leave it quietly changing the exported data, so
+    the panel names anything the current mode is suppressing.
+    """
+
+    suppressed = suppressed_feature_labels(props)
+    if suppressed:
+        layout.label(
+            text=f"Inactive in {_mode_label(props)} mode: {', '.join(suppressed)}",
+            icon='INFO',
+        )
+
+
 def _draw_export_action(layout: bpy.types.UILayout, context: Context) -> None:
     """Draw the primary export action and blocking status."""
 
@@ -133,28 +166,25 @@ def _draw_export_action(layout: bpy.types.UILayout, context: Context) -> None:
         layout.label(text="Select a mesh", icon='INFO')
         return
 
-    requested = (
-        bool(getattr(props, "export_image_series", True))
-        or bool(getattr(props, "export_drr", False))
-        or bool(getattr(props, "export_rtdose", False))
-        or bool(getattr(props, "export_rtstruct", False))
-    )
-    if not requested:
+    # Outputs are resolved through the UI mode so the button agrees with what
+    # the operator will actually write.
+    outputs = resolve_export_outputs(props)
+    if not any(outputs.values()):
         layout.label(text="Choose at least one output", icon='INFO')
         return
 
     selected_meshes = _selected_meshes(context)
     counts = _export_type_counts(selected_meshes)
-    if (getattr(props, "export_image_series", True) or getattr(props, "export_drr", False)) and not counts["CT"]:
+    if (outputs["image_series"] or outputs["drr"]) and not counts["CT"]:
         layout.label(text="No image mesh selected", icon='ERROR')
         return
-    if getattr(props, "export_rtdose", False) and not counts["RTDOSE"]:
+    if outputs["rtdose"] and not counts["RTDOSE"]:
         layout.label(text="No dose mesh selected", icon='ERROR')
         return
-    if getattr(props, "export_rtstruct", False) and not counts["RTSTRUCT"]:
+    if outputs["rtstruct"] and not counts["RTSTRUCT"]:
         layout.label(text="No structure mesh selected", icon='ERROR')
         return
-    if getattr(props, "export_drr", False):
+    if outputs["drr"]:
         camera_obj = context.scene.camera
         if camera_obj is None or camera_obj.type != 'CAMERA':
             layout.label(text="Set a scene camera", icon='ERROR')
@@ -167,7 +197,7 @@ def _draw_export_action(layout: bpy.types.UILayout, context: Context) -> None:
     if estimate is not None and grid_limits_exceeded(
         *estimate[:3], estimate_peak_memory_bytes_for_props(estimate[3], props)
     ):
-        if getattr(props, "allow_oversized_grids", False):
+        if oversized_grids_allowed(props):
             layout.label(text="Oversized grid allowed", icon='ERROR')
         else:
             layout.label(text="Grid too large - export will abort", icon='ERROR')
@@ -186,19 +216,35 @@ class VIEW3D_PT_dicomator_panel(Panel):
     def draw(self, context: Context) -> None:  # pragma: no cover - Blender UI code
         layout = self.layout
         props = context.scene.dicomator_props
+
+        mode_row = layout.row(align=True)
+        mode_row.prop(props, "ui_mode", expand=True)
+        _draw_mode_notice(layout, props)
+
         layout.label(text="Synthetic research data only - not clinical", icon='ERROR')
         if not (context.active_object and context.active_object.type == 'MESH'):
             layout.label(text="Select a mesh object to export", icon='INFO')
             return
-        else:
-            selected_meshes = _selected_meshes(context)
-            layout.label(text=_export_summary(selected_meshes), icon='MESH_DATA')
 
-        grid = layout.grid_flow(columns=2, even_columns=True, even_rows=True, align=True)
-        grid.prop(props, "export_image_series", text="Image")
-        grid.prop(props, "export_drr", text="DRR")
-        grid.prop(props, "export_rtdose", text="Dose")
-        grid.prop(props, "export_rtstruct", text="Structures")
+        selected_meshes = _selected_meshes(context)
+        layout.label(text=_export_summary(selected_meshes), icon='MESH_DATA')
+
+        if export_outputs_selectable(props):
+            grid = layout.grid_flow(columns=2, even_columns=True, even_rows=True, align=True)
+            grid.prop(props, "export_image_series", text="Image")
+            grid.prop(props, "export_drr", text="DRR")
+            grid.prop(props, "export_rtdose", text="Dose")
+            grid.prop(props, "export_rtstruct", text="Structures")
+        else:
+            # Basic and Intermediate write a single image series; a dose or
+            # structure mesh left over from Advanced would go unexported.
+            counts = _export_type_counts(selected_meshes)
+            ignored = counts["RTDOSE"] + counts["RTSTRUCT"]
+            if ignored:
+                layout.label(
+                    text=f"{ignored} non-image mesh(es) not exported in {_mode_label(props)} mode",
+                    icon='INFO',
+                )
         _draw_export_action(layout, context)
 
 
@@ -243,14 +289,14 @@ class VIEW3D_PT_dicomator_selection_info(Panel):
             col.label(text=f"Conservative Peak Memory: {memory_mb:.1f} MB")
 
             if grid_limits_exceeded(est_width, est_height, est_depth, memory_bytes):
-                if getattr(props, "allow_oversized_grids", False):
+                if oversized_grids_allowed(props):
                     col.label(text="Oversized grid allowed - may exhaust memory", icon='ERROR')
                 else:
                     col.label(text="Grid too large - export blocked", icon='CANCEL')
             elif total_voxels > MAX_TOTAL_VOXELS // 2:
                 col.label(text="Large grid - may be slow", icon='ERROR')
 
-        if getattr(props, "export_drr", False):
+        if resolve_export_outputs(props)["drr"]:
             camera_obj = context.scene.camera
             detector_box = layout.column(align=True)
             if camera_obj and camera_obj.type == 'CAMERA':
@@ -284,13 +330,19 @@ class VIEW3D_PT_dicomator_per_object_hu(Panel):
 
         layout.prop(props, "imaging_modality", text="Material Presets")
 
+        show_object_types = export_outputs_selectable(props)
+        show_priority = ui_feature_visible(props, UI_FEATURE_OBJECT_PRIORITY)
+
         for obj in selected_meshes:
             col = layout.column(align=True)
             col.label(text=obj.name, icon='MESH_DATA')
 
             # DICOM object type selector determines which pipeline this mesh
-            # feeds into when exported.
-            col.prop(obj, "dicomator_object_type", text="DICOM Type")
+            # feeds into when exported. Modes that write only an image series
+            # hide it, and say so for meshes typed in Advanced mode rather
+            # than offering dose or ROI settings that would go unused.
+            if show_object_types:
+                col.prop(obj, "dicomator_object_type", text="DICOM Type")
 
             obj_type = getattr(obj, "dicomator_object_type", "CT")
 
@@ -298,11 +350,16 @@ class VIEW3D_PT_dicomator_per_object_hu(Panel):
                 row = col.row(align=True)
                 row.prop(obj, "dicomator_material", text="Material")
                 row.prop(obj, "dicomator_hu", text="HU")
-                col.prop(obj, "dicomator_priority", text="Overlap Priority")
+                if show_priority:
+                    col.prop(obj, "dicomator_priority", text="Overlap Priority")
+
+            elif not show_object_types:
+                col.label(text=f"Not exported in {_mode_label(props)} mode", icon='INFO')
 
             elif obj_type == "RTDOSE":
                 col.prop(obj, "dicomator_dose", text="Dose (Gy)")
-                col.prop(obj, "dicomator_priority", text="Overlap Priority")
+                if show_priority:
+                    col.prop(obj, "dicomator_priority", text="Overlap Priority")
 
             elif obj_type == "RTSTRUCT":
                 col.prop(obj, "dicomator_roi_type", text="ROI Type")
@@ -346,11 +403,13 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
         layout.use_property_decorate = False
         props = context.scene.dicomator_props
 
+        outputs = resolve_export_outputs(props)
+
         row = layout.row(align=True)
         row.prop(props, "lateral_resolution_mm", text="Lateral (mm)")
         row.prop(props, "axial_resolution_mm", text="Axial (mm)")
 
-        if getattr(props, "export_drr", False):
+        if outputs["drr"]:
             drr_box = layout.column(align=True)
             drr_box.prop(props, "drr_resolution_scale")
             drr_box.prop(props, "drr_water_attenuation_m_inv")
@@ -368,22 +427,24 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
                 drr_box.label(text="No active scene camera", icon='ERROR')
 
         layout.prop(props, "apply_modifiers", text="Apply Modifiers")
-        layout.prop(props, "allow_oversized_grids", text="Allow Oversized Grids")
+        if ui_feature_visible(props, UI_FEATURE_OVERSIZED_GRIDS):
+            layout.prop(props, "allow_oversized_grids", text="Allow Oversized Grids")
         layout.prop(props, "export_directory")
 
-        col = layout.column(align=True)
-        col.prop(props, "export_4d")
-        if props.export_4d:
-            row = col.row(align=True)
-            row.prop(props, "use_timeline_range")
-            if props.use_timeline_range:
+        if ui_feature_visible(props, UI_FEATURE_FOUR_D):
+            col = layout.column(align=True)
+            col.prop(props, "export_4d")
+            if props.export_4d:
                 row = col.row(align=True)
-                row.label(text=f"Timeline: {context.scene.frame_start} to {context.scene.frame_end}", icon='TIME')
-            else:
-                row = col.row(align=True)
-                row.prop(props, "frame_start")
-                row.prop(props, "frame_end")
-            col.prop(props, "frame_step")
+                row.prop(props, "use_timeline_range")
+                if props.use_timeline_range:
+                    row = col.row(align=True)
+                    row.label(text=f"Timeline: {context.scene.frame_start} to {context.scene.frame_end}", icon='TIME')
+                else:
+                    row = col.row(align=True)
+                    row.prop(props, "frame_start")
+                    row.prop(props, "frame_end")
+                col.prop(props, "frame_step")
 
         export_dir_val = get_str_prop(props, "export_directory", "")
         resolved_path = resolve_output_directory(export_dir_val)
@@ -396,7 +457,7 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
             layout.label(text=_export_summary(selected_meshes_all), icon='OUTLINER_COLLECTION')
 
         any_dose = any(getattr(obj, "dicomator_object_type", "CT") == "RTDOSE" for obj in selected_meshes_all)
-        if any_dose:
+        if any_dose and ui_feature_visible(props, UI_FEATURE_RT_DOSE):
             dose_box = layout.column(align=True)
             dose_box.prop(props, "dose_type", text="Dose Type")
             dose_box.prop(props, "dose_summation_type", text="Summation Type")
@@ -409,7 +470,7 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
 
         modality = getattr(props, "imaging_modality", None)
         is_mri = modality in MRI_MODALITIES
-        if getattr(props, "export_drr", False):
+        if outputs["drr"]:
             note_box = layout.column(align=True)
             if is_mri:
                 note_box.label(text="Use CT presets for DRR attenuation", icon='ERROR')
@@ -427,7 +488,9 @@ class VIEW3D_PT_dicomator_artifacts(Panel):
     @classmethod
     def poll(cls, context: Context) -> bool:  # pragma: no cover - Blender UI code
         props = getattr(context.scene, "dicomator_props", None)
-        return props is not None and bool(getattr(props, "export_image_series", True))
+        if props is None or not ui_feature_visible(props, UI_FEATURE_ARTIFACTS):
+            return False
+        return resolve_export_outputs(props)["image_series"]
 
     def draw(self, context: Context) -> None:  # pragma: no cover - Blender UI code
         layout = self.layout
