@@ -146,6 +146,13 @@ Once DICOMator is listed on the official Blender Extensions platform:
 2. Search for **DICOMator**.
 3. Select **Install**.
 
+To install a published release from this repository:
+
+1. Download `dicomator-<version>.zip` from the [Releases page](https://github.com/drmichaeldouglass/DICOMator/releases). Every published release is packaged and validated by Blender itself in CI, so the archive is the one Blender's own extension tooling produces.
+2. In Blender, open **Edit → Preferences → Extensions**.
+3. Open the Extensions menu and choose **Install from Disk...**.
+4. Select the downloaded zip.
+
 To install a development or pre-release build from this repository:
 
 1. Build the extension from the repository root:
@@ -351,6 +358,7 @@ Every enabled output is written as its own DICOM series inside a single study:
 
 - Continuous integration runs byte-compilation, lint, DICOM/numeric tests, and real Blender registration smoke tests (`tests/blender_smoke.py`) against the minimum supported and current stable Blender series.
 - It also runs Blender's official extension validator and builds the distributable archive. Maintainers can refresh the unmodified PyPI wheel with `download_wheels.py` when updating the pinned pydicom version.
+- Publishing a GitHub release runs `.github/workflows/main.yml`, which downloads the pinned Blender, validates and builds the package with the same two commands, and attaches `dicomator-<version>.zip` to the release. That workflow can also be started manually from the Actions tab to produce the package as a downloadable artifact without cutting a release.
 
 ## License
 

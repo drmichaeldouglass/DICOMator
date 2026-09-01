@@ -1,37 +1,165 @@
 name: Zip DICOMator Add-on on Release
 
+# Blender itself packages the add-on (`--command extension build`) rather than
+# the workflow zipping up the working tree. The archive published here is
+# therefore the one Blender's own validator accepts, and `[build]
+# paths_exclude_pattern` in blender_manifest.toml stays the single source of
+# truth for what ships to users.
+
 on:
   release:
-    types: [published]   # runs when you click “Publish release”
+    types: [published]    # runs when you click "Publish release"
+  workflow_dispatch:      # build the package on demand, without a release
 
 permissions:
-  contents: write        # needed to upload assets to the release
+  contents: read
+
+env:
+  # One knob for the Blender used to package the add-on. Keep it on the newest
+  # version in the ci.yml smoke-test matrix: both workflows then share a single
+  # cache entry, so a release usually skips the ~400 MB download entirely.
+  BLENDER_VERSION: "5.2.0"
+
+concurrency:
+  group: extension-package-${{ github.event.release.tag_name || github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  zip-and-attach:
+  build:
+    name: Build extension package
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write     # needed to upload assets to the release
     steps:
       - name: Check out the code at the release tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          # A manual run carries no release payload, so fall back to the ref the
+          # run was started from.
+          ref: ${{ github.event.release.tag_name || github.ref }}
+          persist-credentials: false
 
-      - name: Download Blender extension tools
-        run: |
-          curl --fail --location --retry 3 \
-            "https://download.blender.org/release/Blender5.2/blender-5.2.0-linux-x64.tar.xz" \
-            --output /tmp/blender.tar.xz
-          mkdir -p /tmp/blender
-          tar -xf /tmp/blender.tar.xz --strip-components=1 -C /tmp/blender
-
-      - name: Validate and build extension
-        run: |
-          /tmp/blender/blender --command extension validate
-          /tmp/blender/blender --command extension build --output-filepath dicomator.zip
-
-      - name: Upload dicomator.zip to this release
-        uses: softprops/action-gh-release@v2
+      # The manifest read and the package check below need tomllib, rather than
+      # whichever Python the runner image happens to ship.
+      - uses: actions/setup-python@v5
         with:
-          files: dicomator.zip
+          python-version: "3.13"
+
+      - name: Cache Blender
+        id: blender-cache
+        uses: actions/cache@v4
+        with:
+          # Same path and key as ci.yml, so this reuses the Blender the smoke
+          # tests already downloaded on the default branch.
+          path: ~/blender-${{ env.BLENDER_VERSION }}
+          key: blender-linux-x64-${{ env.BLENDER_VERSION }}
+
+      - name: Download Blender
+        if: steps.blender-cache.outputs.cache-hit != 'true'
+        run: |
+          major_minor="${BLENDER_VERSION%.*}"
+          curl --fail --location --retry 3 \
+            "https://download.blender.org/release/Blender${major_minor}/blender-${BLENDER_VERSION}-linux-x64.tar.xz" \
+            --output "$RUNNER_TEMP/blender.tar.xz"
+          mkdir -p "$HOME/blender-$BLENDER_VERSION"
+          tar -xf "$RUNNER_TEMP/blender.tar.xz" \
+            --strip-components=1 \
+            -C "$HOME/blender-$BLENDER_VERSION"
+
+      - name: Name the package after the manifest version
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("blender_manifest.toml", "rb"))["version"])')"
+          # Built outside the checkout: anything left in the working tree during
+          # the build is a candidate for inclusion in the package.
+          mkdir -p "$RUNNER_TEMP/package"
+          {
+            echo "ADDON_VERSION=$version"
+            echo "PACKAGE_PATH=$RUNNER_TEMP/package/dicomator-$version.zip"
+          } >> "$GITHUB_ENV"
+
+      - name: Validate and build the extension
+        run: |
+          blender="$HOME/blender-$BLENDER_VERSION/blender"
+          "$blender" --command extension validate
+          "$blender" --command extension build --output-filepath "$PACKAGE_PATH"
+
+      - name: Check what the package contains
+        run: |
+          python3 - "$PACKAGE_PATH" <<'PY'
+          import sys
+          import tomllib
+          import zipfile
+          from pathlib import Path
+
+          package = Path(sys.argv[1])
+          with zipfile.ZipFile(package) as archive:
+              names = sorted(archive.namelist())
+
+          manifest = tomllib.loads(Path("blender_manifest.toml").read_text(encoding="utf-8"))
+          # Blender installs the add-on from the archive root and installs the
+          # wheels named in the manifest; without either the package is
+          # unusable, and neither failure is visible until someone installs it.
+          required = ["blender_manifest.toml"] + [
+              wheel.removeprefix("./") for wheel in manifest.get("wheels", [])
+          ]
+          missing = [name for name in required if name not in names]
+          # paths_exclude_pattern replaces Blender's built-in exclude list, so a
+          # new development-only path ships to users until it is named there.
+          leaked = [
+              name
+              for name in names
+              if name.startswith((".", "tests/", "docs/")) or "__pycache__/" in name
+          ]
+
+          print(f"{package.name} ({package.stat().st_size / 1024:.0f} KiB)")
+          for name in names:
+              print(f"  {name}")
+
+          if missing:
+              sys.exit(f"missing from the package: {', '.join(missing)}")
+          if leaked:
+              sys.exit(f"development files in the package: {', '.join(leaked)}")
+          PY
+
+      - name: Compare the manifest version with the release tag
+        if: github.event_name == 'release'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [ "${RELEASE_TAG#[vV]}" != "$ADDON_VERSION" ]; then
+            echo "::warning title=Version mismatch::Release tag '$RELEASE_TAG' does not" \
+              "match the blender_manifest.toml version '$ADDON_VERSION', which is the" \
+              "version Blender shows to users."
+          fi
+
+      - name: Upload the package as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dicomator-${{ env.ADDON_VERSION }}
+          path: ${{ env.PACKAGE_PATH }}
+          if-no-files-found: error
+
+      - name: Attach the package to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          # --clobber so re-running the workflow on an existing release replaces
+          # the asset instead of failing on the duplicate name.
+          gh release upload "$RELEASE_TAG" "$PACKAGE_PATH" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+      - name: Summarise the build
+        run: |
+          {
+            echo "### DICOMator extension package"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Package | \`$(basename "$PACKAGE_PATH")\` |"
+            echo "| Manifest version | \`$ADDON_VERSION\` |"
+            echo "| Built with | Blender \`$BLENDER_VERSION\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
