@@ -80,6 +80,32 @@ def _export_summary(objects: list[bpy.types.Object]) -> str:
     return " | ".join(parts)
 
 
+def _objects_for_enabled_outputs(
+    objects: list[bpy.types.Object],
+    outputs: dict[str, bool],
+) -> list[bpy.types.Object]:
+    """Return meshes that contribute to at least one enabled output.
+
+    The export operator builds its shared grid from this same set of object
+    roles. Keeping the panel estimate aligned prevents a disabled dose or
+    structure mesh from making an otherwise small image export look
+    oversized.
+    """
+
+    enabled_types = set()
+    if outputs["image_series"] or outputs["drr"]:
+        enabled_types.add("CT")
+    if outputs["rtdose"]:
+        enabled_types.add("RTDOSE")
+    if outputs["rtstruct"]:
+        enabled_types.add("RTSTRUCT")
+    return [
+        obj
+        for obj in objects
+        if getattr(obj, "dicomator_object_type", "CT") in enabled_types
+    ]
+
+
 def _selection_bounds(objects: list[bpy.types.Object]) -> tuple[float, float, float]:
     """Return selected-object dimensions in metres."""
 
@@ -203,7 +229,8 @@ def _draw_export_action(layout: bpy.types.UILayout, context: Context) -> None:
             layout.label(text="Set a scene camera", icon='ERROR')
             return
 
-    estimate = _grid_estimate(_selection_bounds(selected_meshes), props)
+    export_meshes = _objects_for_enabled_outputs(selected_meshes, outputs)
+    estimate = _grid_estimate(_selection_bounds(export_meshes), props)
     # The estimated peak memory has to be part of this check: the export
     # operator aborts on it too, so leaving it out let the button look clear
     # for a grid that would be rejected the moment it was pressed.
@@ -214,6 +241,7 @@ def _draw_export_action(layout: bpy.types.UILayout, context: Context) -> None:
             layout.label(text="Oversized grid allowed", icon='ERROR')
         else:
             layout.label(text="Grid too large - export will abort", icon='ERROR')
+            return
     layout.operator("dicomator.export_dicom", text=button_text, icon='EXPORT')
 
 
@@ -285,7 +313,13 @@ class VIEW3D_PT_dicomator_selection_info(Panel):
         else:
             layout.label(text=f"Selected: {active_obj.name}", icon='MESH_DATA')
 
-        obj_width, obj_height, obj_depth = _selection_bounds(selected_meshes)
+        outputs = resolve_export_outputs(props)
+        export_meshes = _objects_for_enabled_outputs(selected_meshes, outputs)
+        if not export_meshes:
+            layout.label(text="No selected meshes used by enabled outputs", icon='INFO')
+            return
+
+        obj_width, obj_height, obj_depth = _selection_bounds(export_meshes)
 
         col = layout.column(align=True)
         col.label(text=f"Size: {obj_width:.2f} x {obj_height:.2f} x {obj_depth:.2f} m")
@@ -516,11 +550,11 @@ class VIEW3D_PT_dicomator_artifacts(Panel):
         layout.label(text="MRI artifacts" if is_mri else "CT artifacts", icon='SHADERFX')
         layout.prop(props, "artifact_seed")
 
-        gaussian_box = layout.box()
-        gaussian_box.prop(props, "enable_noise", text="Gaussian")
+        noise_box = layout.box()
+        noise_box.prop(props, "enable_noise", text="Rician" if is_mri else "Gaussian")
         if props.enable_noise:
             label = "Std. Dev." if is_mri else "Std. Dev. (HU)"
-            gaussian_box.prop(props, "noise_std_dev_hu", text=label)
+            noise_box.prop(props, "noise_std_dev_hu", text=label)
 
         if is_mri:
             bias_box = layout.box()
