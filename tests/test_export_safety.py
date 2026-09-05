@@ -105,6 +105,29 @@ def test_property_snapshot_is_independent_of_later_edits():
     assert snapshot.artifact_seed == 7
 
 
+@pytest.mark.parametrize("cancel", [False, True])
+def test_bounds_sweep_restores_animation_subframe(monkeypatch, cancel):
+    class Scene:
+        frame_current = 7
+        frame_subframe = 0.375
+
+        def frame_set(self, frame, subframe=0.0):
+            self.frame_current = frame
+            self.frame_subframe = subframe
+
+    scene = Scene()
+    context = SimpleNamespace(scene=scene, evaluated_depsgraph_get=lambda: None)
+    monkeypatch.setattr(operators, "_mesh_bounds_for_objects", lambda *a, **k: (0, 1, 0, 1, 0, 1))
+    job = operators._bounds_across_frames_iter(context, [], [1, 2], apply_modifiers=False)
+    if cancel:
+        next(job)
+        job.close()
+    else:
+        list(job)
+    assert scene.frame_current == 7
+    assert scene.frame_subframe == 0.375
+
+
 # ---------------------------------------------------------------------------
 # Grid guardrails
 # ---------------------------------------------------------------------------

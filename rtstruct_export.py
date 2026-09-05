@@ -7,8 +7,9 @@ Algorithm
 ---------
 For each Z plane in the dose/CT grid, a bmesh copy of each structure mesh is
 bisected using ``bmesh.ops.bisect_plane``.  The resulting cut edges are
-graph-walked to recover ordered closed loops.  Each loop is stored as a
-``CLOSED_PLANAR`` contour in the ``ROIContourSequence``.
+graph-walked to recover ordered closed loops. ROIs with multiple loops on a
+plane use ``CLOSEDPLANAR_XOR`` throughout to preserve holes independently of
+loop winding; other ROIs use ``CLOSED_PLANAR``.
 
 Coordinate convention
 ---------------------
@@ -530,6 +531,16 @@ def build_rtstruct_dataset(
         roi_contour_item.ReferencedROINumber = roi_number
         roi_contour_item.ROIDisplayColor = [int(r), int(g), int(b)]
 
+        # Separate inner and outer loops need explicit XOR semantics to
+        # preserve a cavity. XOR also combines disjoint loops correctly and
+        # matches the voxelizer's even/odd filling rule. PS3.3 C.8.8.6.1
+        # requires every contour of an XOR ROI to use the same type, including
+        # slices that contain only one loop.
+        geometric_type = (
+            "CLOSEDPLANAR_XOR"
+            if any(sum(len(loop) >= 3 for loop in loops) > 1 for loops in contours_by_z.values())
+            else "CLOSED_PLANAR"
+        )
         contour_sequence = []
         for z_m, loops in sorted(contours_by_z.items()):
             ref_sop_uid = _referenced_ct_sop_uid_for_z(z_m)
@@ -544,7 +555,7 @@ def build_rtstruct_dataset(
                     contour_data.append(round(z_m * 1000.0, 4))
 
                 contour_item = Dataset()
-                contour_item.ContourGeometricType = "CLOSED_PLANAR"
+                contour_item.ContourGeometricType = geometric_type
                 contour_item.NumberOfContourPoints = len(loop)
                 contour_item.ContourData = contour_data
                 if ref_sop_uid and referenced_ct_sop_class_uid:

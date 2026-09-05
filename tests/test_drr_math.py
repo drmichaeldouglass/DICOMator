@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from conftest import load_module
 
@@ -44,6 +45,28 @@ def test_axis_parallel_ray_with_zero_components():
     assert valid
     np.testing.assert_allclose(entry, 2.0, atol=1e-4)
     np.testing.assert_allclose(exit_, 3.0, atol=1e-4)
+
+
+@pytest.mark.parametrize("x", [0.0, 1.0])
+def test_parallel_ray_on_box_face_keeps_its_full_path(x):
+    entry, exit_, valid = _intersect((x, 0.5, -2.0), (0.0, 0.0, 1.0))
+    assert valid
+    np.testing.assert_allclose([entry, exit_], [2.0, 3.0])
+
+
+def test_parallel_ray_just_outside_box_is_not_tilted_into_it():
+    _entry, _exit, valid = _intersect((-1e-9, 0.5, -2.0), (0.0, 0.0, 1.0))
+    assert not valid
+
+
+def test_small_negative_direction_keeps_its_sign():
+    origins = np.array([[1e-9, 0.5, 0.0]])
+    directions = np.array([[-1e-9, 0.0, 1.0]])
+    entry, exit_, valid = drr._ray_box_intersections(
+        origins, directions, BOX_MIN, np.array([1.0, 1.0, 10.0])
+    )
+    assert valid[0]
+    np.testing.assert_allclose([entry[0], exit_[0]], [0.0, 1.0])
 
 
 def test_ray_pointing_away_is_invalid():

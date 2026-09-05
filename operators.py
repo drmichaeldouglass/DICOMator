@@ -301,6 +301,7 @@ def _bounds_across_frames_iter(
 
     frames = list(frames)
     saved_frame = context.scene.frame_current
+    saved_subframe = context.scene.frame_subframe
     min_x = min_y = min_z = float('inf')
     max_x = max_y = max_z = float('-inf')
 
@@ -321,7 +322,7 @@ def _bounds_across_frames_iter(
             max_z = max(max_z, frame_bounds[5])
             yield index, len(frames)
     finally:
-        context.scene.frame_set(saved_frame, subframe=0.0)
+        context.scene.frame_set(saved_frame, subframe=saved_subframe)
 
     return min_x, max_x, min_y, max_y, min_z, max_z
 
@@ -831,6 +832,7 @@ class DICOMATOR_OT_export_dicom(Operator):
         prepared_geometry = None
         if num_phases == 1:
             frame_before_prepare = context.scene.frame_current
+            subframe_before_prepare = context.scene.frame_subframe
             context.scene.frame_set(int(frames[0]), subframe=0.0)
             try:
                 prepared_geometry = yield from _run_subtask(
@@ -843,7 +845,7 @@ class DICOMATOR_OT_export_dicom(Operator):
                     0.03,
                 )
             finally:
-                context.scene.frame_set(frame_before_prepare, subframe=0.0)
+                context.scene.frame_set(frame_before_prepare, subframe=subframe_before_prepare)
             if not prepared_geometry:
                 return {'error': "No valid mesh geometry found in the selected objects"}
             object_bounds = list(prepared_geometry.values())
@@ -911,6 +913,7 @@ class DICOMATOR_OT_export_dicom(Operator):
         study_uid = shared_constants.generate_uid()
         frame_of_ref_uid = shared_constants.generate_uid()
         saved_frame = context.scene.frame_current
+        saved_subframe = context.scene.frame_subframe
 
         # Build a human-readable list of active export types for reporting.
         active_types: list[str] = []
@@ -1216,7 +1219,7 @@ class DICOMATOR_OT_export_dicom(Operator):
 
                 yield phase_end
         finally:
-            context.scene.frame_set(saved_frame, subframe=0.0)
+            context.scene.frame_set(saved_frame, subframe=saved_subframe)
 
         return {'success': f"Successfully exported {num_phases} phase(s) [{types_label}] to {final_output_dir}"}
 

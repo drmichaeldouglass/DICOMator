@@ -6,7 +6,9 @@ import tempfile
 from pathlib import Path
 
 import bpy
+import numpy as np
 import pydicom
+from mathutils import Vector
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT.parent))
@@ -76,6 +78,14 @@ def _assert_cube_ct_export() -> None:
         assert int(volume.max()) == 250
         assert int(volume.min()) == constants.AIR_DENSITY
 
+        # Both surfaces lie outside this crop. It must still be entirely
+        # inside the cube when the real BVH is used.
+        cropped, _, _ = DICOMator.voxelize_objects_to_hu(
+            [cube], voxel_size=voxel_size, padding=0,
+            bbox_override=(-0.01, 0.01, -0.01, 0.01, -0.01, 0.01),
+        )
+        assert np.all(cropped == 250), cropped
+
         with tempfile.TemporaryDirectory(prefix="dicomator-blender-smoke-") as output_dir:
             result = DICOMator.export_voxel_grid_to_dicom(
                 volume,
@@ -96,11 +106,32 @@ def _assert_cube_ct_export() -> None:
         DICOMator.unregister()
 
 
+def _assert_hollow_rtstruct_export() -> None:
+    """Check that real mesh bisection preserves a torus's inner boundary."""
+    DICOMator.register()
+    try:
+        bpy.ops.mesh.primitive_torus_add(major_radius=0.05, minor_radius=0.01)
+        torus = bpy.context.active_object
+        with tempfile.TemporaryDirectory(prefix="dicomator-torus-smoke-") as output_dir:
+            result = DICOMator.export_rtstruct_to_dicom(
+                [torus], Vector((0.0, 0.0, 0.0005)), (0.001, 0.001, 0.001),
+                1, output_dir, bpy.context.evaluated_depsgraph_get(),
+            )
+            assert "error" not in result, result
+            ds = pydicom.dcmread(Path(output_dir) / "RTStruct.dcm")
+            contours = ds.ROIContourSequence[0].ContourSequence
+            assert len(contours) == 2, len(contours)
+            assert {c.ContourGeometricType for c in contours} == {"CLOSEDPLANAR_XOR"}
+    finally:
+        DICOMator.unregister()
+
+
 def main() -> None:
     assert constants.ensure_pydicom_available(), constants.get_pydicom_error()
     _assert_failed_registration_rolls_back()
     _assert_registration_cycle()
     _assert_cube_ct_export()
+    _assert_hollow_rtstruct_export()
     print(f"DICOMator Blender smoke test passed in Blender {bpy.app.version_string}")
 
 

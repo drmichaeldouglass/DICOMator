@@ -30,12 +30,12 @@ def _z_for_slice(index: int) -> float:
     return BBOX_MIN_Z_M + (index + 0.5) * VZ_M
 
 
-def _build(**overrides):
+def _build(roi_defs=None, **overrides):
     generate_uid = constants.generate_uid
     ct_uids = [generate_uid() for _ in range(4)]
     z0 = _z_for_slice(1)
     z1 = _z_for_slice(2)
-    roi_defs = [
+    default_roi_defs = [
         (
             "A very long structure name exceeding limits",
             (255, 0, 0),
@@ -59,7 +59,43 @@ def _build(**overrides):
         referenced_ct_sop_instance_uids=ct_uids,
     )
     kwargs.update(overrides)
-    return rtstruct_export.build_rtstruct_dataset(roi_defs, **kwargs), kwargs, ct_uids
+    return rtstruct_export.build_rtstruct_dataset(
+        default_roi_defs if roi_defs is None else roi_defs, **kwargs
+    ), kwargs, ct_uids
+
+
+@pytest.mark.parametrize("reverse_inner", [False, True])
+def test_hollow_roi_uses_xor_on_every_slice(tmp_path, reverse_inner):
+    z0, z1 = _z_for_slice(1), _z_for_slice(2)
+    outer = _loop_at(z0)
+    inner = [(0.01, 0.01, z0), (0.04, 0.01, z0), (0.04, 0.04, z0), (0.01, 0.04, z0)]
+    if reverse_inner:
+        inner.reverse()
+    ds, _, ct_uids = _build(roi_defs=[
+        ("Hollow", (255, 0, 0), "OAR", {z0: [outer, inner], z1: [_loop_at(z1)]}),
+        ("Solid", (0, 255, 0), "OAR", {z0: [outer]}),
+    ])
+    output = tmp_path / "RTStruct.dcm"
+    ds.save_as(output, enforce_file_format=True)
+    restored = pydicom.dcmread(output)
+    contours = restored.ROIContourSequence[0].ContourSequence
+    assert len(contours) == 3
+    assert {c.ContourGeometricType for c in contours} == {"CLOSEDPLANAR_XOR"}
+    np.testing.assert_allclose(np.array(contours[1].ContourData, dtype=float).reshape(-1, 3),
+                               np.array(inner) * 1000.0, atol=1e-4)
+    assert contours[0].ContourImageSequence[0].ReferencedSOPInstanceUID == ct_uids[1]
+    assert contours[2].ContourImageSequence[0].ReferencedSOPInstanceUID == ct_uids[2]
+    assert restored.ROIContourSequence[1].ContourSequence[0].ContourGeometricType == "CLOSED_PLANAR"
+
+
+def test_degenerate_loop_does_not_change_roi_combination_rule():
+    z0 = _z_for_slice(1)
+    ds, _, _ = _build(roi_defs=[
+        ("Solid", (255, 0, 0), "OAR", {z0: [_loop_at(z0), [(0, 0, z0)]]}),
+    ])
+    contours = ds.ROIContourSequence[0].ContourSequence
+    assert len(contours) == 1
+    assert contours[0].ContourGeometricType == "CLOSED_PLANAR"
 
 
 def test_sequences_and_cross_references():
