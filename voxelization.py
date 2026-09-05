@@ -285,7 +285,7 @@ def _voxelize_objects_iter(
             messages.append(reason)
 
     skipped_names: list[str] = []
-    object_data: list[tuple[str, BVHTree, float, int, int, int, int]] = []
+    object_data: list[tuple[str, BVHTree, float, int, int, int, int, float, float]] = []
     for obj in sorted_objects:
         if prepared is not None:
             geometry = prepared.get(obj.name)
@@ -295,7 +295,7 @@ def _voxelize_objects_iter(
             skipped_names.append(obj.name)
             _skip(f"Skipped '{obj.name}' during {label} voxelization: mesh has no faces")
             continue
-        bvh, (obj_min_x, obj_max_x, obj_min_y, obj_max_y, _obj_min_z, _obj_max_z) = geometry
+        bvh, (obj_min_x, obj_max_x, obj_min_y, obj_max_y, obj_min_z, obj_max_z) = geometry
         # Rays outside the object's XY footprint cannot intersect it, so only
         # the covered column range (plus one voxel of slack) is visited. For
         # small objects inside a large grid this skips almost all columns.
@@ -307,7 +307,10 @@ def _voxelize_objects_iter(
             skipped_names.append(obj.name)
             _skip(f"Skipped '{obj.name}' during {label} voxelization: outside the voxel grid")
             continue
-        object_data.append((obj.name, bvh, _grid_value(value_for_object(obj)), ix0, ix1, iy0, iy1))
+        object_data.append((
+            obj.name, bvh, _grid_value(value_for_object(obj)), ix0, ix1, iy0, iy1,
+            obj_min_z, obj_max_z,
+        ))
 
     if not object_data:
         raise ValueError(
@@ -325,19 +328,22 @@ def _voxelize_objects_iter(
     z0_center = min_z + 0.5 * vz
     inv_dz = 1.0 / vz
     ray_dir = Vector((0.0, 0.0, 1.0))
-    ray_start_z = min_z - 2.0 * vz
-    max_dist = (max_z - min_z) + 4.0 * vz
 
     total_columns = max(
         1,
         sum(
             (ix1 - ix0 + 1) * (iy1 - iy0 + 1)
-            for _name, _bvh, _value, ix0, ix1, iy0, iy1 in object_data
+            for _name, _bvh, _value, ix0, ix1, iy0, iy1, _z_min, _z_max in object_data
         ),
     )
     processed = 0
 
-    for object_name, bvh, value, ix0, ix1, iy0, iy1 in object_data:
+    for object_name, bvh, value, ix0, ix1, iy0, iy1, obj_min_z, obj_max_z in object_data:
+        # A bbox_override may crop through a solid. Start below the mesh and
+        # allow the ray to reach its exit so entry/exit pairing remains valid;
+        # the resulting filled intervals are clipped to the grid below.
+        ray_start_z = min(min_z, obj_min_z) - 2.0 * vz
+        ray_end_z = max(max_z, obj_max_z) + 2.0 * vz
         ray_cast = bvh.ray_cast
         odd_columns = 0
         recovered_columns = 0
@@ -349,7 +355,7 @@ def _voxelize_objects_iter(
             hits_z: list[float] = []
             while True:
                 location, _normal, _face_index, _distance = ray_cast(
-                    origin_ray, ray_dir, max_dist
+                    origin_ray, ray_dir, max(0.0, ray_end_z - origin_ray.z)
                 )
                 if location is None:
                     break

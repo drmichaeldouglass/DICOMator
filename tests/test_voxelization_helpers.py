@@ -147,6 +147,30 @@ class _SlabBVH:
         return None, None, None, None
 
 
+@pytest.mark.parametrize("kind", ["hu", "dose"])
+@pytest.mark.parametrize("slab_bounds", [(-0.1, 0.1), (-0.1, 0.003), (-0.1, -0.02)])
+def test_cropped_grid_preserves_surface_pairing(kind, slab_bounds):
+    """The crop may start inside a solid, but the ray must start outside it."""
+    lower, upper = slab_bounds
+    obj = SimpleNamespace(name="Slab", dicomator_hu=250.0, dicomator_dose=2.0)
+    factory = getattr(voxelization, f"voxelize_objects_to_{kind}_iter")
+    grid, _origin, _dims = voxelization._drive(
+        factory(
+            [obj], voxel_size=0.001, padding=0,
+            bbox_override=(0.0, 0.002, 0.0, 0.002, 0.0, 0.005),
+            prepared={"Slab": (
+                _SlabBVH(lower, upper),
+                (0.0, 0.002, 0.0, 0.002, lower, upper),
+            )},
+        ),
+        None,
+    )
+    z_centers = (np.arange(5) + 0.5) * 0.001
+    background, value = (-1000, 250) if kind == "hu" else (0, 2)
+    expected = np.where((z_centers >= lower) & (z_centers <= upper), value, background)
+    np.testing.assert_array_equal(grid, np.broadcast_to(expected, grid.shape))
+
+
 def _voxelize_slab(hu_value: float) -> np.ndarray:
     """Fill a small grid from one slab mesh carrying ``hu_value``."""
 

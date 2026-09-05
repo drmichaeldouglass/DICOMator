@@ -241,3 +241,37 @@ def test_pixel_spacing_matches_first_pixel_offset_from_the_frame_corner(patched_
         )
         expected = top_left_corner_mm + 0.5 * column_mm * row_axis + 0.5 * row_mm * column_axis
         np.testing.assert_allclose(position, expected, atol=1e-6)
+
+
+@pytest.mark.parametrize("path_length", [0.002, 0.014, 0.016, 2.564, 2.566])
+def test_uniform_attenuation_integrates_partial_final_step(patched_vector, monkeypatch, path_length):
+    """Check Beer-Lambert integration, including paths shorter than half a step.
+
+    Analytic intersections isolate integration from camera geometry. The long
+    paths also exercise the boundary between blocks of 256 samples.
+    """
+    step = 0.01
+    camera = _Camera(height=3.5)
+    volume = np.zeros((2, 2, 400), dtype=np.int16)
+    observed = []
+
+    def intersections(origins, directions, bounds_min, bounds_max):
+        count = len(origins)
+        entry = (origins[:, 2] - 3.5).astype(np.float32)
+        return (
+            entry,
+            entry + np.float32(path_length),
+            np.ones(count, dtype=bool),
+        )
+
+    def capture(integrals, fixed=False):
+        observed.append(integrals.copy())
+        return np.zeros(integrals.shape, dtype=np.uint16)
+
+    monkeypatch.setattr(drr, "_ray_box_intersections", intersections)
+    monkeypatch.setattr(drr, "_normalize_projection", capture)
+    drr.generate_drr_from_hu_volume(
+        volume, (1.0, 1.0, step), Vec3((-1.0, -1.0, 0.0)), _Scene(), camera,
+        water_attenuation_coefficient_m_inv=20.0,
+    )
+    np.testing.assert_allclose(observed[0], 20.0 * path_length, rtol=2e-5)

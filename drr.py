@@ -50,14 +50,25 @@ def _ray_box_intersections(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Intersect a batch of rays with an axis-aligned bounding box."""
 
-    safe_directions = np.where(np.abs(directions) < 1e-8, 1e-8, directions)
+    # Parallel rays impose no distance limit when inside the axis slab, and
+    # cannot hit it when outside. Replacing zero with a small positive value
+    # tilts the ray, losing rays on the upper face and admitting outside rays.
+    parallel = directions == 0.0
+    safe_directions = np.where(parallel, 1.0, directions)
     t0 = (bounds_min - origins) / safe_directions
     t1 = (bounds_max - origins) / safe_directions
-    t_min = np.minimum(t0, t1)
-    t_max = np.maximum(t0, t1)
+    t_min = np.where(parallel, -np.inf, np.minimum(t0, t1))
+    t_max = np.where(parallel, np.inf, np.maximum(t0, t1))
     entry = np.max(t_min, axis=1)
     exit_ = np.min(t_max, axis=1)
-    valid = exit_ > np.maximum(entry, 0.0)
+    outside_parallel = np.any(
+        parallel & ((origins < bounds_min) | (origins > bounds_max)), axis=1
+    )
+    valid = (
+        ~outside_parallel
+        & np.any(~parallel, axis=1)
+        & (exit_ > np.maximum(entry, 0.0))
+    )
     entry = np.where(valid, np.maximum(entry, 0.0), 0.0).astype(np.float32, copy=False)
     exit_ = np.where(valid, exit_, 0.0).astype(np.float32, copy=False)
     return entry, exit_, valid
@@ -263,9 +274,17 @@ def generate_drr_from_hu_volume_iter(
 
             for sample_start in range(0, max_samples, sample_block):
                 sample_end = min(max_samples, sample_start + sample_block)
-                sample_offsets = (np.arange(sample_start, sample_end, dtype=np.float32) + 0.5) * step_size
-                t_values = entry_t[None, :] + sample_offsets[:, None]
-                active_samples = valid[None, :] & (t_values < exit_t[None, :])
+                sample_offsets = np.arange(sample_start, sample_end, dtype=np.float32) * step_size
+                # Integrate the final, possibly shorter segment using its own
+                # midpoint and length. A fixed midpoint/full-step weight can
+                # drop short paths entirely or overestimate their attenuation.
+                segment_lengths = np.clip(
+                    (exit_t - entry_t)[None, :] - sample_offsets[:, None],
+                    0.0,
+                    step_size,
+                )
+                t_values = entry_t[None, :] + sample_offsets[:, None] + 0.5 * segment_lengths
+                active_samples = valid[None, :] & (segment_lengths > 0.0)
                 if not np.any(active_samples):
                     continue
 
@@ -288,7 +307,8 @@ def generate_drr_from_hu_volume_iter(
 
                 attenuation_samples = np.zeros(t_values.shape, dtype=np.float32)
                 attenuation_samples[inside] = attenuation_volume[ix[inside], iy[inside], iz[inside]]
-                chunk_integrals += np.sum(attenuation_samples, axis=0, dtype=np.float32) * step_size
+                attenuation_samples *= segment_lengths
+                chunk_integrals += np.sum(attenuation_samples, axis=0, dtype=np.float32)
 
         line_integrals[row_start:row_end, :] = chunk_integrals.reshape(row_end - row_start, detector_width)
 
