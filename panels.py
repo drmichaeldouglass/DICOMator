@@ -520,7 +520,7 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
         if outputs["drr"]:
             note_box = layout.column(align=True)
             if is_mri:
-                note_box.label(text="Use CT presets for DRR attenuation", icon='ERROR')
+                note_box.label(text="DRR uses CT preset attenuation; custom meshes = water", icon='INFO')
 
 
 class VIEW3D_PT_dicomator_artifacts(Panel):

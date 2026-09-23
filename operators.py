@@ -47,6 +47,7 @@ from .constants import (
     ensure_pydicom_available,
     estimate_peak_memory_bytes_for_props,
     four_d_export_enabled,
+    get_material_intensity,
     grid_limits_exceeded,
     oversized_grids_allowed,
     resolve_export_outputs,
@@ -79,12 +80,44 @@ def _get_int_prop(props, name: str, default: int) -> int:
         return int(default)
 
 
-def _configured_artifact_stages(props, rng: np.random.Generator | None = None) -> list:
+#: Stable per-stage keys for the artifact random streams. Never renumber an
+#: existing entry: the numbers are part of what makes a stored seed reproduce
+#: an earlier export.
+_ARTIFACT_STREAM_KEYS = {
+    "metal": 1,
+    "ring": 2,
+    "motion": 3,
+    "distortion": 4,
+    "bias": 5,
+    "noise": 6,
+    "poisson": 7,
+}
+
+
+def _artifact_stage_rng(base_seed: int, phase_index: int, stage: str) -> np.random.Generator:
+    """Return the independent random stream for one artifact stage.
+
+    Each stage draws from its own stream, so switching one artifact on or off
+    (or changing its settings) never changes the random pattern of another.
+    Ring artifacts model a miscalibrated detector channel, a property of the
+    scanner rather than of the acquisition, so every 4D phase shares one ring
+    pattern; all other stages get a deterministic sub-seed per phase.
+    """
+
+    key = _ARTIFACT_STREAM_KEYS[stage]
+    entropy = [int(base_seed), key] if stage == "ring" else [int(base_seed), int(phase_index), key]
+    return np.random.default_rng(np.random.SeedSequence(entropy))
+
+
+def _configured_artifact_stages(props, *, base_seed: int = 0, phase_index: int = 0) -> list:
     """Build the ordered artifact operations enabled in ``props``.
 
     Each entry is a callable taking and returning a volume; parameters are
     read from ``props`` once, when the list is built.
     """
+
+    def stage_rng(stage: str) -> np.random.Generator:
+        return _artifact_stage_rng(base_seed, phase_index, stage)
 
     if not ui_feature_visible(props, UI_FEATURE_ARTIFACTS):
         # Basic mode hides the Artifacts panel, so stored toggles must not keep
@@ -117,7 +150,7 @@ def _configured_artifact_stages(props, rng: np.random.Generator | None = None) -
             density_threshold=float(threshold),
             num_streaks=streaks,
             falloff=float(falloff),
-            rng=rng,
+            rng=stage_rng("metal"),
         ))
 
     if getattr(props, "enable_ring_artifacts", False) and is_ct:
@@ -133,7 +166,7 @@ def _configured_artifact_stages(props, rng: np.random.Generator | None = None) -
             ring_radius=float(ring_radius) if ring_radius is not None else None,
             thickness=float(thickness),
             jitter=float(jitter),
-            rng=rng,
+            rng=stage_rng("ring"),
         ))
 
     if getattr(props, "enable_motion_artifact", False):
@@ -148,7 +181,7 @@ def _configured_artifact_stages(props, rng: np.random.Generator | None = None) -
             blur_size=blur_size,
             severity=float(severity),
             axis=axis,
-            rng=rng,
+            rng=stage_rng("motion"),
             fill_value=0.0 if is_mri else AIR_DENSITY,
         ))
 
@@ -163,7 +196,7 @@ def _configured_artifact_stages(props, rng: np.random.Generator | None = None) -
             b0_strength=float(b0),
             b0_scale=float(b0_scale),
             readout_axis=readout_axis,
-            rng=rng,
+            rng=stage_rng("distortion"),
         ))
 
     if getattr(props, "enable_gibbs_ringing", False) and is_mri:
@@ -178,7 +211,7 @@ def _configured_artifact_stages(props, rng: np.random.Generator | None = None) -
             add_bias_field_shading,
             strength=float(strength),
             scale=float(scale),
-            rng=rng,
+            rng=stage_rng("bias"),
         ))
 
     if getattr(props, "enable_noise", False) and get_float_prop(props, "noise_std_dev_hu", 0.0) > 0.0:
@@ -186,13 +219,13 @@ def _configured_artifact_stages(props, rng: np.random.Generator | None = None) -
         if is_mri:
             # MR magnitude images carry Rician (not Gaussian) noise; the value is
             # reused as the underlying complex-channel standard deviation.
-            stages.append(partial(add_rician_noise, sigma=float(std_dev), rng=rng))
+            stages.append(partial(add_rician_noise, sigma=float(std_dev), rng=stage_rng("noise")))
         else:
-            stages.append(partial(add_gaussian_noise, std_hu=float(std_dev), rng=rng))
+            stages.append(partial(add_gaussian_noise, std_hu=float(std_dev), rng=stage_rng("noise")))
 
     if getattr(props, "enable_poisson_noise", False) and get_float_prop(props, "poisson_scale", 0.0) > 0.0 and is_ct:
         scale = max(1.0, get_float_prop(props, "poisson_scale", 150.0))
-        stages.append(partial(add_poisson_noise, scale=float(scale), rng=rng))
+        stages.append(partial(add_poisson_noise, scale=float(scale), rng=stage_rng("poisson")))
 
     if is_mri and stages:
         # The artifact helpers clamp to the CT HU range, which permits
@@ -215,8 +248,7 @@ def _apply_configured_artifacts_iter(
     """
 
     base_seed = max(0, _get_int_prop(props, "artifact_seed", 0))
-    rng = np.random.default_rng(np.random.SeedSequence([base_seed, int(phase_index)]))
-    stages = _configured_artifact_stages(props, rng=rng)
+    stages = _configured_artifact_stages(props, base_seed=base_seed, phase_index=phase_index)
     total = max(1, len(stages))
     result = hu_array
     yield 0, total
@@ -224,6 +256,28 @@ def _apply_configured_artifacts_iter(
         result = stage(result)
         yield index, total
     return result
+
+
+def _drr_ct_number_for_object(obj) -> float | None:
+    """Return the CT number a mesh contributes to a DRR, or None if unknown.
+
+    A DRR is an X-ray projection, so it needs attenuation even when the image
+    series is MR. Meshes with a material preset use that material's CT value;
+    custom meshes carry an MR signal, not an attenuation, and return None.
+    """
+
+    material = getattr(obj, "dicomator_material", "CUSTOM")
+    if material == "CUSTOM":
+        return None
+    value = get_material_intensity(material, MODALITY_CT)
+    return None if value is None else float(value)
+
+
+def _drr_hu_for_mr_export(obj) -> float:
+    """CT number used for ``obj`` in the DRR of an MR export (water if custom)."""
+
+    value = _drr_ct_number_for_object(obj)
+    return 0.0 if value is None else value
 
 
 def _run_subtask(
@@ -611,7 +665,12 @@ class DICOMATOR_OT_export_dicom(Operator):
 
         modality_key = getattr(props, "imaging_modality", MODALITY_CT)
         if export_drr and modality_key in MRI_MODALITIES:
-            self.report({'WARNING'}, "DRR uses current intensities as attenuation. CT modality presets are recommended.")
+            custom = [obj.name for obj in ct_objects if _drr_ct_number_for_object(obj) is None]
+            message = "MR export: the DRR uses each mesh's CT material preset for attenuation"
+            if custom:
+                shown = ", ".join(custom[:5]) + ("..." if len(custom) > 5 else "")
+                message += f"; custom-intensity meshes are treated as water (0 HU): {shown}"
+            self.report({'WARNING'}, message)
 
         try:
             frames = _frame_sequence(context, props)
@@ -1037,10 +1096,33 @@ class DICOMATOR_OT_export_dicom(Operator):
                         write_start = phase_start + slot * type_span
                         progress_start = write_start if export_image_series else write_start + type_span * 0.45
                         slot += 1
+                        drr_volume = hu_array
+                        if dicom_modality == "MR":
+                            # MR intensities are signal, not attenuation, and the
+                            # MR background (0) would read as water. Re-voxelize
+                            # with CT numbers and an air background for the DRR,
+                            # releasing the MR grid first so only one is held.
+                            hu_array = drr_volume = None
+                            drr_volume, _drr_origin, _drr_dims = yield from _run_subtask(
+                                voxelize_objects_to_hu_iter(
+                                    ct_objects,
+                                    voxel_size=voxel_size_m,
+                                    padding=0,
+                                    bbox_override=padded_bounds,
+                                    apply_modifiers=apply_modifiers,
+                                    depsgraph=depsgraph,
+                                    background_value=AIR_DENSITY,
+                                    prepared=prepared_geometry,
+                                    value_for_object=_drr_hu_for_mr_export,
+                                ),
+                                progress_start,
+                                progress_start + (write_start + type_span - progress_start) * 0.5,
+                            )
+                            progress_start += (write_start + type_span - progress_start) * 0.5
                         drr_series_uid = shared_constants.generate_uid()
                         projection_image, projection_metadata = yield from _run_subtask(
                             generate_drr_from_hu_volume_iter(
-                                hu_array,
+                                drr_volume,
                                 voxel_size_m,
                                 origin,
                                 context.scene,
@@ -1099,7 +1181,7 @@ class DICOMATOR_OT_export_dicom(Operator):
                         )
                         if 'error' in result:
                             return result
-                        projection_image = None
+                        projection_image = drr_volume = None
 
                     # Release the image grid before the dose stage: the peak
                     # memory estimate treats the image and dose stages as

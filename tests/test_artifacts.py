@@ -223,9 +223,10 @@ def test_gradient_only_distortion_matches_per_slice_remap():
     grad_factor = (1.0 - 0.08 * rho_sq).astype(np.float32)
     base0 = c0 + grad_factor * rel0
     base1 = c1 + grad_factor * rel1
+    jacobian = artifacts._inverse_map_jacobian(base0, base1)
     expected = np.empty_like(volume)
     for iz in range(depth):
-        expected[:, :, iz] = artifacts._remap_bilinear(volume[:, :, iz], base0, base1, fill=0.0)
+        expected[:, :, iz] = artifacts._remap_bilinear(volume[:, :, iz], base0, base1, fill=0.0) * jacobian
 
     np.testing.assert_array_equal(out, expected)
 
@@ -413,3 +414,41 @@ def test_gibbs_ringing_preserves_symmetry_for_odd_band_on_even_width():
     # The square is symmetric about the 31.5 midline, and so is the DC-centred
     # band (up to the lone Nyquist-side bin, which a centred band never keeps).
     np.testing.assert_allclose(out, out[::-1, :], atol=1e-3)
+
+
+def test_poisson_noise_is_unbiased_at_low_photon_scale():
+    """-log(N/lambda) is biased high for Poisson counts; the correction keeps
+    quantum noise zero-mean even at the lowest photon scale."""
+    volume = np.zeros((96, 96, 12), dtype=np.int16)  # water
+    out = artifacts.add_poisson_noise(volume, scale=1.0, rng=np.random.default_rng(3))
+    noise = out.astype(np.float64)
+    # Standard error of the mean is ~0.3 HU here; the uncorrected bias was ~20 HU.
+    assert abs(noise.mean()) < 2.0
+    assert noise.std() > 100.0
+
+
+def test_b0_distortion_conserves_signal_and_piles_up():
+    """Off-resonance distortion moves signal, it does not create or destroy it.
+
+    Without the Jacobian, a compressed region kept its intensity while losing
+    area, so the total MR signal of an object changed with the field map.
+    """
+    x = np.arange(64, dtype=np.float32)
+    blob = np.exp(-(((x[:, None] - 32) ** 2) + ((x[None, :] - 32) ** 2)) / (2 * 8.0**2))
+    volume = np.repeat((1000.0 * blob)[:, :, None], 3, axis=2).astype(np.float32)
+    out = artifacts.add_mri_geometric_distortion(
+        volume, gradient_strength=0.0, b0_strength=4.0, b0_scale=0.3, rng=np.random.default_rng(8)
+    )
+    # Conserved to ~0.02% with the Jacobian; ~1.5% lost without it.
+    np.testing.assert_allclose(out.sum(axis=(0, 1)), volume.sum(axis=(0, 1)), rtol=0.002)
+    # Compressed regions brighten beyond the undistorted peak.
+    assert out.max() > volume.max() * 1.02
+
+
+def test_inverse_map_jacobian_of_uniform_scaling():
+    """Sampling the source at twice the radius shows 4x the area per pixel."""
+    o0, o1 = np.indices((9, 7), dtype=np.float32)
+    jacobian = artifacts._inverse_map_jacobian(2.0 * o0, 2.0 * o1)
+    np.testing.assert_allclose(jacobian, 4.0)
+    single_column = artifacts._inverse_map_jacobian(2.0 * o0[:, :1], o1[:, :1])
+    np.testing.assert_allclose(single_column, 2.0)

@@ -228,3 +228,12 @@ def test_panel_estimate_matches_the_operator_grid(dimensions_m):
         est_height,
         est_depth,
     )
+
+
+def test_mr_drr_attenuation_comes_from_ct_presets():
+    bone = SimpleNamespace(name="Bone", dicomator_material="CORTICAL_BONE", dicomator_hu=10.0)
+    custom = SimpleNamespace(name="Custom", dicomator_material="CUSTOM", dicomator_hu=180.0)
+    # The MR intensity (10) is ignored in favour of the preset's CT number.
+    assert operators._drr_ct_number_for_object(bone) == constants.MATERIAL_INTENSITIES["CORTICAL_BONE"]["CT"]
+    assert operators._drr_ct_number_for_object(custom) is None
+    assert operators._drr_hu_for_mr_export(custom) == 0.0

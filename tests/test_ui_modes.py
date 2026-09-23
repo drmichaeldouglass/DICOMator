@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from conftest import load_module
@@ -298,3 +299,31 @@ def test_panel_mode_label_matches_the_enum_item():
     assert panels._mode_label(_props(ui_mode=BASIC)) == "Basic"
     assert panels._mode_label(_props(ui_mode=INTERMEDIATE)) == "Intermediate"
     assert panels._mode_label(_props(ui_mode=ADVANCED)) == "Advanced"
+
+
+def _stage_rng_draws(stage) -> np.ndarray:
+    return stage.keywords["rng"].random(8)
+
+
+def test_toggling_one_artifact_does_not_change_another_artifacts_randomness():
+    """Every stage owns its random stream, so adding rings leaves the noise
+    realisation of an otherwise identical export unchanged."""
+    noise_only = operators._configured_artifact_stages(
+        _props(ui_mode=ADVANCED, enable_noise=True), base_seed=4, phase_index=1
+    )
+    with_rings = operators._configured_artifact_stages(
+        _props(ui_mode=ADVANCED, enable_noise=True, enable_ring_artifacts=True),
+        base_seed=4, phase_index=1,
+    )
+    np.testing.assert_array_equal(_stage_rng_draws(noise_only[-1]), _stage_rng_draws(with_rings[-1]))
+
+
+def test_rings_are_shared_by_4d_phases_but_noise_is_not():
+    """Detector rings belong to the scanner; noise differs per acquisition."""
+    props = _props(ui_mode=ADVANCED, enable_noise=True, enable_ring_artifacts=True)
+    phase1 = operators._configured_artifact_stages(props, base_seed=4, phase_index=1)
+    phase2 = operators._configured_artifact_stages(props, base_seed=4, phase_index=2)
+    ring1, noise1 = phase1
+    ring2, noise2 = phase2
+    np.testing.assert_array_equal(_stage_rng_draws(ring1), _stage_rng_draws(ring2))
+    assert not np.array_equal(_stage_rng_draws(noise1), _stage_rng_draws(noise2))

@@ -111,7 +111,10 @@ MATERIAL_INTENSITIES = {
         MODALITY_MRI_T2: 90,
     },
     "ALUMINIUM": {
-        MODALITY_CT: 300,        # moderately dense metal equivalent
+        # mu(Al) / mu(water) is ~3.3 at a ~70 keV effective energy (120 kVp,
+        # NIST XCOM), i.e. roughly +2300 HU; published scanner values span
+        # about 2000-2600 HU depending on kVp and filtration.
+        MODALITY_CT: 2300,
         MODALITY_MRI_T1: 0,      # metal causes signal void in MRI
         MODALITY_MRI_T2: 0,
     },

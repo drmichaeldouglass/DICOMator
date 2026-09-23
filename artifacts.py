@@ -703,6 +703,12 @@ def add_poisson_noise(hu_array: np.ndarray, scale: float = 150.0, rng: Generator
     measured_counts = generator.poisson(expected_counts).astype(np.float32, copy=False)
     measured_counts = np.clip(measured_counts, 1.0, None)
     log_error = -np.log(measured_counts / expected_counts)
+    # -log(N / lambda) of a Poisson count is biased high by
+    # 1/(2 lambda) + 5/(12 lambda^2) (second-order expansion of E[log N]), which
+    # would brighten every voxel by ~20 HU at the lowest photon scale. Remove
+    # it so the quantum noise stays zero-mean like the Gaussian option.
+    inverse_counts = 1.0 / expected_counts
+    log_error -= 0.5 * inverse_counts + (5.0 / 12.0) * inverse_counts * inverse_counts
     noise_hu = (1000.0 / attenuation_coefficient) * log_error
     noisy = source + noise_hu
 
@@ -831,6 +837,37 @@ def add_rician_noise(
     return magnitude.astype(intensity_array.dtype, copy=False)
 
 
+#: Upper bound on the intensity pile-up factor applied where a distortion
+#: compresses the image. Real pile-ups are bright but finite (voxel averaging
+#: and T2* blurring cap them); the bound keeps a near-folding field from
+#: producing isolated extreme voxels.
+_MAX_DISTORTION_JACOBIAN = 8.0
+
+
+def _inverse_map_jacobian(coord0: np.ndarray, coord1: np.ndarray) -> np.ndarray:
+    """Return |det J| of an in-plane inverse sampling map ``(coord0, coord1)``.
+
+    Signal is conserved by a geometric distortion: when the output pixel at
+    ``x`` gathers the source at ``f(x)``, its intensity is scaled by
+    ``|det Df(x)|``. Compressed regions (several source voxels squeezed into
+    one) brighten and stretched regions dim, which is the characteristic
+    pile-up seen with off-resonance distortion.
+    """
+
+    def derivative(values: np.ndarray, axis: int, identity: bool) -> np.ndarray:
+        if values.shape[axis] < 2:
+            # A single-sample axis cannot move, so the map is the identity there.
+            return np.full(values.shape, 1.0 if identity else 0.0, dtype=np.float32)
+        return np.gradient(values, axis=axis).astype(np.float32, copy=False)
+
+    d00 = derivative(coord0, 0, True)
+    d01 = derivative(coord0, 1, False)
+    d10 = derivative(coord1, 0, False)
+    d11 = derivative(coord1, 1, True)
+    jacobian = np.abs(d00 * d11 - d01 * d10)
+    return np.minimum(jacobian, np.float32(_MAX_DISTORTION_JACOBIAN)).astype(np.float32, copy=False)
+
+
 def add_mri_geometric_distortion(
     intensity_array: np.ndarray,
     gradient_strength: float = 0.05,
@@ -855,6 +892,9 @@ def add_mri_geometric_distortion(
       modelled as a smooth off-resonance field that shifts voxels only along the
       readout axis, reproducing the characteristic local stretching/compression
       near air-tissue interfaces.
+
+    Both warps conserve signal: intensities are scaled by the Jacobian of the
+    mapping, so compressed regions brighten (pile-up) and stretched ones dim.
 
     Parameters
     ----------
@@ -932,6 +972,7 @@ def add_mri_geometric_distortion(
         x1c = np.clip(x1, 0, height - 1)
         x0n = np.minimum(x0c + 1, width - 1)
         x1n = np.minimum(x1c + 1, height - 1)
+        jacobian = _inverse_map_jacobian(base0, base1)[:, :, None]
         slice_bytes = width * height * 4
         slab = max(1, min(depth, int(67_108_864 // max(1, slice_bytes))))
         for z0 in range(0, depth, slab):
@@ -943,7 +984,7 @@ def add_mri_geometric_distortion(
             v11 = block[x0n, x1n, :]
             top = v00 * (1.0 - f1) + v01 * f1
             bot = v10 * (1.0 - f1) + v11 * f1
-            out = top * (1.0 - f0) + bot * f0
+            out = (top * (1.0 - f0) + bot * f0) * jacobian
             result[:, :, z0:z1] = np.where(valid, out, np.float32(0.0))
     else:
         # B0 off-resonance shifts differ per slice, so each slice keeps its
@@ -954,7 +995,10 @@ def add_mri_geometric_distortion(
                 coord0, coord1 = base0 + shift, base1
             else:
                 coord0, coord1 = base0, base1 + shift
-            result[:, :, iz] = _remap_bilinear(source[:, :, iz], coord0, coord1, fill=0.0)
+            result[:, :, iz] = (
+                _remap_bilinear(source[:, :, iz], coord0, coord1, fill=0.0)
+                * _inverse_map_jacobian(coord0, coord1)
+            )
 
     if np.issubdtype(intensity_array.dtype, np.integer):
         info = np.iinfo(intensity_array.dtype)

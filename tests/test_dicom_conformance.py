@@ -244,11 +244,13 @@ def test_dose_grid_scaling_is_conformant_and_preserves_dose(tmp_path, peak_dose)
 
     dataset = pydicom.dcmread(str(tmp_path / "RTDose.dcm"))
     scaling_text = str(dataset["DoseGridScaling"].value)
-    # The naive max_dose / uint32_max factor needs ~21 characters as a DS.
+    # The naive max_dose / int32_max factor needs ~21 characters as a DS.
     assert len(scaling_text.encode("utf-8")) <= DS_MAX_LEN, scaling_text
 
     counts = dataset.pixel_array
-    assert int(counts.max()) <= np.iinfo(np.uint32).max
+    # Readers that load 32-bit dose as signed must not see negative values.
+    assert int(counts.max()) <= np.iinfo(np.int32).max
+    assert counts.view(np.int32).min() >= 0
 
     # The dose must be recoverable from the factor that was actually written,
     # not from the un-representable ideal factor.

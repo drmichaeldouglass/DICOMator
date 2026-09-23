@@ -235,3 +235,171 @@ def test_bounds_without_modifiers_come_from_the_base_mesh():
 
     bounds = voxelization._objects_world_bounds([_NoBoundBox()], None, apply_modifiers=False)
     np.testing.assert_allclose(bounds, (-0.1, 0.1, -0.2, 0.2, -0.3, 0.3), atol=1e-7)
+
+
+def test_value_for_object_overrides_and_is_clamped():
+    """The DRR of an MR export re-voxelizes with CT numbers via this hook."""
+    obj = SimpleNamespace(name="Slab", dicomator_hu=150.0, dicomator_priority=0)
+    bounds = (0.0, 0.005, 0.0, 0.005, 0.001, 0.004)
+
+    def voxelize(value_for_object):
+        grid, _origin, _dims = voxelization._drive(
+            voxelization.voxelize_objects_to_hu_iter(
+                [obj], voxel_size=0.001, padding=0,
+                bbox_override=(0.0, 0.005, 0.0, 0.005, 0.0, 0.005),
+                prepared={"Slab": (_SlabBVH(0.001, 0.004), bounds)},
+                value_for_object=value_for_object,
+            ),
+            None,
+        )
+        return grid
+
+    assert int(voxelize(None).max()) == 150
+    assert int(voxelize(lambda _obj: 1100.0).max()) == 1100
+    assert int(voxelize(lambda _obj: 99999.0).max()) == voxelization.MAX_HU_VALUE
+
+
+# ---------------------------------------------------------------------------
+# Multi-shell meshes (several closed surfaces in one object)
+# ---------------------------------------------------------------------------
+
+
+class _TriangleBVH:
+    """Brute-force ray/triangle stand-in for ``BVHTree.FromPolygons``."""
+
+    def __init__(self, vertices, polygons):
+        verts = np.asarray(vertices, dtype=np.float64)
+        triangles = []
+        for poly in polygons:
+            for k in range(1, len(poly) - 1):
+                triangles.append((verts[poly[0]], verts[poly[k]], verts[poly[k + 1]]))
+        self._triangles = np.asarray(triangles)
+
+    @classmethod
+    def FromPolygons(cls, vertices, polygons):  # noqa: N802 - mirrors Blender's API
+        return cls(vertices, polygons)
+
+    def ray_cast(self, origin, direction, max_dist):
+        o = np.array(tuple(origin), dtype=np.float64)
+        d = np.array(tuple(direction), dtype=np.float64)
+        a, b, c = self._triangles[:, 0], self._triangles[:, 1], self._triangles[:, 2]
+        e1, e2 = b - a, c - a
+        p = np.cross(d, e2)
+        det = np.einsum("ij,ij->i", e1, p)
+        ok = np.abs(det) > 1e-12
+        inv = np.where(ok, 1.0 / np.where(ok, det, 1.0), 0.0)
+        t_vec = o - a
+        u = np.einsum("ij,ij->i", t_vec, p) * inv
+        q = np.cross(t_vec, e1)
+        v = (q @ d) * inv
+        t = np.einsum("ij,ij->i", e2, q) * inv
+        hit = ok & (u >= 0) & (v >= 0) & (u + v <= 1) & (t >= 0) & (t <= max_dist)
+        if not np.any(hit):
+            return None, None, None, None
+        index = int(np.flatnonzero(hit)[np.argmin(t[hit])])
+        location = o + t[index] * d
+        return Vector(location), None, index, float(t[index])
+
+
+def _box(lo, hi, offset=0):
+    """Closed axis-aligned box: 8 vertices, 6 quads (indices offset)."""
+    (x0, y0, z0), (x1, y1, z1) = lo, hi
+    verts = [
+        (x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0),
+        (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1),
+    ]
+    quads = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
+    return verts, [[offset + i for i in quad] for quad in quads]
+
+
+class _Collection:
+    def __init__(self, attribute, values, dtype):
+        self._attribute = attribute
+        self._values = np.asarray(values, dtype=dtype)
+
+    def __len__(self):
+        return len(self._values) // 3 if self._attribute == "co" else len(self._values)
+
+    def foreach_get(self, attribute, buffer):
+        assert attribute == self._attribute
+        buffer[:] = self._values
+
+
+def _mesh_object(name, boxes, hu=500.0):
+    verts, polys = [], []
+    for lo, hi in boxes:
+        box_verts, box_polys = _box(lo, hi, offset=len(verts))
+        verts.extend(box_verts)
+        polys.extend(box_polys)
+    loop_start = np.cumsum([0] + [len(p) for p in polys[:-1]])
+    loop_verts = [i for poly in polys for i in poly]
+    data = SimpleNamespace(
+        vertices=_Collection("co", np.ravel(verts), np.float32),
+        polygons=_Collection("loop_start", loop_start, np.int32),
+        loops=_Collection("vertex_index", loop_verts, np.int32),
+    )
+    return SimpleNamespace(
+        name=name, data=data, matrix_world=_IdentityMatrix(),
+        dicomator_hu=hu, dicomator_dose=2.0, dicomator_priority=0,
+    )
+
+
+def _voxelize_boxes(monkeypatch, boxes, kind="hu"):
+    monkeypatch.setattr(voxelization, "BVHTree", _TriangleBVH)
+    obj = _mesh_object("Joined", boxes)
+    factory = getattr(voxelization, f"voxelize_objects_to_{kind}_iter")
+    grid, _origin, _dims = voxelization._drive(
+        factory([obj], voxel_size=0.01, padding=0, bbox_override=(0.0, 0.1, 0.0, 0.1, 0.0, 0.1)),
+        None,
+    )
+    return grid
+
+
+def _box_mask(lo, hi):
+    # Box faces sit between voxel centres, so the comparison is unambiguous.
+    centres = (np.arange(10) + 0.5) * 0.01
+    inside = [(centres >= lo[axis]) & (centres <= hi[axis]) for axis in range(3)]
+    return inside[0][:, None, None] & inside[1][None, :, None] & inside[2][None, None, :]
+
+
+def test_overlapping_shells_in_one_object_fill_their_overlap(monkeypatch):
+    """Two organs joined into one object overlap; even/odd pairing emptied
+    the shared region (in, in, out, out -> filled, empty, filled)."""
+    a = ((0.01, 0.01, 0.01), (0.06, 0.06, 0.06))
+    b = ((0.03, 0.03, 0.03), (0.09, 0.09, 0.09))
+    grid = _voxelize_boxes(monkeypatch, [a, b])
+    expected = _box_mask(*a) | _box_mask(*b)
+    np.testing.assert_array_equal(grid == 500, expected)
+
+
+def test_nested_shell_still_makes_a_hollow_object(monkeypatch):
+    """A shell inside another shell of the same object is a cavity."""
+    outer = ((0.01, 0.01, 0.01), (0.09, 0.09, 0.09))
+    inner = ((0.03, 0.03, 0.03), (0.07, 0.07, 0.07))
+    grid = _voxelize_boxes(monkeypatch, [outer, inner])
+    expected = _box_mask(*outer) & ~_box_mask(*inner)
+    np.testing.assert_array_equal(grid == 500, expected)
+
+
+def test_solid_inside_a_cavity_is_filled_again(monkeypatch):
+    """Nesting depth alternates solid/cavity/solid, like even/odd pairing."""
+    outer = ((0.01, 0.01, 0.01), (0.09, 0.09, 0.09))
+    cavity = ((0.02, 0.02, 0.02), (0.08, 0.08, 0.08))
+    core = ((0.04, 0.04, 0.04), (0.06, 0.06, 0.06))
+    grid = _voxelize_boxes(monkeypatch, [outer, cavity, core])
+    expected = (_box_mask(*outer) & ~_box_mask(*cavity)) | _box_mask(*core)
+    np.testing.assert_array_equal(grid == 500, expected)
+
+
+def test_overlapping_dose_shells_count_the_object_once(monkeypatch):
+    """Inside one object the dose is its value once, even where shells overlap."""
+    a = ((0.01, 0.01, 0.01), (0.06, 0.06, 0.06))
+    b = ((0.03, 0.03, 0.03), (0.09, 0.09, 0.09))
+    grid = _voxelize_boxes(monkeypatch, [a, b], kind="dose")
+    assert float(grid.max()) == pytest.approx(2.0)
+
+
+def test_polygon_islands_groups_connected_faces():
+    polys = [[0, 1, 2], [2, 3, 0], [4, 5, 6], [6, 7, 4], [8, 9, 10]]
+    islands = sorted(sorted(island.tolist()) for island in voxelization._polygon_islands(polys, 11))
+    assert islands == [[0, 1], [2, 3], [4]]
