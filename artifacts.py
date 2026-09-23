@@ -306,7 +306,9 @@ def add_metal_artifacts(
     hu_array:
         Input HU volume with shape ``(width, height, depth)``.
     intensity:
-        Target amplitude of the streaks in HU (robust peak of the artifact).
+        Target amplitude of the streaks in HU: the robust (99.5th percentile)
+        peak of the artifact in the most affected slice. Other slices scale
+        with the amount and density of metal they contain.
     density_threshold:
         Voxels with HU above this value are treated as metal sources.
     num_streaks:
@@ -353,24 +355,46 @@ def add_metal_artifacts(
     half_diag = 0.5 * float(math.hypot(w0, h0)) + 1e-3
     halo_kernel = max(3, min(21, (min(width, height) // 10) * 2 + 1))
 
+    # The projections are taken on a canvas padded to (at least) the slice
+    # diagonal in both directions. Rotating inside a canvas the size of the
+    # slice would push the corners out of view, so metal away from the centre
+    # (or anywhere across a non-square slice) would vanish from some views
+    # and the back-projection would leave uncovered wedges.
+    diag = int(math.ceil(math.hypot(w0, h0)))
+    pad0 = max(0, (diag - w0 + 1) // 2)
+    pad1 = max(0, (diag - h0 + 1) // 2)
+    canvas_shape = (w0 + 2 * pad0, h0 + 2 * pad1)
+
+    # One fixed normalisation for the whole volume, so the streak strength
+    # follows how dense the metal is and how much of it each slice cuts
+    # through: a voxel barely above the threshold contributes almost nothing,
+    # while a titanium implant at the top of the HU range contributes ~1 per
+    # voxel of path.
+    attn_reference = max(1.0, float(MAX_HU_VALUE) - float(density_threshold))
+
+    # Pass 1: back-project the view errors of every slice containing metal.
+    # The working-resolution fields are kept so pass 2 can scale them with a
+    # single volume-wide factor (at most one float32 slice per metal slice,
+    # well inside the stage's measured memory budget).
+    slice_fields: list[tuple[int, np.ndarray, np.ndarray, float]] = []
+    global_peak = 0.0
     for iz in range(depth):
         source_slice = hu_array[:, :, iz].astype(np.float32, copy=False)
         source_mask = source_slice >= density_threshold
         if not np.any(source_mask):
             continue
 
-        # Metal attenuation excess above the threshold, normalised so a typical
-        # metal path integrates to O(1) regardless of the HU units in use.
         metal_excess = np.clip(source_slice - float(density_threshold), 0.0, None)
-        norm = float(np.percentile(metal_excess[source_mask], 90)) or 1.0
-        attn = (metal_excess / norm).astype(np.float32, copy=False)
+        attn = (metal_excess / attn_reference).astype(np.float32, copy=False)
 
         # Optionally downsample the attenuation map for the projection loop.
         attn_small = _resize_bilinear(attn, (w0, h0)) if (w0, h0) != (width, height) else attn
+        attn_canvas = np.zeros(canvas_shape, dtype=np.float32)
+        attn_canvas[pad0:pad0 + w0, pad1:pad1 + h0] = attn_small
 
-        back_proj = np.zeros((w0, h0), dtype=np.float32)
+        back_proj_canvas = np.zeros(canvas_shape, dtype=np.float32)
         for angle in angles:
-            rotated = _rotate_bilinear(attn_small, float(angle))
+            rotated = _rotate_bilinear(attn_canvas, float(angle))
             # Line integral of metal along the rotated projection direction.
             path = rotated.sum(axis=0)
 
@@ -384,10 +408,10 @@ def add_metal_artifacts(
             # Remove the DC term so the streaks are signed and do not bias HU.
             view_error -= float(np.mean(view_error))
 
-            smear = np.broadcast_to(view_error, (w0, h0))
-            back_proj += _rotate_bilinear(smear, -float(angle))
+            smear = np.broadcast_to(view_error, canvas_shape)
+            back_proj_canvas += _rotate_bilinear(smear, -float(angle))
 
-        back_proj /= float(num_views)
+        back_proj = back_proj_canvas[pad0:pad0 + w0, pad1:pad1 + h0] / float(num_views)
 
         # Radial decay away from the metal so distant streaks fade, controlled by
         # ``falloff``. Distance is measured from the metal centroid. Axis 0 of
@@ -402,21 +426,30 @@ def add_metal_artifacts(
         rad_norm = rad / half_diag
         back_proj *= np.exp(-decay * rad_norm).astype(np.float32)
 
-        # Scale so the robust peak of the streak field reaches ``intensity`` HU.
-        peak = float(np.percentile(np.abs(back_proj), 99.5))
-        if peak <= 0.0:
-            continue
-        slice_artifact = (float(intensity) / peak) * back_proj
+        slice_peak = float(np.percentile(np.abs(back_proj), 99.5))
+        global_peak = max(global_peak, slice_peak)
+        slice_fields.append((iz, back_proj, source_mask, slice_peak))
+
+    if global_peak <= 0.0:
+        return np.round(result).astype(np.int16, copy=False)
+
+    # Pass 2: one scale factor for the whole volume, so the robust streak peak
+    # of the most affected slice reaches ``intensity`` HU and slices cutting
+    # through less (or less dense) metal get proportionally weaker streaks.
+    intensity_scale = float(intensity) / global_peak
+    for iz, back_proj, source_mask, slice_peak in slice_fields:
+        slice_artifact = intensity_scale * back_proj
 
         if (w0, h0) != (width, height):
             slice_artifact = _resize_bilinear(slice_artifact, (width, height))
 
-        # Broad beam-hardening shading immediately around the dense object.
+        # Broad beam-hardening shading immediately around the dense object,
+        # weighted like the streaks by how strongly this slice hardens the beam.
         halo = _gaussian_blur(source_mask.astype(np.float32), halo_kernel)
         halo_max = float(np.max(halo))
         if halo_max > 0.0:
             halo /= halo_max
-            slice_artifact -= 0.15 * float(intensity) * halo
+            slice_artifact -= 0.15 * float(intensity) * (slice_peak / global_peak) * halo
 
         # Do not let streaks corrupt the metal voxels themselves.
         slice_artifact[source_mask] = 0.0
@@ -482,8 +515,13 @@ def add_ring_artifacts(
     depth = int(result.shape[2])
 
     idx0, idx1 = np.indices((size0, size1), dtype=np.float32)
-    norm1 = (idx1 / max(1, size1 - 1)) * 2.0 - 1.0 if size1 > 1 else idx1 * 0.0
-    norm0 = (idx0 / max(1, size0 - 1)) * 2.0 - 1.0 if size0 > 1 else idx0 * 0.0
+    # In-plane pixels are square (one lateral voxel size), so both axes share
+    # one normalisation: rings from a rotating detector are circles about the
+    # centre, not ellipses stretched to each axis. Relative radius 1 reaches
+    # the edge of the longer axis.
+    half_extent = max(1.0, (max(size0, size1) - 1) / 2.0)
+    norm0 = (idx0 - (size0 - 1) / 2.0) / half_extent
+    norm1 = (idx1 - (size1 - 1) / 2.0) / half_extent
 
     # A persistent detector-channel calibration error reconstructs as a signed
     # ring. When no radius is specified, synthesize a small cluster of rings.
@@ -665,6 +703,12 @@ def add_poisson_noise(hu_array: np.ndarray, scale: float = 150.0, rng: Generator
     measured_counts = generator.poisson(expected_counts).astype(np.float32, copy=False)
     measured_counts = np.clip(measured_counts, 1.0, None)
     log_error = -np.log(measured_counts / expected_counts)
+    # -log(N / lambda) of a Poisson count is biased high by
+    # 1/(2 lambda) + 5/(12 lambda^2) (second-order expansion of E[log N]), which
+    # would brighten every voxel by ~20 HU at the lowest photon scale. Remove
+    # it so the quantum noise stays zero-mean like the Gaussian option.
+    inverse_counts = 1.0 / expected_counts
+    log_error -= 0.5 * inverse_counts + (5.0 / 12.0) * inverse_counts * inverse_counts
     noise_hu = (1000.0 / attenuation_coefficient) * log_error
     noisy = source + noise_hu
 
@@ -726,6 +770,11 @@ def add_bias_field_shading(
         if window % 2 == 0:
             window += 1
         random_field = _moving_average_along_axis(random_field, window, axis)
+    # Averaging shrinks the noise by roughly sqrt(window volume); rescale it to
+    # the same [-1, 1] span as the coil term so its 25% weight is real.
+    random_max = float(np.max(np.abs(random_field)))
+    if random_max > 0.0:
+        random_field /= random_max
 
     field = 0.75 * coil_field + 0.25 * random_field
     field -= float(np.mean(field))
@@ -788,6 +837,37 @@ def add_rician_noise(
     return magnitude.astype(intensity_array.dtype, copy=False)
 
 
+#: Upper bound on the intensity pile-up factor applied where a distortion
+#: compresses the image. Real pile-ups are bright but finite (voxel averaging
+#: and T2* blurring cap them); the bound keeps a near-folding field from
+#: producing isolated extreme voxels.
+_MAX_DISTORTION_JACOBIAN = 8.0
+
+
+def _inverse_map_jacobian(coord0: np.ndarray, coord1: np.ndarray) -> np.ndarray:
+    """Return |det J| of an in-plane inverse sampling map ``(coord0, coord1)``.
+
+    Signal is conserved by a geometric distortion: when the output pixel at
+    ``x`` gathers the source at ``f(x)``, its intensity is scaled by
+    ``|det Df(x)|``. Compressed regions (several source voxels squeezed into
+    one) brighten and stretched regions dim, which is the characteristic
+    pile-up seen with off-resonance distortion.
+    """
+
+    def derivative(values: np.ndarray, axis: int, identity: bool) -> np.ndarray:
+        if values.shape[axis] < 2:
+            # A single-sample axis cannot move, so the map is the identity there.
+            return np.full(values.shape, 1.0 if identity else 0.0, dtype=np.float32)
+        return np.gradient(values, axis=axis).astype(np.float32, copy=False)
+
+    d00 = derivative(coord0, 0, True)
+    d01 = derivative(coord0, 1, False)
+    d10 = derivative(coord1, 0, False)
+    d11 = derivative(coord1, 1, True)
+    jacobian = np.abs(d00 * d11 - d01 * d10)
+    return np.minimum(jacobian, np.float32(_MAX_DISTORTION_JACOBIAN)).astype(np.float32, copy=False)
+
+
 def add_mri_geometric_distortion(
     intensity_array: np.ndarray,
     gradient_strength: float = 0.05,
@@ -812,6 +892,9 @@ def add_mri_geometric_distortion(
       modelled as a smooth off-resonance field that shifts voxels only along the
       readout axis, reproducing the characteristic local stretching/compression
       near air-tissue interfaces.
+
+    Both warps conserve signal: intensities are scaled by the Jacobian of the
+    mapping, so compressed regions brighten (pile-up) and stretched ones dim.
 
     Parameters
     ----------
@@ -858,8 +941,9 @@ def add_mri_geometric_distortion(
     rho_sq = (rel0 * rel0 + rel1 * rel1) / r_max_sq
 
     # Inverse-map radial factor: output pixel at radius r samples the source at
-    # ``(1 + k*rho^2)`` times its radius, warping the periphery.
-    grad_factor = (1.0 + float(gradient_strength) * rho_sq).astype(np.float32)
+    # ``(1 - k*rho^2)`` times its radius. For k > 0 peripheral content is
+    # therefore drawn further out (pincushion); k < 0 pulls it in (barrel).
+    grad_factor = (1.0 - float(gradient_strength) * rho_sq).astype(np.float32)
     base0 = c0 + grad_factor * rel0
     base1 = c1 + grad_factor * rel1
 
@@ -888,6 +972,7 @@ def add_mri_geometric_distortion(
         x1c = np.clip(x1, 0, height - 1)
         x0n = np.minimum(x0c + 1, width - 1)
         x1n = np.minimum(x1c + 1, height - 1)
+        jacobian = _inverse_map_jacobian(base0, base1)[:, :, None]
         slice_bytes = width * height * 4
         slab = max(1, min(depth, int(67_108_864 // max(1, slice_bytes))))
         for z0 in range(0, depth, slab):
@@ -899,7 +984,7 @@ def add_mri_geometric_distortion(
             v11 = block[x0n, x1n, :]
             top = v00 * (1.0 - f1) + v01 * f1
             bot = v10 * (1.0 - f1) + v11 * f1
-            out = top * (1.0 - f0) + bot * f0
+            out = (top * (1.0 - f0) + bot * f0) * jacobian
             result[:, :, z0:z1] = np.where(valid, out, np.float32(0.0))
     else:
         # B0 off-resonance shifts differ per slice, so each slice keeps its
@@ -910,7 +995,10 @@ def add_mri_geometric_distortion(
                 coord0, coord1 = base0 + shift, base1
             else:
                 coord0, coord1 = base0, base1 + shift
-            result[:, :, iz] = _remap_bilinear(source[:, :, iz], coord0, coord1, fill=0.0)
+            result[:, :, iz] = (
+                _remap_bilinear(source[:, :, iz], coord0, coord1, fill=0.0)
+                * _inverse_map_jacobian(coord0, coord1)
+            )
 
     if np.issubdtype(intensity_array.dtype, np.integer):
         info = np.iinfo(intensity_array.dtype)
@@ -963,8 +1051,11 @@ def add_gibbs_ringing(
     keep0 = max(1, int(round(width * (1.0 - 2.0 * truncation))))
     keep1 = max(1, int(round(height * (1.0 - 2.0 * truncation))))
     mask = np.zeros((width, height), dtype=np.float32)
-    lo0 = (width - keep0) // 2
-    lo1 = (height - keep1) // 2
+    # After fftshift the DC term sits at index n // 2, so centre the kept band
+    # there. (n - keep) // 2 is one bin low when n is even and keep is odd, and
+    # drops DC altogether when keep == 1.
+    lo0 = width // 2 - keep0 // 2
+    lo1 = height // 2 - keep1 // 2
     mask[lo0:lo0 + keep0, lo1:lo1 + keep1] = 1.0
 
     result = source.copy()

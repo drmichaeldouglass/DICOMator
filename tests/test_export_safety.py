@@ -76,7 +76,7 @@ def _estimate(**kwargs):
 
 
 def test_memory_estimate_accounts_for_rtdose_temporaries():
-    assert _estimate(export_rtdose=True) == 100_000_000 * 20
+    assert _estimate(export_rtdose=True) == 100_000_000 * 24
 
 
 @pytest.mark.parametrize(
@@ -89,7 +89,7 @@ def test_memory_estimate_accounts_for_rtdose_temporaries():
         (dict(export_image_series=True, export_drr=True), 10),
         (dict(export_image_series=True, artifacts_enabled=True), 38),
         (dict(export_image_series=True, artifacts_enabled=True, gibbs_enabled=True), 58),
-        (dict(export_rtdose=True), 20),
+        (dict(export_rtdose=True), 24),
     ],
 )
 def test_memory_estimate_covers_the_measured_peak(kwargs, measured_bytes_per_voxel):
@@ -228,3 +228,12 @@ def test_panel_estimate_matches_the_operator_grid(dimensions_m):
         est_height,
         est_depth,
     )
+
+
+def test_mr_drr_attenuation_comes_from_ct_presets():
+    bone = SimpleNamespace(name="Bone", dicomator_material="CORTICAL_BONE", dicomator_hu=10.0)
+    custom = SimpleNamespace(name="Custom", dicomator_material="CUSTOM", dicomator_hu=180.0)
+    # The MR intensity (10) is ignored in favour of the preset's CT number.
+    assert operators._drr_ct_number_for_object(bone) == constants.MATERIAL_INTENSITIES["CORTICAL_BONE"]["CT"]
+    assert operators._drr_ct_number_for_object(custom) is None
+    assert operators._drr_hu_for_mr_export(custom) == 0.0

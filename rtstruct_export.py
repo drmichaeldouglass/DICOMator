@@ -7,9 +7,10 @@ Algorithm
 ---------
 For each Z plane in the dose/CT grid, a bmesh copy of each structure mesh is
 bisected using ``bmesh.ops.bisect_plane``.  The resulting cut edges are
-graph-walked to recover ordered closed loops. ROIs with multiple loops on a
-plane use ``CLOSEDPLANAR_XOR`` throughout to preserve holes independently of
-loop winding; other ROIs use ``CLOSED_PLANAR``.
+graph-walked to recover ordered closed loops. ROIs in which one loop lies
+entirely inside another on some plane (a cavity) use ``CLOSEDPLANAR_XOR``
+throughout to preserve the hole independently of loop winding; all other ROIs,
+including ones with several separate loops, use ``CLOSED_PLANAR``.
 
 Coordinate convention
 ---------------------
@@ -35,6 +36,7 @@ from typing import Generator, Optional, Sequence
 
 import bmesh
 import bpy
+import numpy as np
 
 from . import constants as shared_constants
 from .constants import (
@@ -374,6 +376,41 @@ RoiDefinition = tuple[
 ]
 
 
+def _point_in_loop(x: float, y: float, loop_xy: np.ndarray) -> bool:
+    """Even-odd (ray crossing) test of point ``(x, y)`` against a closed loop."""
+    x0 = loop_xy[:, 0]
+    y0 = loop_xy[:, 1]
+    x1 = np.roll(x0, -1)
+    y1 = np.roll(y0, -1)
+    straddles = (y0 > y) != (y1 > y)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        x_cross = x0 + (y - y0) * (x1 - x0) / (y1 - y0)
+    return bool(np.count_nonzero(straddles & (x < x_cross)) % 2)
+
+
+#: Vertices of a loop tested against another loop to decide nesting.
+_NESTING_SAMPLE_POINTS = 16
+
+
+def _has_nested_loops(loops: Sequence[Sequence[Sequence[float]]]) -> bool:
+    """Return True when one loop on a plane lies entirely inside another.
+
+    Only true nesting (a cavity) counts. Loops cut from two overlapping
+    surfaces of one mesh cross each other, with some vertices inside and some
+    outside; treating those as XOR would carve their overlap out as a hole.
+    """
+    polygons = [np.asarray(loop, dtype=np.float64)[:, :2] for loop in loops if len(loop) >= 3]
+    for index, inner in enumerate(polygons):
+        step = max(1, len(inner) // _NESTING_SAMPLE_POINTS)
+        samples = inner[::step]
+        for other_index, outer in enumerate(polygons):
+            if other_index != index and all(
+                _point_in_loop(float(x), float(y), outer) for x, y in samples
+            ):
+                return True
+    return False
+
+
 def build_rtstruct_dataset(
     roi_defs: Sequence[RoiDefinition],
     *,
@@ -416,7 +453,11 @@ def build_rtstruct_dataset(
     file_meta.MediaStorageSOPClassUID = RTSTRUCT_SOP_CLASS
     file_meta.MediaStorageSOPInstanceUID = sop_instance_uid
     file_meta.ImplementationClassUID = pydicom.uid.PYDICOM_IMPLEMENTATION_UID
-    file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+    # Implicit VR: explicit VR gives DS elements a 2-byte length field, so a
+    # single contour loop with more than ~2,300 points (a finely tessellated
+    # body outline) would overflow 64 KB and be re-encoded as UN, which RT
+    # readers cannot interpret as ContourData.
+    file_meta.TransferSyntaxUID = pydicom.uid.ImplicitVRLittleEndian
 
     ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
 
@@ -502,7 +543,8 @@ def build_rtstruct_dataset(
         roi_item.ReferencedFrameOfReferenceUID = frame_of_reference_uid
         # ROIName has VR LO (max 64 encoded bytes).
         roi_item.ROIName = truncate_lo(roi_name, f"ROI {roi_number}")
-        roi_item.ROIGenerationAlgorithm = "MANUAL"
+        # Contours are computed by bisecting the mesh, not drawn by a person.
+        roi_item.ROIGenerationAlgorithm = "AUTOMATIC"
         roi_sequence.append(roi_item)
     ds.StructureSetROISequence = roi_sequence
 
@@ -531,14 +573,15 @@ def build_rtstruct_dataset(
         roi_contour_item.ReferencedROINumber = roi_number
         roi_contour_item.ROIDisplayColor = [int(r), int(g), int(b)]
 
-        # Separate inner and outer loops need explicit XOR semantics to
-        # preserve a cavity. XOR also combines disjoint loops correctly and
-        # matches the voxelizer's even/odd filling rule. PS3.3 C.8.8.6.1
-        # requires every contour of an XOR ROI to use the same type, including
-        # slices that contain only one loop.
+        # A loop nested inside another (a cavity) needs explicit XOR semantics
+        # to preserve the hole. Disjoint loops (two lungs in one mesh) are
+        # plain CLOSED_PLANAR: that is what they mean, and several planning
+        # systems still reject the newer CLOSEDPLANAR_XOR term. PS3.3
+        # C.8.8.6.1 requires every contour of an XOR ROI to use the same type,
+        # including slices that contain only one loop.
         geometric_type = (
             "CLOSEDPLANAR_XOR"
-            if any(sum(len(loop) >= 3 for loop in loops) > 1 for loops in contours_by_z.values())
+            if any(_has_nested_loops(loops) for loops in contours_by_z.values())
             else "CLOSED_PLANAR"
         )
         contour_sequence = []

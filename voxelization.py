@@ -2,7 +2,9 @@
 
 All voxelizers share one ray-casting core (:func:`_voxelize_objects_iter`)
 that fills axis-aligned voxel columns by casting +Z rays through each mesh
-and pairing entry/exit hits. The core is a generator yielding
+and pairing entry/exit hits. A mesh made of several separate closed surfaces
+is ray-cast one surface (shell) at a time: nested shells make cavities and
+overlapping shells are merged (see :func:`_object_geometry`). The core is a generator yielding
 ``(processed_columns, total_columns)`` so callers (e.g. the modal export
 operator) can keep the Blender UI responsive; the blocking wrappers drive
 the generator to completion and forward progress to an optional callback.
@@ -35,9 +37,18 @@ ProgressCallback = Optional[Callable[[int, int], None]]
 Bounds = Tuple[float, float, float, float, float, float]
 VoxelizeResult = Tuple[np.ndarray, Vector, Tuple[int, int, int]]
 VoxelizeGenerator = Generator[Tuple[int, int], None, VoxelizeResult]
-#: ``(bvh, world_bounds)`` pair produced by :func:`_object_geometry` /
-#: :func:`prepare_object_geometry_iter`.
-PreparedGeometry = Tuple[BVHTree, Bounds]
+#: One connected closed surface of a mesh: its BVH, its winding sign (+1 for a
+#: solid, -1 for a cavity inside another shell of the same object) and its
+#: world-space bounds.
+Shell = Tuple[BVHTree, int, Bounds]
+#: ``(shells, world_bounds)`` pair produced by :func:`_object_geometry` /
+#: :func:`prepare_object_geometry_iter`. A bare BVH is accepted in place of the
+#: shell list and treated as a single solid shell.
+PreparedGeometry = Tuple["list[Shell] | BVHTree", Bounds]
+
+#: Vertices of a shell tested against another shell to decide whether it is
+#: nested inside it.
+_NESTING_SAMPLE_VERTICES = 8
 
 #: Ray hits closer together than this distance (metres) are merged before
 #: entry/exit pairing. A ray grazing an edge shared by two faces reports the
@@ -122,16 +133,120 @@ def _mesh_polygon_indices(mesh: bpy.types.Mesh) -> list[list[int]]:
     return [segment.tolist() for segment in np.split(loop_verts, loop_start[1:])]
 
 
+def _vertex_bounds(verts: np.ndarray) -> Bounds:
+    mins = verts.min(axis=0)
+    maxs = verts.max(axis=0)
+    return (
+        float(mins[0]), float(maxs[0]),
+        float(mins[1]), float(maxs[1]),
+        float(mins[2]), float(maxs[2]),
+    )
+
+
+def _polygon_islands(polygons: list[list[int]], vertex_count: int) -> list[np.ndarray]:
+    """Group polygon indices into connected islands (shared-vertex connectivity).
+
+    Vectorized union-find: every polygon links its vertices to its first
+    vertex; roots are hooked to the smaller root and paths fully compressed
+    each round, so the loop needs only a handful of NumPy passes.
+    """
+    counts = np.fromiter((len(poly) for poly in polygons), dtype=np.int64, count=len(polygons))
+    flat = np.fromiter(
+        (index for poly in polygons for index in poly), dtype=np.int64, count=int(counts.sum())
+    )
+    starts = np.concatenate(([0], np.cumsum(counts)[:-1]))
+    first = np.repeat(flat[starts], counts)
+    parent = np.arange(max(vertex_count, int(flat.max()) + 1), dtype=np.int64)
+    while True:
+        root_a = parent[first]
+        root_b = parent[flat]
+        differs = root_a != root_b
+        if not np.any(differs):
+            break
+        low = np.minimum(root_a, root_b)[differs]
+        high = np.maximum(root_a, root_b)[differs]
+        np.minimum.at(parent, high, low)
+        while True:
+            grand = parent[parent]
+            if np.array_equal(grand, parent):
+                break
+            parent = grand
+    labels = parent[flat[starts]]
+    order = np.argsort(labels, kind="stable")
+    boundaries = np.flatnonzero(np.diff(labels[order])) + 1
+    return np.split(order, boundaries)
+
+
+def _column_hits(ray_cast, x: float, y: float, z_start: float, z_end: float) -> tuple[list[float], bool]:
+    """Return the merged +Z surface crossings of one column and a stall flag."""
+    origin_ray = Vector((x, y, z_start))
+    ray_dir = Vector((0.0, 0.0, 1.0))
+    hits_z: list[float] = []
+    stalled = False
+    while True:
+        location, _normal, _face_index, _distance = ray_cast(
+            origin_ray, ray_dir, max(0.0, z_end - origin_ray.z)
+        )
+        if location is None:
+            break
+        hits_z.append(location.z)
+        if len(hits_z) >= _MAX_COLUMN_HITS:
+            stalled = True
+            break
+        next_origin = Vector((location.x, location.y, restart_z_past_hit(float(location.z))))
+        if next_origin.z <= origin_ray.z:
+            # The restart point rounded back onto the face just hit, so the
+            # next cast would report the same crossing forever.
+            stalled = True
+            break
+        origin_ray = next_origin
+    hits_z.sort()
+    merged: list[float] = []
+    for hit_z in hits_z:
+        if not merged or (hit_z - merged[-1]) > _HIT_MERGE_TOLERANCE_M:
+            merged.append(hit_z)
+    return merged, stalled
+
+
+def _bounds_contain(outer: Bounds, inner: Bounds) -> bool:
+    return (
+        outer[0] <= inner[0] and inner[1] <= outer[1]
+        and outer[2] <= inner[2] and inner[3] <= outer[3]
+        and outer[4] <= inner[4] and inner[5] <= outer[5]
+    )
+
+
+def _shell_contains_points(bvh: BVHTree, bounds: Bounds, points: np.ndarray) -> bool:
+    """Even-odd test: are (most of) ``points`` inside the closed shell ``bvh``?
+
+    A majority vote tolerates the odd sample whose ray grazes an edge.
+    """
+    z_end = bounds[5] + 1.0
+    inside = 0
+    for x, y, z in points:
+        merged, _stalled = _column_hits(bvh.ray_cast, float(x), float(y), float(z), z_end)
+        inside += len(merged) % 2
+    return inside * 4 >= len(points) * 3
+
+
 def _object_geometry(
     obj: Object,
     depsgraph: Optional[bpy.types.Depsgraph] = None,
     *,
     apply_modifiers: bool = False,
 ) -> Optional[PreparedGeometry]:
-    """Build a world-space BVH for ``obj`` plus its world-space bounds.
+    """Build world-space shells (one BVH per connected surface) and bounds.
 
-    Returns ``(bvh, (min_x, max_x, min_y, max_y, min_z, max_z))``, or ``None``
-    when the (evaluated) mesh has no vertices or faces.
+    Returns ``(shells, (min_x, max_x, min_y, max_y, min_z, max_z))``, or
+    ``None`` when the (evaluated) mesh has no vertices or faces.
+
+    Each connected surface is ray-cast on its own and combined by winding:
+    a shell nested inside an odd number of the object's other shells is a
+    cavity (-1), everything else is solid (+1), and a voxel is filled where
+    the sum over shells is positive. Nested shells therefore still make
+    hollow objects, exactly as even/odd pairing did, while two separate
+    surfaces that merely overlap (organs joined into one object) fill their
+    overlap instead of cancelling it. Face normals are never consulted.
     """
     if apply_modifiers and depsgraph is not None:
         obj_eval = obj.evaluated_get(depsgraph)
@@ -147,14 +262,62 @@ def _object_geometry(
         polygons = _mesh_polygon_indices(mesh)
     if verts_world.size == 0 or not polygons:
         return None
-    mins = verts_world.min(axis=0)
-    maxs = verts_world.max(axis=0)
-    bounds: Bounds = (
-        float(mins[0]), float(maxs[0]),
-        float(mins[1]), float(maxs[1]),
-        float(mins[2]), float(maxs[2]),
-    )
-    return BVHTree.FromPolygons(verts_world.tolist(), polygons), bounds
+    bounds = _vertex_bounds(verts_world)
+
+    islands = _polygon_islands(polygons, len(verts_world))
+    if len(islands) == 1:
+        return [(BVHTree.FromPolygons(verts_world.tolist(), polygons), 1, bounds)], bounds
+
+    shells: list[tuple[BVHTree, Bounds, np.ndarray]] = []
+    for island in islands:
+        island_polygons = [polygons[index] for index in island.tolist()]
+        used = np.unique(np.fromiter(
+            (vertex for poly in island_polygons for vertex in poly), dtype=np.int64
+        ))
+        remap = {int(old): new for new, old in enumerate(used.tolist())}
+        island_verts = verts_world[used]
+        bvh = BVHTree.FromPolygons(
+            island_verts.tolist(),
+            [[remap[vertex] for vertex in poly] for poly in island_polygons],
+        )
+        step = max(1, len(island_verts) // _NESTING_SAMPLE_VERTICES)
+        shells.append((bvh, _vertex_bounds(island_verts), island_verts[::step][:_NESTING_SAMPLE_VERTICES]))
+
+    result: list[Shell] = []
+    for index, (bvh, shell_bounds, samples) in enumerate(shells):
+        depth = sum(
+            1
+            for other_index, (other_bvh, other_bounds, _samples) in enumerate(shells)
+            if other_index != index
+            and _bounds_contain(other_bounds, shell_bounds)
+            and _shell_contains_points(other_bvh, other_bounds, samples)
+        )
+        result.append((bvh, -1 if depth % 2 else 1, shell_bounds))
+    return result, bounds
+
+
+def _object_world_vertices(
+    obj: Object,
+    depsgraph: Optional[bpy.types.Depsgraph],
+    *,
+    apply_modifiers: bool,
+) -> np.ndarray:
+    """Return the world-space vertices of the mesh that is actually exported.
+
+    Bounds must come from the same mesh as the ray-cast geometry. With
+    modifiers off that is the base mesh (``obj.data``); ``obj.bound_box``
+    would describe the *evaluated* mesh instead, which a Boolean or Mask
+    modifier can make smaller than the base mesh (cropping it at the grid
+    edge), and which is unset for objects the depsgraph has not evaluated.
+    """
+    if apply_modifiers and depsgraph is not None:
+        obj_eval = obj.evaluated_get(depsgraph)
+        mesh = obj_eval.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
+        try:
+            return _world_vertex_array(mesh, obj_eval.matrix_world)
+        finally:
+            obj_eval.to_mesh_clear()
+    return _world_vertex_array(obj.data, obj.matrix_world)
 
 
 def _objects_world_bounds(
@@ -163,35 +326,24 @@ def _objects_world_bounds(
     *,
     apply_modifiers: bool,
 ) -> Bounds:
-    """Return the combined world-space bounds of ``objects``."""
+    """Return the combined world-space bounds of ``objects``.
+
+    Objects without vertices are ignored; when none has any, the bounds stay
+    at +/-inf for the caller to report.
+    """
     min_x = min_y = min_z = float('inf')
     max_x = max_y = max_z = float('-inf')
     for obj in objects:
-        if apply_modifiers and depsgraph is not None:
-            obj_eval = obj.evaluated_get(depsgraph)
-            mesh = obj_eval.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
-            try:
-                verts_world = _world_vertex_array(mesh, obj_eval.matrix_world)
-            finally:
-                obj_eval.to_mesh_clear()
-            if verts_world.size:
-                mins = verts_world.min(axis=0)
-                maxs = verts_world.max(axis=0)
-                min_x = min(min_x, float(mins[0]))
-                max_x = max(max_x, float(maxs[0]))
-                min_y = min(min_y, float(mins[1]))
-                max_y = max(max_y, float(maxs[1]))
-                min_z = min(min_z, float(mins[2]))
-                max_z = max(max_z, float(maxs[2]))
-        else:
-            for corner in obj.bound_box:
-                world_corner = obj.matrix_world @ Vector(corner)
-                min_x = min(min_x, world_corner.x)
-                max_x = max(max_x, world_corner.x)
-                min_y = min(min_y, world_corner.y)
-                max_y = max(max_y, world_corner.y)
-                min_z = min(min_z, world_corner.z)
-                max_z = max(max_z, world_corner.z)
+        verts_world = _object_world_vertices(obj, depsgraph, apply_modifiers=apply_modifiers)
+        if verts_world.size:
+            mins = verts_world.min(axis=0)
+            maxs = verts_world.max(axis=0)
+            min_x = min(min_x, float(mins[0]))
+            max_x = max(max_x, float(maxs[0]))
+            min_y = min(min_y, float(mins[1]))
+            max_y = max(max_y, float(maxs[1]))
+            min_z = min(min_z, float(mins[2]))
+            max_z = max(max_z, float(maxs[2]))
     return min_x, max_x, min_y, max_y, min_z, max_z
 
 
@@ -285,7 +437,7 @@ def _voxelize_objects_iter(
             messages.append(reason)
 
     skipped_names: list[str] = []
-    object_data: list[tuple[str, BVHTree, float, int, int, int, int, float, float]] = []
+    object_data: list[tuple[str, list[Shell], float, int, int, int, int, float, float]] = []
     for obj in sorted_objects:
         if prepared is not None:
             geometry = prepared.get(obj.name)
@@ -295,7 +447,9 @@ def _voxelize_objects_iter(
             skipped_names.append(obj.name)
             _skip(f"Skipped '{obj.name}' during {label} voxelization: mesh has no faces")
             continue
-        bvh, (obj_min_x, obj_max_x, obj_min_y, obj_max_y, obj_min_z, obj_max_z) = geometry
+        shells, (obj_min_x, obj_max_x, obj_min_y, obj_max_y, obj_min_z, obj_max_z) = geometry
+        if not isinstance(shells, list):
+            shells = [(shells, 1, geometry[1])]
         # Rays outside the object's XY footprint cannot intersect it, so only
         # the covered column range (plus one voxel of slack) is visited. For
         # small objects inside a large grid this skips almost all columns.
@@ -308,7 +462,7 @@ def _voxelize_objects_iter(
             _skip(f"Skipped '{obj.name}' during {label} voxelization: outside the voxel grid")
             continue
         object_data.append((
-            obj.name, bvh, _grid_value(value_for_object(obj)), ix0, ix1, iy0, iy1,
+            obj.name, shells, _grid_value(value_for_object(obj)), ix0, ix1, iy0, iy1,
             obj_min_z, obj_max_z,
         ))
 
@@ -327,100 +481,103 @@ def _voxelize_objects_iter(
     ys = [float(min_y + (index + 0.5) * vy) for index in range(height)]
     z0_center = min_z + 0.5 * vz
     inv_dz = 1.0 / vz
-    ray_dir = Vector((0.0, 0.0, 1.0))
 
     total_columns = max(
         1,
         sum(
             (ix1 - ix0 + 1) * (iy1 - iy0 + 1)
-            for _name, _bvh, _value, ix0, ix1, iy0, iy1, _z_min, _z_max in object_data
+            for _name, _shells, _value, ix0, ix1, iy0, iy1, _z_min, _z_max in object_data
         ),
     )
     processed = 0
 
-    for object_name, bvh, value, ix0, ix1, iy0, iy1, obj_min_z, obj_max_z in object_data:
+    for object_name, shells, value, ix0, ix1, iy0, iy1, obj_min_z, obj_max_z in object_data:
         # A bbox_override may crop through a solid. Start below the mesh and
         # allow the ray to reach its exit so entry/exit pairing remains valid;
         # the resulting filled intervals are clipped to the grid below.
         ray_start_z = min(min_z, obj_min_z) - 2.0 * vz
         ray_end_z = max(max_z, obj_max_z) + 2.0 * vz
-        ray_cast = bvh.ray_cast
         odd_columns = 0
         recovered_columns = 0
         stalled_rays = 0
 
-        def _merged_hits(x_world: float, y_world: float) -> list[float]:
+        def _merged_hits(ray_cast, x_world: float, y_world: float) -> list[float]:
             nonlocal stalled_rays
-            origin_ray = Vector((x_world, y_world, ray_start_z))
-            hits_z: list[float] = []
-            while True:
-                location, _normal, _face_index, _distance = ray_cast(
-                    origin_ray, ray_dir, max(0.0, ray_end_z - origin_ray.z)
-                )
-                if location is None:
-                    break
-                hits_z.append(location.z)
-                if len(hits_z) >= _MAX_COLUMN_HITS:
-                    stalled_rays += 1
-                    break
-                next_origin = Vector(
-                    (location.x, location.y, restart_z_past_hit(float(location.z)))
-                )
-                if next_origin.z <= origin_ray.z:
-                    # The restart point rounded back onto the face just hit, so
-                    # the next cast would report the same crossing forever.
-                    stalled_rays += 1
-                    break
-                origin_ray = next_origin
-            hits_z.sort()
-            merged: list[float] = []
-            for hit_z in hits_z:
-                if not merged or (hit_z - merged[-1]) > _HIT_MERGE_TOLERANCE_M:
-                    merged.append(hit_z)
+            merged, stalled = _column_hits(ray_cast, x_world, y_world, ray_start_z, ray_end_z)
+            stalled_rays += int(stalled)
             return merged
+
+        def _shell_intervals(ray_cast, x_world: float, y_world: float) -> list[tuple[int, int]]:
+            """Grid index ranges inside one shell along a column (even/odd)."""
+            nonlocal odd_columns, recovered_columns
+            merged = _merged_hits(ray_cast, x_world, y_world)
+            if len(merged) % 2:
+                odd_columns += 1
+                # Retry edge/vertex-grazing rays with a small deterministic
+                # sub-voxel offset. The first even result preserves stable
+                # output while avoiding arbitrary unpaired surface loss.
+                for x_fraction, y_fraction in (
+                    (0.173, 0.271),
+                    (-0.173, 0.271),
+                    (0.173, -0.271),
+                    (-0.173, -0.271),
+                ):
+                    candidate = _merged_hits(
+                        ray_cast,
+                        x_world + x_fraction * vx,
+                        y_world + y_fraction * vy,
+                    )
+                    if candidate and len(candidate) % 2 == 0:
+                        merged = candidate
+                        recovered_columns += 1
+                        break
+            intervals: list[tuple[int, int]] = []
+            for start in range(0, len(merged) - 1, 2):
+                start_idx = int(math.ceil((merged[start] - z0_center) * inv_dz))
+                end_idx = int(math.floor((merged[start + 1] - z0_center) * inv_dz))
+                s_idx = max(0, start_idx)
+                e_idx = min(depth - 1, end_idx)
+                if e_idx >= s_idx:
+                    intervals.append((s_idx, e_idx))
+            return intervals
+
+        single_shell = len(shells) == 1
+        shell_casts = [
+            (bvh.ray_cast, sign, shell_bounds) for bvh, sign, shell_bounds in shells
+        ]
 
         for ix in range(ix0, ix1 + 1):
             x_world = xs[ix]
+            # Shells whose X extent reaches this row of columns (a mesh made of
+            # many small pieces would otherwise test every piece per column).
+            row_shells = [
+                shell for shell in shell_casts
+                if shell[2][0] - vx <= x_world <= shell[2][1] + vx
+            ]
             for iy in range(iy0, iy1 + 1):
                 y_world = ys[iy]
-                merged = _merged_hits(x_world, y_world)
-                if len(merged) % 2:
-                    odd_columns += 1
-                    # Retry edge/vertex-grazing rays with a small deterministic
-                    # sub-voxel offset. The first even result preserves stable
-                    # output while avoiding arbitrary unpaired surface loss.
-                    jittered_hits = None
-                    for x_fraction, y_fraction in (
-                        (0.173, 0.271),
-                        (-0.173, 0.271),
-                        (0.173, -0.271),
-                        (-0.173, -0.271),
-                    ):
-                        candidate = _merged_hits(
-                            x_world + x_fraction * vx,
-                            y_world + y_fraction * vy,
-                        )
-                        if candidate and len(candidate) % 2 == 0:
-                            jittered_hits = candidate
-                            break
-                    if jittered_hits is not None:
-                        merged = jittered_hits
-                        recovered_columns += 1
+                if single_shell:
+                    intervals = _shell_intervals(shell_casts[0][0], x_world, y_world)
+                else:
+                    # Sum shell windings along the column; filled where > 0.
+                    winding = np.zeros(depth + 1, dtype=np.int32)
+                    for ray_cast, sign, shell_bounds in row_shells:
+                        if not shell_bounds[2] - vy <= y_world <= shell_bounds[3] + vy:
+                            continue
+                        for s_idx, e_idx in _shell_intervals(ray_cast, x_world, y_world):
+                            winding[s_idx] += sign
+                            winding[e_idx + 1] -= sign
+                    inside = np.cumsum(winding[:-1]) > 0
+                    edges = np.flatnonzero(np.diff(np.concatenate(([False], inside, [False])).astype(np.int8)))
+                    intervals = [
+                        (int(edges[k]), int(edges[k + 1]) - 1) for k in range(0, len(edges), 2)
+                    ]
 
-                if merged:
-                    for start in range(0, len(merged) - 1, 2):
-                        lower = merged[start]
-                        upper = merged[start + 1]
-                        start_idx = int(math.ceil((lower - z0_center) * inv_dz))
-                        end_idx = int(math.floor((upper - z0_center) * inv_dz))
-                        if end_idx >= start_idx:
-                            s = max(0, start_idx)
-                            e = min(depth - 1, end_idx)
-                            if e >= s:
-                                if accumulate:
-                                    grid[ix, iy, s:e + 1] += value
-                                else:
-                                    grid[ix, iy, s:e + 1] = value
+                for s_idx, e_idx in intervals:
+                    if accumulate:
+                        grid[ix, iy, s_idx:e_idx + 1] += value
+                    else:
+                        grid[ix, iy, s_idx:e_idx + 1] = value
 
                 processed += 1
                 if processed % _PROGRESS_CHUNK == 0:
@@ -495,6 +652,7 @@ def voxelize_objects_to_hu_iter(
     background_value: float = AIR_DENSITY,
     messages: Optional[list[str]] = None,
     prepared: Optional[dict[str, PreparedGeometry]] = None,
+    value_for_object: Optional[Callable[[Object], float]] = None,
 ) -> VoxelizeGenerator:
     """Generator variant of :func:`voxelize_objects_to_hu`.
 
@@ -502,9 +660,14 @@ def voxelize_objects_to_hu_iter(
     air (-1000 HU); MR exports should pass 0 (signal void) instead.
     ``messages`` collects skipped-object warnings for the caller's UI;
     ``prepared`` reuses geometry from :func:`prepare_object_geometry_iter`.
+    ``value_for_object`` overrides the per-object value (default: the mesh's
+    ``dicomator_hu``); results are clamped to the int16 HU range either way.
     """
     def hu_for_object(obj: Object) -> float:
-        hu_value = float(getattr(obj, "dicomator_hu", DEFAULT_DENSITY))
+        if value_for_object is not None:
+            hu_value = float(value_for_object(obj))
+        else:
+            hu_value = float(getattr(obj, "dicomator_hu", DEFAULT_DENSITY))
         return max(MIN_HU_VALUE, min(MAX_HU_VALUE, hu_value))
 
     return _voxelize_objects_iter(

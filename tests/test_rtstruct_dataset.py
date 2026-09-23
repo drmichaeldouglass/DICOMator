@@ -188,3 +188,50 @@ def test_display_colour_round_trip():
     ds, _, _ = _build()
     assert [int(v) for v in ds.ROIContourSequence[0].ROIDisplayColor] == [255, 0, 0]
     assert [int(v) for v in ds.ROIContourSequence[1].ROIDisplayColor] == [0, 0, 255]
+
+
+def test_dense_contour_survives_save_as_ds(tmp_path):
+    """A loop over 64 KB of ContourData must still read back as DS numbers.
+
+    Explicit VR gives DS a 2-byte length, so pydicom re-encoded long loops
+    (finely tessellated outlines) as UN bytes.
+    """
+    z0 = _z_for_slice(1)
+    angles = np.linspace(0.0, 2.0 * np.pi, 3000, endpoint=False)
+    loop = [(0.1 * np.cos(a) + 0.123456, 0.1 * np.sin(a) - 0.098765, z0) for a in angles]
+    ds, _, _ = _build(roi_defs=[("Body", (0, 255, 0), "EXTERNAL", {z0: [loop]})])
+    output = tmp_path / "RTStruct.dcm"
+    ds.save_as(output, enforce_file_format=True)
+    restored = pydicom.dcmread(output)
+    element = restored.ROIContourSequence[0].ContourSequence[0]["ContourData"]
+    assert element.VR == "DS"
+    assert len(element.value) == 3 * len(loop)
+
+
+def test_disjoint_loops_stay_closed_planar():
+    """Two separate loops on a plane (e.g. both lungs in one mesh) are not a
+    cavity, so they keep the widely supported CLOSED_PLANAR type."""
+    z0 = _z_for_slice(1)
+    left = _loop_at(z0)
+    right = [(x + 0.1, y, z) for x, y, z in left]
+    ds, _, _ = _build(roi_defs=[("Lungs", (0, 255, 0), "ORGAN", {z0: [left, right]})])
+    contours = ds.ROIContourSequence[0].ContourSequence
+    assert len(contours) == 2
+    assert {c.ContourGeometricType for c in contours} == {"CLOSED_PLANAR"}
+
+
+def test_nesting_detection_on_concave_outer_loop():
+    """A point in the notch of a concave loop is outside it."""
+    outer = [(0.0, 0.0, 0.0), (0.1, 0.0, 0.0), (0.1, 0.1, 0.0), (0.05, 0.02, 0.0), (0.0, 0.1, 0.0)]
+    notch = [(0.04, 0.08, 0.0), (0.06, 0.08, 0.0), (0.05, 0.09, 0.0)]
+    hole = [(0.02, 0.005, 0.0), (0.08, 0.005, 0.0), (0.05, 0.015, 0.0)]
+    assert not rtstruct_export._has_nested_loops([outer, notch])
+    assert rtstruct_export._has_nested_loops([outer, hole])
+
+
+def test_crossing_loops_are_not_treated_as_a_cavity():
+    """Overlapping surfaces joined into one mesh cut crossing loops; XOR would
+    turn their shared area into a hole."""
+    a = [(0.0, 0.0, 0.0), (0.06, 0.0, 0.0), (0.06, 0.06, 0.0), (0.0, 0.06, 0.0)]
+    b = [(0.03, 0.03, 0.0), (0.09, 0.03, 0.0), (0.09, 0.09, 0.0), (0.03, 0.09, 0.0)]
+    assert not rtstruct_export._has_nested_loops([a, b])

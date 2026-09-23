@@ -1,10 +1,11 @@
 """Detector geometry emitted alongside a DRR projection.
 
-``Camera.view_frame`` returns corners in camera-local space, while the rays and
-``ImagePositionPatient`` are built through ``matrix_world`` — which also carries
-the camera object's scale. The reported ``PixelSpacing`` therefore has to be
-measured in world space too, otherwise a scaled camera produces a projection
-whose declared pixel size disagrees with the geometry it was cast through.
+``Camera.view_frame`` returns corners in camera-local space; the rays and
+``ImagePositionPatient`` are built through the camera's world matrix. Blender
+renders through the *normalized* camera matrix, so scaling the camera object
+changes only how it is drawn in the viewport, never what it sees. The DRR
+must follow suit: its field of view, ``PixelSpacing`` and
+``ImagePositionPatient`` have to be independent of the camera object's scale.
 
 Blender's ``mathutils`` is stubbed in this test suite, so a minimal vector and
 matrix implementation is supplied locally for the few operations ``drr`` needs.
@@ -175,18 +176,16 @@ def test_unscaled_camera_reports_local_frame_spacing(patched_vector):
     assert column_mm == pytest.approx(LOCAL_FRAME_WIDTH_M / DETECTOR_WIDTH * 1000.0)
 
 
-def test_pixel_spacing_tracks_camera_object_scale(patched_vector):
-    """A camera scaled by 2 spans twice the world extent per detector pixel."""
+def test_camera_object_scale_does_not_change_the_drr(patched_vector):
+    """Like a Blender render, a scaled camera sees exactly the same view."""
 
-    _image, unscaled = _project(1.0)
-    _image, scaled = _project(2.0)
-
-    assert scaled["pixel_spacing_mm"][0] == pytest.approx(
-        2.0 * unscaled["pixel_spacing_mm"][0]
-    )
-    assert scaled["pixel_spacing_mm"][1] == pytest.approx(
-        2.0 * unscaled["pixel_spacing_mm"][1]
-    )
+    unscaled_image, unscaled = _project(1.0)
+    for camera_scale in (2.0, 0.5):
+        scaled_image, scaled = _project(camera_scale)
+        np.testing.assert_array_equal(scaled_image, unscaled_image)
+        assert scaled["pixel_spacing_mm"] == pytest.approx(unscaled["pixel_spacing_mm"])
+        assert scaled["image_position_patient"] == pytest.approx(unscaled["image_position_patient"])
+        assert scaled["image_orientation_patient"] == pytest.approx(unscaled["image_orientation_patient"])
 
 
 def test_close_orthographic_camera_still_integrates_the_whole_grid(patched_vector):
@@ -232,11 +231,13 @@ def test_pixel_spacing_matches_first_pixel_offset_from_the_frame_corner(patched_
         orientation = np.array(metadata["image_orientation_patient"], dtype=np.float64)
         row_axis, column_axis = orientation[:3], orientation[3:]
 
+        # The camera scale is ignored, so the frame keeps its local size and
+        # sits one unit in front of the camera.
         top_left_corner_mm = np.array(
             [
-                camera_scale * -LOCAL_FRAME_WIDTH_M / 2.0 * 1000.0,
-                camera_scale * LOCAL_FRAME_HEIGHT_M / 2.0 * 1000.0,
-                (10.0 - camera_scale) * 1000.0,
+                -LOCAL_FRAME_WIDTH_M / 2.0 * 1000.0,
+                LOCAL_FRAME_HEIGHT_M / 2.0 * 1000.0,
+                (10.0 - 1.0) * 1000.0,
             ]
         )
         expected = top_left_corner_mm + 0.5 * column_mm * row_axis + 0.5 * row_mm * column_axis

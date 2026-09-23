@@ -220,12 +220,13 @@ def test_gradient_only_distortion_matches_per_slice_remap():
     rel1 = o1 - c1
     r_max_sq = (c0 * c0 + c1 * c1) + 1e-3
     rho_sq = (rel0 * rel0 + rel1 * rel1) / r_max_sq
-    grad_factor = (1.0 + 0.08 * rho_sq).astype(np.float32)
+    grad_factor = (1.0 - 0.08 * rho_sq).astype(np.float32)
     base0 = c0 + grad_factor * rel0
     base1 = c1 + grad_factor * rel1
+    jacobian = artifacts._inverse_map_jacobian(base0, base1)
     expected = np.empty_like(volume)
     for iz in range(depth):
-        expected[:, :, iz] = artifacts._remap_bilinear(volume[:, :, iz], base0, base1, fill=0.0)
+        expected[:, :, iz] = artifacts._remap_bilinear(volume[:, :, iz], base0, base1, fill=0.0) * jacobian
 
     np.testing.assert_array_equal(out, expected)
 
@@ -332,3 +333,122 @@ def test_resize_bilinear_repeats_a_degenerate_source_axis(shape, out_shape):
         np.testing.assert_allclose(out, np.repeat(out[:1, :], out_shape[0], axis=0), rtol=1e-6)
     if shape[1] == 1:
         np.testing.assert_allclose(out, np.repeat(out[:, :1], out_shape[1], axis=1), rtol=1e-6)
+
+
+def test_metal_streaks_do_not_depend_on_slice_orientation():
+    """Transposing a wide slice must transpose its streak field.
+
+    Rotating inside a slice-sized canvas cropped the corners, so a laterally
+    placed implant disappeared from the near-vertical views of a wide slice
+    (but not of the same slice stored tall), and the streak pattern depended
+    on which way the grid happened to be longer.
+    """
+    volume = np.zeros((200, 80, 1), dtype=np.int16)
+    volume[28:33, 38:43, 0] = 3000
+    kwargs = dict(intensity=400.0, density_threshold=2000.0, num_streaks=64, falloff=0.1)
+    wide = artifacts.add_metal_artifacts(volume, rng=np.random.default_rng(0), **kwargs)
+    tall = artifacts.add_metal_artifacts(
+        np.ascontiguousarray(volume.transpose(1, 0, 2)), rng=np.random.default_rng(0), **kwargs
+    )
+    wide = wide[:, :, 0].astype(np.float32)
+    tall = tall[:, :, 0].astype(np.float32).T
+    # Photon-starvation noise and the view sampling are not transpose
+    # symmetric, so allow a modest residual; the cropped canvas gave a
+    # difference larger than the streaks themselves.
+    assert np.abs(wide - tall).mean() < 0.5 * np.abs(wide).mean()
+
+
+def test_metal_streak_strength_scales_with_metal_amount():
+    """Slices with less, or less dense, metal get weaker streaks."""
+    volume = np.zeros((48, 48, 2), dtype=np.int16)
+    volume[12:36, 12:36, 0] = 3071   # large dense implant
+    volume[24, 24, 1] = 2001         # single voxel barely over threshold
+    out = artifacts.add_metal_artifacts(
+        volume, intensity=400.0, density_threshold=2000.0, num_streaks=32,
+        rng=np.random.default_rng(1),
+    )
+    strong = np.abs(out[:, :, 0].astype(np.float32))
+    strong[12:36, 12:36] = 0.0
+    weak = np.abs(out[:, :, 1].astype(np.float32))
+    weak[24, 24] = 0.0
+    assert np.percentile(strong, 99.5) > 100.0
+    assert weak.max() < 1.0
+
+
+def test_ring_artifacts_are_circular_on_non_square_slices():
+    """Detector-channel rings are circles about the centre, not ellipses."""
+    volume = np.zeros((201, 81, 1), dtype=np.int16)
+    out = artifacts.add_ring_artifacts(
+        volume, ring_intensity=100.0, ring_radius=0.3, thickness=0.02, jitter=0.0,
+        rng=np.random.default_rng(2),
+    ).astype(np.float32)[:, :, 0]
+    centre0, centre1 = 100, 40
+    along_x = np.abs(out[centre0:, centre1])
+    along_y = np.abs(out[centre0, centre1:])
+    # Allow for the small random centre jitter.
+    assert abs(int(np.argmax(along_x)) - int(np.argmax(along_y))) <= 2
+
+
+def test_positive_gradient_nonlinearity_is_pincushion():
+    """k > 0 must push peripheral content outward, as documented in the UI."""
+    volume = np.zeros((81, 81, 1), dtype=np.float32)
+    volume[40 + 30, 40, 0] = 1000.0
+    out = artifacts.add_mri_geometric_distortion(volume, gradient_strength=0.2, b0_strength=0.0)
+    assert int(np.argmax(out[:, 40, 0])) > 70
+    barrel = artifacts.add_mri_geometric_distortion(volume, gradient_strength=-0.2, b0_strength=0.0)
+    assert int(np.argmax(barrel[:, 40, 0])) < 70
+
+
+def test_gibbs_mask_keeps_dc_term_for_even_widths():
+    """The kept k-space band is centred on DC even at the maximum truncation."""
+    volume = np.full((64, 64, 1), 100, dtype=np.int16)
+    out = artifacts.add_gibbs_ringing(volume, strength=1.0, truncation=0.49)
+    np.testing.assert_array_equal(out, volume)
+
+
+def test_gibbs_ringing_preserves_symmetry_for_odd_band_on_even_width():
+    """An off-centre band would skew a symmetric object's ringing."""
+    volume = np.zeros((64, 64, 1), dtype=np.float32)
+    volume[24:40, 24:40, 0] = 100.0
+    out = artifacts.add_gibbs_ringing(volume, strength=1.0, truncation=0.21)[:, :, 0]
+    # The square is symmetric about the 31.5 midline, and so is the DC-centred
+    # band (up to the lone Nyquist-side bin, which a centred band never keeps).
+    np.testing.assert_allclose(out, out[::-1, :], atol=1e-3)
+
+
+def test_poisson_noise_is_unbiased_at_low_photon_scale():
+    """-log(N/lambda) is biased high for Poisson counts; the correction keeps
+    quantum noise zero-mean even at the lowest photon scale."""
+    volume = np.zeros((96, 96, 12), dtype=np.int16)  # water
+    out = artifacts.add_poisson_noise(volume, scale=1.0, rng=np.random.default_rng(3))
+    noise = out.astype(np.float64)
+    # Standard error of the mean is ~0.3 HU here; the uncorrected bias was ~20 HU.
+    assert abs(noise.mean()) < 2.0
+    assert noise.std() > 100.0
+
+
+def test_b0_distortion_conserves_signal_and_piles_up():
+    """Off-resonance distortion moves signal, it does not create or destroy it.
+
+    Without the Jacobian, a compressed region kept its intensity while losing
+    area, so the total MR signal of an object changed with the field map.
+    """
+    x = np.arange(64, dtype=np.float32)
+    blob = np.exp(-(((x[:, None] - 32) ** 2) + ((x[None, :] - 32) ** 2)) / (2 * 8.0**2))
+    volume = np.repeat((1000.0 * blob)[:, :, None], 3, axis=2).astype(np.float32)
+    out = artifacts.add_mri_geometric_distortion(
+        volume, gradient_strength=0.0, b0_strength=4.0, b0_scale=0.3, rng=np.random.default_rng(8)
+    )
+    # Conserved to ~0.02% with the Jacobian; ~1.5% lost without it.
+    np.testing.assert_allclose(out.sum(axis=(0, 1)), volume.sum(axis=(0, 1)), rtol=0.002)
+    # Compressed regions brighten beyond the undistorted peak.
+    assert out.max() > volume.max() * 1.02
+
+
+def test_inverse_map_jacobian_of_uniform_scaling():
+    """Sampling the source at twice the radius shows 4x the area per pixel."""
+    o0, o1 = np.indices((9, 7), dtype=np.float32)
+    jacobian = artifacts._inverse_map_jacobian(2.0 * o0, 2.0 * o1)
+    np.testing.assert_allclose(jacobian, 4.0)
+    single_column = artifacts._inverse_map_jacobian(2.0 * o0[:, :1], o1[:, :1])
+    np.testing.assert_allclose(single_column, 2.0)

@@ -111,7 +111,10 @@ MATERIAL_INTENSITIES = {
         MODALITY_MRI_T2: 90,
     },
     "ALUMINIUM": {
-        MODALITY_CT: 300,        # moderately dense metal equivalent
+        # mu(Al) / mu(water) is ~3.3 at a ~70 keV effective energy (120 kVp,
+        # NIST XCOM), i.e. roughly +2300 HU; published scanner values span
+        # about 2000-2600 HU depending on kVp and filtration.
+        MODALITY_CT: 2300,
         MODALITY_MRI_T1: 0,      # metal causes signal void in MRI
         MODALITY_MRI_T2: 0,
     },
@@ -549,10 +552,12 @@ def estimate_peak_memory_bytes(
             # The float32 attenuation volume plus the temporaries of the
             # HU-to-attenuation conversion.
             image_bytes += 8
-    # Clipped float32 dose, the scaled float32 values, the uint32 frames, their
-    # contiguous copy, and the PixelData bytes can coexist during RT Dose
-    # encoding (measured at 20 B/voxel).
-    dose_bytes = 20 if export_rtdose else 0
+    # The float32 dose grid from the voxelizer, plus the clipped float32 dose,
+    # the scaled float32 values, the uint32 frames, their contiguous copy, and
+    # the PixelData bytes that coexist during RT Dose encoding (measured at
+    # 24 B/voxel including the grid). The export operator releases the image
+    # grids before this stage, so the two stages do not stack.
+    dose_bytes = 24 if export_rtdose else 0
     return total * max(image_bytes, dose_bytes, 2)
 
 

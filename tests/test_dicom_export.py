@@ -264,3 +264,26 @@ def test_drr_projection_roundtrip(tmp_path):
     assert int(ds.Columns) == 8
     np.testing.assert_allclose([float(v) for v in ds.PixelSpacing], [1.5, 2.5])
     np.testing.assert_array_equal(ds.pixel_array, image)
+    # Modality LUT: Rescale Type is 1C alongside Rescale Intercept.
+    assert ds.RescaleType == "US"
+    # Patient Orientation is 2C in the SC IOD and must be present (empty when
+    # the orientation is unknown, as for a perspective DRR).
+    assert "PatientOrientation" in ds
+    assert not ds.PatientOrientation
+
+
+def test_drr_patient_orientation_follows_detector_axes(tmp_path):
+    image = np.zeros((4, 5), dtype=np.uint16)
+    # Rows run towards the patient's left, columns towards the feet (an AP view).
+    result = dicom_export.export_projection_to_dicom(
+        image,
+        str(tmp_path),
+        filename="DRR_ap.dcm",
+        pixel_spacing_mm=(1.0, 1.0),
+        image_position_patient=(0.0, 0.0, 0.0),
+        image_orientation_patient=(1.0, 0.0, 0.0, 0.0, 0.0, -1.0),
+    )
+    assert "success" in result, result
+    ds = pydicom.dcmread(str(tmp_path / "DRR_ap.dcm"))
+    assert list(ds.PatientOrientation) == ["L", "F"]
+    assert dicom_export._patient_orientation_codes((0.8, -0.6, 0.0, 0.0, 0.0, 1.0)) == ["LA", "H"]

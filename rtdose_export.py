@@ -11,8 +11,10 @@ scaled by a ``DoseGridScaling`` factor:
     actual_dose_Gy = pixel_value × DoseGridScaling
 
 The scaling factor is chosen so that the maximum dose in the grid maps to the
-maximum uint32 value (4 294 967 295), giving the highest possible precision
-across the full dynamic range of the grid.  If the grid is entirely zero the
+largest *signed* 32-bit value (2 147 483 647). The pixels are still unsigned,
+but a number of RT readers load 32-bit dose as int32; keeping the top bit
+clear stops their hottest voxels wrapping to negative dose, at no practical
+cost in precision (the float32 source carries only 24 bits anyway).  If the grid is entirely zero the
 scaling defaults to 1.0 Gy/count so the file is still valid.
 
 The pixel data is a contiguous sequence of frames (slices) in inferior-to-
@@ -268,18 +270,19 @@ def export_rtdose_to_dicom(
     #
     # DoseGridScaling has VR DS, so the factor that is written to the file is
     # limited to 16 characters and generally cannot hold the full float
-    # precision of ``max_dose / uint32_max``.  The encoded factor is therefore
+    # precision of ``max_dose / max_pixel_value``.  The encoded factor is therefore
     # resolved *first* and the pixel values are derived from it, so that
     # ``pixel_value × DoseGridScaling`` reproduces the intended dose instead
     # of the un-representable ideal factor.
     max_dose = float(dose_f32.max())
-    uint32_max = float(np.iinfo(np.uint32).max)  # 4 294 967 295
+    # Peak dose maps to the int32 maximum (see the module docstring).
+    max_pixel_value = float(np.iinfo(np.int32).max)  # 2 147 483 647
     if max_dose > 0.0:
-        dose_grid_scaling_text = format_ds(max_dose / uint32_max)
+        dose_grid_scaling_text = format_ds(max_dose / max_pixel_value)
         dose_grid_scaling = float(dose_grid_scaling_text)
-        if dose_grid_scaling <= 0.0 or max_dose / dose_grid_scaling > uint32_max:
+        if dose_grid_scaling <= 0.0 or max_dose / dose_grid_scaling > max_pixel_value:
             # The DS rounding went down, which would push the peak voxel past
-            # the uint32 range; step the last retained digit up instead.
+            # the int32 range; step the last retained digit up instead.
             dose_grid_scaling_text = format_ds(dose_grid_scaling * (1.0 + 1e-9))
             dose_grid_scaling = float(dose_grid_scaling_text)
     else:
@@ -291,14 +294,12 @@ def export_rtdose_to_dicom(
     # Encode all frames into a (D × H × W) uint32 array: transpose the
     # (W, H, D) grid so each frame is an (H, W) slice, matching the DICOM
     # row-major convention (rows first).
-    # Clip before casting: float32 precision on a uint32-range scale can
-    # push values a fraction above uint32_max, which silently wraps on
-    # cast. The clip bound itself must be a float32 value that does not
-    # exceed uint32_max — uint32_max is not representable in float32 and
-    # rounds up to 2**32, which would defeat the clamp and wrap the
-    # maximum-dose voxels to 0.
-    safe_uint32_max = np.nextafter(np.float32(np.iinfo(np.uint32).max), np.float32(0.0))
-    scaled = np.clip(dose_f32 / np.float32(dose_grid_scaling), np.float32(0.0), safe_uint32_max)
+    # Clip before casting: float32 precision can push values a fraction
+    # above max_pixel_value. The clip bound itself must be a float32 value
+    # that does not exceed it: 2**31 - 1 is not representable in float32
+    # and rounds up to 2**31, which would set the top bit on the peak voxels.
+    safe_max_pixel = np.nextafter(np.float32(max_pixel_value), np.float32(0.0))
+    scaled = np.clip(dose_f32 / np.float32(dose_grid_scaling), np.float32(0.0), safe_max_pixel)
     pixel_frames = np.ascontiguousarray(
         scaled.astype(np.uint32).transpose(2, 1, 0)
     )
