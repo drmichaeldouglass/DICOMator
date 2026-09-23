@@ -33,6 +33,35 @@ LOGGER = logging.getLogger(__name__)
 SliceProgressCallback = Optional[Callable[[int, int], None]]
 ExportGenerator = Generator[tuple[int, int], None, dict]
 
+#: Patient-axis direction letters for the +/- ends of X, Y and Z (DICOM LPS:
+#: +X towards the patient's left, +Y posterior, +Z head).
+_PATIENT_DIRECTION_CODES = (("L", "R"), ("P", "A"), ("H", "F"))
+
+
+def _patient_orientation_codes(orientation: Optional[Sequence[float]]) -> list[str] | str:
+    """Return Patient Orientation (0020,0020) for an image orientation.
+
+    Each of the row and column directions is described by up to three
+    anatomical letters, strongest component first (e.g. ``L`` or ``LP`` for an
+    oblique direction). Returns an empty value when the orientation is unknown,
+    which the Type 2C attribute permits.
+    """
+
+    if orientation is None:
+        return ''
+    codes = []
+    for vector in (orientation[:3], orientation[3:]):
+        ranked = sorted(range(3), key=lambda axis: -abs(float(vector[axis])))
+        letters = "".join(
+            _PATIENT_DIRECTION_CODES[axis][0 if float(vector[axis]) > 0.0 else 1]
+            for axis in ranked
+            if abs(float(vector[axis])) > 1e-3
+        )
+        codes.append(letters)
+    if not all(codes):
+        return ''
+    return codes
+
 
 def export_voxel_grid_to_dicom(
     voxel_grid: np.ndarray,
@@ -449,6 +478,9 @@ def export_projection_to_dicom(
 
         if position is not None:
             dataset.ImagePositionPatient = format_ds_sequence(position)
+        # Patient Orientation is Type 2C in the Secondary Capture IOD, which has
+        # no Image Plane module: required (possibly empty) for every DRR.
+        dataset.PatientOrientation = _patient_orientation_codes(orientation)
         if orientation is not None:
             dataset.ImageOrientationPatient = format_ds_sequence(orientation)
         if spacing is not None:
@@ -465,6 +497,9 @@ def export_projection_to_dicom(
         dataset.PixelRepresentation = 0
         dataset.RescaleIntercept = format_ds(0.0)
         dataset.RescaleSlope = format_ds(1.0)
+        # Rescale Type is Type 1C in the Modality LUT module whenever Rescale
+        # Intercept is present; DRR pixel values carry no physical unit.
+        dataset.RescaleType = 'US'
 
         image_min = int(image_2d.min()) if image_2d.size else 0
         image_max = int(image_2d.max()) if image_2d.size else 0

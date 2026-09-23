@@ -416,7 +416,11 @@ def build_rtstruct_dataset(
     file_meta.MediaStorageSOPClassUID = RTSTRUCT_SOP_CLASS
     file_meta.MediaStorageSOPInstanceUID = sop_instance_uid
     file_meta.ImplementationClassUID = pydicom.uid.PYDICOM_IMPLEMENTATION_UID
-    file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+    # Implicit VR: explicit VR gives DS elements a 2-byte length field, so a
+    # single contour loop with more than ~2,300 points (a finely tessellated
+    # body outline) would overflow 64 KB and be re-encoded as UN, which RT
+    # readers cannot interpret as ContourData.
+    file_meta.TransferSyntaxUID = pydicom.uid.ImplicitVRLittleEndian
 
     ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\0" * 128)
 
@@ -502,7 +506,8 @@ def build_rtstruct_dataset(
         roi_item.ReferencedFrameOfReferenceUID = frame_of_reference_uid
         # ROIName has VR LO (max 64 encoded bytes).
         roi_item.ROIName = truncate_lo(roi_name, f"ROI {roi_number}")
-        roi_item.ROIGenerationAlgorithm = "MANUAL"
+        # Contours are computed by bisecting the mesh, not drawn by a person.
+        roi_item.ROIGenerationAlgorithm = "AUTOMATIC"
         roi_sequence.append(roi_item)
     ds.StructureSetROISequence = roi_sequence
 

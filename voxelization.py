@@ -157,41 +157,54 @@ def _object_geometry(
     return BVHTree.FromPolygons(verts_world.tolist(), polygons), bounds
 
 
+def _object_world_vertices(
+    obj: Object,
+    depsgraph: Optional[bpy.types.Depsgraph],
+    *,
+    apply_modifiers: bool,
+) -> np.ndarray:
+    """Return the world-space vertices of the mesh that is actually exported.
+
+    Bounds must come from the same mesh as the ray-cast geometry. With
+    modifiers off that is the base mesh (``obj.data``); ``obj.bound_box``
+    would describe the *evaluated* mesh instead, which a Boolean or Mask
+    modifier can make smaller than the base mesh (cropping it at the grid
+    edge), and which is unset for objects the depsgraph has not evaluated.
+    """
+    if apply_modifiers and depsgraph is not None:
+        obj_eval = obj.evaluated_get(depsgraph)
+        mesh = obj_eval.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
+        try:
+            return _world_vertex_array(mesh, obj_eval.matrix_world)
+        finally:
+            obj_eval.to_mesh_clear()
+    return _world_vertex_array(obj.data, obj.matrix_world)
+
+
 def _objects_world_bounds(
     objects: Sequence[Object],
     depsgraph: Optional[bpy.types.Depsgraph],
     *,
     apply_modifiers: bool,
 ) -> Bounds:
-    """Return the combined world-space bounds of ``objects``."""
+    """Return the combined world-space bounds of ``objects``.
+
+    Objects without vertices are ignored; when none has any, the bounds stay
+    at +/-inf for the caller to report.
+    """
     min_x = min_y = min_z = float('inf')
     max_x = max_y = max_z = float('-inf')
     for obj in objects:
-        if apply_modifiers and depsgraph is not None:
-            obj_eval = obj.evaluated_get(depsgraph)
-            mesh = obj_eval.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
-            try:
-                verts_world = _world_vertex_array(mesh, obj_eval.matrix_world)
-            finally:
-                obj_eval.to_mesh_clear()
-            if verts_world.size:
-                mins = verts_world.min(axis=0)
-                maxs = verts_world.max(axis=0)
-                min_x = min(min_x, float(mins[0]))
-                max_x = max(max_x, float(maxs[0]))
-                min_y = min(min_y, float(mins[1]))
-                max_y = max(max_y, float(maxs[1]))
-                min_z = min(min_z, float(mins[2]))
-                max_z = max(max_z, float(maxs[2]))
-        else:
-            for corner in obj.bound_box:
-                world_corner = obj.matrix_world @ Vector(corner)
-                min_x = min(min_x, world_corner.x)
-                max_x = max(max_x, world_corner.x)
-                min_y = min(min_y, world_corner.y)
-                max_y = max(max_y, world_corner.y)
-                min_z = min(min_z, world_corner.z)
-                max_z = max(max_z, world_corner.z)
+        verts_world = _object_world_vertices(obj, depsgraph, apply_modifiers=apply_modifiers)
+        if verts_world.size:
+            mins = verts_world.min(axis=0)
+            maxs = verts_world.max(axis=0)
+            min_x = min(min_x, float(mins[0]))
+            max_x = max(max_x, float(maxs[0]))
+            min_y = min(min_y, float(mins[1]))
+            max_y = max(max_y, float(maxs[1]))
+            min_z = min(min_z, float(mins[2]))
+            max_z = max(max_z, float(maxs[2]))
     return min_x, max_x, min_y, max_y, min_z, max_z
 
 

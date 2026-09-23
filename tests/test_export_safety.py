@@ -76,7 +76,7 @@ def _estimate(**kwargs):
 
 
 def test_memory_estimate_accounts_for_rtdose_temporaries():
-    assert _estimate(export_rtdose=True) == 100_000_000 * 20
+    assert _estimate(export_rtdose=True) == 100_000_000 * 24
 
 
 @pytest.mark.parametrize(
@@ -89,7 +89,7 @@ def test_memory_estimate_accounts_for_rtdose_temporaries():
         (dict(export_image_series=True, export_drr=True), 10),
         (dict(export_image_series=True, artifacts_enabled=True), 38),
         (dict(export_image_series=True, artifacts_enabled=True, gibbs_enabled=True), 58),
-        (dict(export_rtdose=True), 20),
+        (dict(export_rtdose=True), 24),
     ],
 )
 def test_memory_estimate_covers_the_measured_peak(kwargs, measured_bytes_per_voxel):

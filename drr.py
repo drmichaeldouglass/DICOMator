@@ -191,22 +191,31 @@ def generate_drr_from_hu_volume_iter(
     bottom_left, bottom_right, top_left, top_right = _camera_frame_corners(scene, camera_obj)
 
     camera_matrix = camera_obj.matrix_world
-    camera_rotation = camera_matrix.to_3x3()
-    camera_origin = np.array(camera_matrix.translation, dtype=np.float32)
-    rotation = np.array(camera_rotation, dtype=np.float32)
+    camera_origin_m = np.array(camera_matrix.translation, dtype=np.float64)
+    camera_origin = camera_origin_m.astype(np.float32)
+    # Blender renders through the camera's *normalized* world matrix: scaling
+    # the camera object only changes how it is drawn in the viewport, never
+    # what it sees. Normalizing the columns strips that scale (uniform or not)
+    # and leaves the pure rotation, so the DRR frames exactly what the camera
+    # view and a render show.
+    rotation_m = np.array(camera_matrix.to_3x3(), dtype=np.float64)
+    rotation_m /= np.maximum(np.linalg.norm(rotation_m, axis=0, keepdims=True), 1e-12)
+    rotation = rotation_m.astype(np.float32)
 
-    # Measure the detector in world space. ``view_frame`` reports camera-local
-    # corners, but both the rays cast below and ImagePositionPatient are built
-    # through matrix_world, which also carries the camera object's scale.
-    # Taking the extents from the unscaled local corners would report a
-    # PixelSpacing that disagrees with the geometry actually projected.
-    frame_width_m = float((camera_rotation @ (bottom_right - bottom_left)).length)
-    frame_height_m = float((camera_rotation @ (top_left - bottom_left)).length)
+    local_bottom_left_m = np.array(bottom_left, dtype=np.float64)
+    local_bottom_right_m = np.array(bottom_right, dtype=np.float64)
+    local_top_left_m = np.array(top_left, dtype=np.float64)
+    local_top_right_m = np.array(top_right, dtype=np.float64)
 
-    local_bottom_left = np.array(bottom_left, dtype=np.float32)
-    local_bottom_right = np.array(bottom_right, dtype=np.float32)
-    local_top_left = np.array(top_left, dtype=np.float32)
-    local_top_right = np.array(top_right, dtype=np.float32)
+    # Detector extents in world space (``view_frame`` corners are
+    # camera-local; the rotation preserves lengths).
+    frame_width_m = float(np.linalg.norm(rotation_m @ (local_bottom_right_m - local_bottom_left_m)))
+    frame_height_m = float(np.linalg.norm(rotation_m @ (local_top_left_m - local_bottom_left_m)))
+
+    local_bottom_left = local_bottom_left_m.astype(np.float32)
+    local_bottom_right = local_bottom_right_m.astype(np.float32)
+    local_top_left = local_top_left_m.astype(np.float32)
+    local_top_right = local_top_right_m.astype(np.float32)
 
     is_orthographic = str(getattr(camera_obj.data, "type", "PERSP")).upper() == "ORTHO"
     orthographic_direction = rotation @ np.array((0.0, 0.0, -1.0), dtype=np.float32)
@@ -254,9 +263,10 @@ def generate_drr_from_hu_volume_iter(
             directions = np.repeat(orthographic_direction[None, :], ray_count, axis=0)
             back_off = origins @ orthographic_direction - nearest_corner_projection
             if np.any(back_off > 0.0):
-                # Only rays that already overshot the grid are moved; the rest
-                # keep their exact origins. Sliding along the ray leaves the
-                # sampled positions unchanged, so this costs no extra samples.
+                # Every ray is moved back until it starts a step before the
+                # grid. Sliding along a parallel ray leaves the positions it
+                # samples inside the grid unchanged, and the ray-box entry
+                # distance skips the empty stretch, so no samples are added.
                 back_off = np.maximum(back_off, 0.0) + np.float32(step_size)
                 origins = origins - orthographic_direction[None, :] * back_off[:, None]
         else:
@@ -316,33 +326,27 @@ def generate_drr_from_hu_volume_iter(
 
     projection_image = _normalize_projection(line_integrals, fixed=fixed_normalization)
 
-    row_direction_world = (camera_rotation @ (top_right - top_left)).normalized()
-    column_direction_world = (camera_rotation @ (bottom_left - top_left)).normalized()
+    row_direction_world = rotation_m @ (local_top_right_m - local_top_left_m)
+    row_direction_world /= max(float(np.linalg.norm(row_direction_world)), 1e-12)
+    column_direction_world = rotation_m @ (local_bottom_left_m - local_top_left_m)
+    column_direction_world /= max(float(np.linalg.norm(column_direction_world)), 1e-12)
 
     pixel_spacing_mm = None
     image_position_patient = None
     image_orientation_patient = None
     if is_orthographic:
-        row_step_local = (top_right - top_left) / float(detector_width)
-        column_step_local = (bottom_left - top_left) / float(detector_height)
-        first_pixel_center_local = top_left + 0.5 * row_step_local + 0.5 * column_step_local
-        first_pixel_center_world = camera_matrix @ first_pixel_center_local
+        row_step_local = (local_top_right_m - local_top_left_m) / float(detector_width)
+        column_step_local = (local_bottom_left_m - local_top_left_m) / float(detector_height)
+        first_pixel_center_local = local_top_left_m + 0.5 * row_step_local + 0.5 * column_step_local
+        first_pixel_center_world = rotation_m @ first_pixel_center_local + camera_origin_m
         pixel_spacing_mm = (
             (frame_height_m / float(detector_height)) * 1000.0,
             (frame_width_m / float(detector_width)) * 1000.0,
         )
-        image_position_patient = (
-            float(first_pixel_center_world.x * 1000.0),
-            float(first_pixel_center_world.y * 1000.0),
-            float(first_pixel_center_world.z * 1000.0),
-        )
+        image_position_patient = tuple(float(value * 1000.0) for value in first_pixel_center_world)
         image_orientation_patient = (
-            float(row_direction_world.x),
-            float(row_direction_world.y),
-            float(row_direction_world.z),
-            float(column_direction_world.x),
-            float(column_direction_world.y),
-            float(column_direction_world.z),
+            *(float(value) for value in row_direction_world),
+            *(float(value) for value in column_direction_world),
         )
 
     metadata = {

@@ -549,10 +549,12 @@ def estimate_peak_memory_bytes(
             # The float32 attenuation volume plus the temporaries of the
             # HU-to-attenuation conversion.
             image_bytes += 8
-    # Clipped float32 dose, the scaled float32 values, the uint32 frames, their
-    # contiguous copy, and the PixelData bytes can coexist during RT Dose
-    # encoding (measured at 20 B/voxel).
-    dose_bytes = 20 if export_rtdose else 0
+    # The float32 dose grid from the voxelizer, plus the clipped float32 dose,
+    # the scaled float32 values, the uint32 frames, their contiguous copy, and
+    # the PixelData bytes that coexist during RT Dose encoding (measured at
+    # 24 B/voxel including the grid). The export operator releases the image
+    # grids before this stage, so the two stages do not stack.
+    dose_bytes = 24 if export_rtdose else 0
     return total * max(image_bytes, dose_bytes, 2)
 
 

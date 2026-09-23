@@ -215,3 +215,23 @@ def test_air_background_is_written_exactly():
 
     assert grid[0, 0, 0] == voxelization.AIR_DENSITY
     assert grid.dtype == np.int16
+
+
+def test_bounds_without_modifiers_come_from_the_base_mesh():
+    """With modifiers off the grid must enclose ``obj.data``, which is what
+    gets ray-cast. ``obj.bound_box`` describes the evaluated mesh instead
+    (smaller under a Boolean/Mask modifier, unset if never evaluated)."""
+
+    class _NoBoundBox:
+        name = "Masked"
+        data = SimpleNamespace(
+            vertices=_RecordingVertices([-0.1, -0.2, -0.3, 0.1, 0.2, 0.3])
+        )
+        matrix_world = _IdentityMatrix()
+
+        @property
+        def bound_box(self):
+            raise AssertionError("bound_box describes the evaluated mesh")
+
+    bounds = voxelization._objects_world_bounds([_NoBoundBox()], None, apply_modifiers=False)
+    np.testing.assert_allclose(bounds, (-0.1, 0.1, -0.2, 0.2, -0.3, 0.3), atol=1e-7)

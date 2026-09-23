@@ -60,7 +60,7 @@ from .rtdose_export import export_rtdose_to_dicom
 from .rtstruct_export import export_rtstruct_to_dicom_iter
 from .utils import get_float_prop, resolve_output_directory
 from .voxelization import (
-    _world_vertex_array,
+    _object_world_vertices,
     prepare_object_geometry_iter,
     voxelize_objects_to_dose_iter,
     voxelize_objects_to_hu_iter,
@@ -257,33 +257,18 @@ def _mesh_bounds_for_objects(
     found_vertex = False
 
     for obj in objects:
-        if apply_modifiers and depsgraph is not None:
-            obj_eval = obj.evaluated_get(depsgraph)
-            mesh = obj_eval.to_mesh(preserve_all_data_layers=False, depsgraph=depsgraph)
-            try:
-                verts_world = _world_vertex_array(mesh, obj_eval.matrix_world)
-            finally:
-                obj_eval.to_mesh_clear()
-            if verts_world.size:
-                mins = verts_world.min(axis=0)
-                maxs = verts_world.max(axis=0)
-                min_x = min(min_x, float(mins[0]))
-                max_x = max(max_x, float(maxs[0]))
-                min_y = min(min_y, float(mins[1]))
-                max_y = max(max_y, float(maxs[1]))
-                min_z = min(min_z, float(mins[2]))
-                max_z = max(max_z, float(maxs[2]))
-                found_vertex = True
-        else:
-            for corner in obj.bound_box:
-                world_corner = obj.matrix_world @ Vector(corner)
-                min_x = min(min_x, world_corner.x)
-                max_x = max(max_x, world_corner.x)
-                min_y = min(min_y, world_corner.y)
-                max_y = max(max_y, world_corner.y)
-                min_z = min(min_z, world_corner.z)
-                max_z = max(max_z, world_corner.z)
-                found_vertex = True
+        # Same mesh as the voxelizer ray-casts, so the shared grid covers it.
+        verts_world = _object_world_vertices(obj, depsgraph, apply_modifiers=apply_modifiers)
+        if verts_world.size:
+            mins = verts_world.min(axis=0)
+            maxs = verts_world.max(axis=0)
+            min_x = min(min_x, float(mins[0]))
+            max_x = max(max_x, float(maxs[0]))
+            min_y = min(min_y, float(mins[1]))
+            max_y = max(max_y, float(maxs[1]))
+            min_z = min(min_z, float(mins[2]))
+            max_z = max(max_z, float(maxs[2]))
+            found_vertex = True
 
     if not found_vertex:
         raise ValueError("No valid mesh geometry found while estimating bounds")
@@ -1044,6 +1029,9 @@ class DICOMATOR_OT_export_dicom(Operator):
                         ct_series_uid_for_struct = image_series_uid
                         ct_sop_class_uid_for_struct = result.get('sop_class_uid')
                         ct_sop_instance_uids_for_struct = list(result.get('sop_instance_uids') or [])
+                        # The slices are written; drop the artifact copy so it
+                        # does not stay alive through the DRR and dose stages.
+                        hu_array_to_export = None
 
                     if export_drr:
                         write_start = phase_start + slot * type_span
@@ -1111,6 +1099,12 @@ class DICOMATOR_OT_export_dicom(Operator):
                         )
                         if 'error' in result:
                             return result
+                        projection_image = None
+
+                    # Release the image grid before the dose stage: the peak
+                    # memory estimate treats the image and dose stages as
+                    # separate high-water marks, not one on top of the other.
+                    hu_array = None
 
                 # ----------------------------------------------------------
                 # RT Dose export
@@ -1166,6 +1160,8 @@ class DICOMATOR_OT_export_dicom(Operator):
                     )
                     if 'error' in result:
                         return result
+                    # Do not carry this phase's dose grid into the next phase.
+                    dose_array = None
 
                 # ----------------------------------------------------------
                 # RT Structure Set export
