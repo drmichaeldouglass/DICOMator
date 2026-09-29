@@ -41,6 +41,7 @@ from .constants import (
     MODALITY_CT,
     MRI_MODALITIES,
     UI_FEATURE_ARTIFACTS,
+    UI_FEATURE_OBJECT_PRIORITY,
     UI_FEATURE_RT_DOSE,
     UI_MODE_LABELS,
     describe_grid_limits,
@@ -707,6 +708,9 @@ class DICOMATOR_OT_export_dicom(Operator):
             'modality_key': modality_key,
             'dicom_modality': "MR" if modality_key in MRI_MODALITIES else "CT",
             'frames': frames,
+            # Plain image exports sample the exact current animation time;
+            # a configured 4D range deliberately samples integer frames.
+            'subframe': 0.0 if four_d_export_enabled(props) else float(context.scene.frame_subframe),
             'apply_modifiers': bool(getattr(props, "apply_modifiers", True)),
             # One timestamp for the whole export so Study/Series/Content
             # dates and times agree across every co-exported object.
@@ -723,25 +727,22 @@ class DICOMATOR_OT_export_dicom(Operator):
             self._timer = window_manager.event_timer_add(0.02, window=context.window)
             window_manager.modal_handler_add(self)
         except Exception as exc:
-            if self._timer is not None:
-                window_manager.event_timer_remove(self._timer)
-                self._timer = None
-            self._job.close()
-            self._job = None
-            self._staging_dir = None
-            self._final_output_dir = None
-            shutil.rmtree(staging_dir, ignore_errors=True)
-            context.workspace.status_text_set(None)
-            window_manager.progress_end()
-            self.report({'ERROR'}, f"Cannot start background export: {exc}")
+            finish_error = self._finish(context, commit=False)
+            message = f"Cannot start background export: {exc}"
+            if finish_error:
+                message += f"; {finish_error}"
+            self.report({'ERROR'}, message)
             return {'CANCELLED'}
         DICOMATOR_OT_export_dicom._running = True
         return {'RUNNING_MODAL'}
 
     def modal(self, context: bpy.types.Context, event: bpy.types.Event):  # pragma: no cover - Blender runtime
         if event.type == 'ESC':
-            self._finish(context, commit=False)
-            self.report({'WARNING'}, "DICOM export cancelled")
+            finish_error = self._finish(context, commit=False)
+            if finish_error:
+                self.report({'ERROR'}, finish_error)
+            else:
+                self.report({'WARNING'}, "DICOM export cancelled")
             return {'CANCELLED'}
         if event.type != 'TIMER':
             return {'RUNNING_MODAL'}
@@ -784,7 +785,9 @@ class DICOMATOR_OT_export_dicom(Operator):
 
         if not DICOMATOR_OT_export_dicom._running and self._job is None:
             return
-        self._finish(context, commit=False)
+        finish_error = self._finish(context, commit=False)
+        if finish_error:
+            self.report({'ERROR'}, finish_error)
 
     def _finish(
         self,
@@ -794,13 +797,22 @@ class DICOMATOR_OT_export_dicom(Operator):
     ) -> str | None:  # pragma: no cover - Blender runtime
         DICOMATOR_OT_export_dicom._running = False
         window_manager = context.window_manager
-        if self._timer is not None:
-            window_manager.event_timer_remove(self._timer)
-            self._timer = None
-        if self._job is not None:
+        errors: list[str] = []
+        timer, self._timer = self._timer, None
+        job, self._job = self._job, None
+        if timer is not None:
+            try:
+                window_manager.event_timer_remove(timer)
+            except Exception as exc:
+                errors.append(f"timer cleanup: {exc}")
+        if job is not None:
             # Closing the generator runs its finally blocks (frame restore).
-            self._job.close()
-            self._job = None
+            # A removed scene/window can make those blocks fail. The staging
+            # directory and UI progress must still be cleaned up afterwards.
+            try:
+                job.close()
+            except Exception as exc:
+                errors.append(f"job cleanup: {exc}")
         staging_dir = self._staging_dir
         final_output_dir = self._final_output_dir
         self._staging_dir = None
@@ -812,22 +824,32 @@ class DICOMATOR_OT_export_dicom(Operator):
                 _finalize_atomic_output_directory(
                     staging_dir,
                     final_output_dir,
-                    commit=commit,
+                    commit=commit and not errors,
                 )
         except Exception as exc:
+            errors.append(f"output cleanup: {exc}")
             if staging_dir and os.path.isdir(staging_dir):
-                shutil.rmtree(staging_dir, ignore_errors=True)
-            return f"Could not finalize DICOM export: {exc}"
+                try:
+                    shutil.rmtree(staging_dir)
+                except Exception as cleanup_exc:
+                    errors.append(f"staging cleanup: {cleanup_exc}")
         finally:
-            context.workspace.status_text_set(None)
-            window_manager.progress_end()
-        return None
+            try:
+                context.workspace.status_text_set(None)
+            except Exception as exc:
+                errors.append(f"status cleanup: {exc}")
+            try:
+                window_manager.progress_end()
+            except Exception as exc:
+                errors.append(f"progress cleanup: {exc}")
+        return f"Could not finalize DICOM export: {'; '.join(errors)}" if errors else None
 
     def _export_job(self, context: bpy.types.Context, config: dict) -> Generator[float, None, dict[str, str]]:
         """Generator that performs the full export, yielding 0..1 progress."""
 
         props = config['props']
         frames: list[int] = config['frames']
+        subframe = float(config.get('subframe', 0.0))
         num_phases = len(frames)
         voxel_size_m: tuple[float, float, float] = config['voxel_size_m']
         apply_modifiers: bool = config['apply_modifiers']
@@ -877,7 +899,7 @@ class DICOMATOR_OT_export_dicom(Operator):
         if num_phases == 1:
             frame_before_prepare = context.scene.frame_current
             subframe_before_prepare = context.scene.frame_subframe
-            context.scene.frame_set(int(frames[0]), subframe=0.0)
+            context.scene.frame_set(int(frames[0]), subframe=subframe)
             try:
                 prepared_geometry = yield from _run_subtask(
                     prepare_object_geometry_iter(
@@ -993,7 +1015,7 @@ class DICOMATOR_OT_export_dicom(Operator):
                 type_span = (phase_end - phase_start) / max(1, num_active)
                 slot = 0
 
-                context.scene.frame_set(frame, subframe=0.0)
+                context.scene.frame_set(frame, subframe=subframe)
                 depsgraph = context.evaluated_depsgraph_get()
                 yield phase_start
 
@@ -1027,6 +1049,7 @@ class DICOMATOR_OT_export_dicom(Operator):
                             background_value=background_value,
                             messages=voxel_messages,
                             prepared=prepared_geometry,
+                            use_object_priority=ui_feature_visible(props, UI_FEATURE_OBJECT_PRIORITY),
                         ),
                         t_start,
                         t_start + type_span * 0.45,
@@ -1114,6 +1137,7 @@ class DICOMATOR_OT_export_dicom(Operator):
                                     background_value=AIR_DENSITY,
                                     prepared=prepared_geometry,
                                     value_for_object=_drr_hu_for_mr_export,
+                                    use_object_priority=ui_feature_visible(props, UI_FEATURE_OBJECT_PRIORITY),
                                 ),
                                 progress_start,
                                 progress_start + (write_start + type_span - progress_start) * 0.5,

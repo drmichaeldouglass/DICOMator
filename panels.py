@@ -399,6 +399,8 @@ class VIEW3D_PT_dicomator_per_object_hu(Panel):
                 row.prop(obj, "dicomator_hu", text="HU")
                 if show_priority:
                     col.prop(obj, "dicomator_priority", text="Overlap Priority")
+                elif getattr(obj, "dicomator_priority", 0):
+                    col.label(text="Stored overlap priority inactive in Basic mode", icon='INFO')
 
             elif not show_object_types:
                 col.label(text=f"Not exported in {_mode_label(props)} mode", icon='INFO')

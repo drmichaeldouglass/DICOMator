@@ -37,7 +37,7 @@ Sample outputs produced by the add-on:
   - **Basic** – image series only: material presets and per-object intensities, voxel resolution, patient/series metadata, and the export folder
   - **Intermediate** – adds the **Artifacts** sub-panel, 4D/time-series export, and per-object overlap priority
   - **Advanced** – adds every remaining setting: output selection (Image/DRR/Dose/Structures), per-object DICOM type and ROI type, DRR and RT Dose settings, and the oversized-grid override
-  - Settings a mode hides keep their stored values but are **not applied** to the export; anything switched on and currently inactive is listed in the panel and reported when the export starts
+  - Settings a mode hides keep their stored values but are **not applied** to the export; anything switched on and currently inactive is listed in the panel and reported when the export starts. Basic mode ignores stored overlap priorities and resolves overlapping image meshes by name; non-zero inactive priorities are identified in the Objects panel.
 - **Per-object DICOM type and intensities**
   - Each selected mesh is tagged as **Image**, **RT Dose**, or **RT Structure** via the Objects panel
   - Image objects: set HU/intensity value or pick a tissue preset; an explicit overlap priority controls which mesh wins
@@ -49,7 +49,7 @@ Sample outputs produced by the add-on:
   - Selecting a preset populates that object's intensity automatically, while `Custom` leaves the manually entered value untouched
   - Changing the modality re-applies every preset intensity in the scene
 - **Single-phase or 4D export**
-  - Export the current frame or a range of frames (timeline or custom range)
+  - Export the exact current animation time, including fractional frames, or a range of integer frames (timeline or custom range)
   - One `SeriesInstanceUID` per phase; phases are written as separate series with temporal DICOM tags (`NumberOfTemporalPositions`, `TemporalPositionIndex`, `TemporalPositionIdentifier`)
   - Timeline advances during 4D export and a fixed padded bounding box keeps grids aligned between phases
 - **Camera-based DRR generation**

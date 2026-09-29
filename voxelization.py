@@ -88,11 +88,11 @@ def _resolve_voxel_size(voxel_size: VoxelSize | float) -> Tuple[float, float, fl
     return resolve_positive_voxel_size(voxel_size)
 
 
-def _object_priority_key(obj: Object) -> tuple[int, str, str]:
+def _object_priority_key(obj: Object, *, use_object_priority: bool = True) -> tuple[int, str, str]:
     """Sort low-priority objects first so higher priorities overwrite them."""
 
     return (
-        int(getattr(obj, "dicomator_priority", 0)),
+        int(getattr(obj, "dicomator_priority", 0)) if use_object_priority else 0,
         obj.name.casefold(),
         obj.name,
     )
@@ -362,6 +362,7 @@ def _voxelize_objects_iter(
     label: str,
     messages: Optional[list[str]] = None,
     prepared: Optional[dict[str, PreparedGeometry]] = None,
+    use_object_priority: bool = True,
 ) -> VoxelizeGenerator:
     """Shared ray-casting voxelizer.
 
@@ -430,7 +431,9 @@ def _voxelize_objects_iter(
 
     grid = np.full((width, height, depth), _grid_value(background_value), dtype=dtype)
 
-    sorted_objects = sorted(objects, key=_object_priority_key)
+    sorted_objects = sorted(
+        objects, key=lambda obj: _object_priority_key(obj, use_object_priority=use_object_priority)
+    )
     def _skip(reason: str) -> None:
         LOGGER.warning(reason)
         if messages is not None:
@@ -653,6 +656,7 @@ def voxelize_objects_to_hu_iter(
     messages: Optional[list[str]] = None,
     prepared: Optional[dict[str, PreparedGeometry]] = None,
     value_for_object: Optional[Callable[[Object], float]] = None,
+    use_object_priority: bool = True,
 ) -> VoxelizeGenerator:
     """Generator variant of :func:`voxelize_objects_to_hu`.
 
@@ -662,6 +666,8 @@ def voxelize_objects_to_hu_iter(
     ``prepared`` reuses geometry from :func:`prepare_object_geometry_iter`.
     ``value_for_object`` overrides the per-object value (default: the mesh's
     ``dicomator_hu``); results are clamped to the int16 HU range either way.
+    ``use_object_priority=False`` ignores stored priorities, resolving overlaps
+    by name alone for modes that hide the priority control.
     """
     def hu_for_object(obj: Object) -> float:
         if value_for_object is not None:
@@ -684,6 +690,7 @@ def voxelize_objects_to_hu_iter(
         label="HU",
         messages=messages,
         prepared=prepared,
+        use_object_priority=use_object_priority,
     )
 
 

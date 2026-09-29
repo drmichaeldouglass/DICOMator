@@ -189,6 +189,22 @@ def _voxelize_slab(hu_value: float) -> np.ndarray:
     return grid
 
 
+@pytest.mark.parametrize("use_priority, expected", [(True, 100), (False, 250)])
+def test_hidden_priority_can_be_disabled_without_changing_objects(use_priority, expected):
+    objects = [
+        SimpleNamespace(name="A", dicomator_hu=100, dicomator_priority=10),
+        SimpleNamespace(name="Z", dicomator_hu=250, dicomator_priority=0),
+    ]
+    bounds = (0.0, 0.002, 0.0, 0.002, 0.0, 0.002)
+    grid, _, _ = voxelization._drive(voxelization.voxelize_objects_to_hu_iter(
+        objects, voxel_size=0.001, padding=0, bbox_override=bounds,
+        prepared={obj.name: (_SlabBVH(0.0, 0.002), bounds) for obj in objects},
+        use_object_priority=use_priority,
+    ), None)
+    assert np.all(grid == expected)
+    assert objects[0].dicomator_priority == 10
+
+
 @pytest.mark.parametrize(
     ("hu_value", "expected"),
     [(50.7, 51), (-75.6, -76), (-0.9, -1), (300.4, 300), (1100.0, 1100)],

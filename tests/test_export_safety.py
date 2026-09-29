@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from datetime import datetime
 
+import numpy as np
 import pytest
 
 from conftest import REPO_ROOT, load_module
@@ -237,3 +239,138 @@ def test_mr_drr_attenuation_comes_from_ct_presets():
     assert operators._drr_ct_number_for_object(bone) == constants.MATERIAL_INTENSITIES["CORTICAL_BONE"]["CT"]
     assert operators._drr_ct_number_for_object(custom) is None
     assert operators._drr_hu_for_mr_export(custom) == 0.0
+
+
+@pytest.mark.parametrize("mode, export_4d, expected_subframe, use_priority", [
+    ("BASIC", True, 0.375, False),
+    ("INTERMEDIATE", False, 0.375, True),
+    ("ADVANCED", True, 0.0, True),
+])
+def test_export_job_samples_current_subframe_and_mode_priority(
+    tmp_path, monkeypatch, mode, export_4d, expected_subframe, use_priority,
+):
+    assert constants.ensure_pydicom_available()
+    class Scene:
+        frame_current = 7
+        frame_subframe = 0.375
+
+        def frame_set(self, frame, subframe=0.0):
+            self.frame_current = frame
+            self.frame_subframe = subframe
+
+    scene = Scene()
+    context = SimpleNamespace(scene=scene, evaluated_depsgraph_get=lambda: None)
+    props = _props(ui_mode=mode, export_4d=export_4d, series_description="Test",
+                   patient_name="Test", patient_id="1", patient_sex="O", patient_position="HFS")
+    sampled = []
+    priorities = []
+
+    def non_manifold(*args, **kwargs):
+        yield 1, 1
+        return []
+
+    def prepare(*args, **kwargs):
+        sampled.append(scene.frame_subframe)
+        yield 1, 1
+        return {"Cube": (None, (0, 0.002, 0, 0.002, 0, 0.002))}
+
+    def voxelize(*args, **kwargs):
+        sampled.append(scene.frame_subframe)
+        priorities.append(kwargs.get("use_object_priority", True))
+        yield 1, 1
+        return np.zeros((3, 3, 3), dtype=np.int16), operators.Vector((0, 0, 0)), (3, 3, 3)
+
+    monkeypatch.setattr(operators, "_non_manifold_names_iter", non_manifold)
+    monkeypatch.setattr(operators, "prepare_object_geometry_iter", prepare)
+    monkeypatch.setattr(operators, "voxelize_objects_to_hu_iter", voxelize)
+    config = dict(props=props, frames=[7], subframe=expected_subframe,
+                  voxel_size_m=(0.002,) * 3, lateral_mm=2, axial_mm=2,
+                  apply_modifiers=False, output_dir=str(tmp_path), final_output_dir=str(tmp_path),
+                  dicom_modality="CT", modality_key="CT", export_image_series=True,
+                  export_drr=False, export_rtdose=False, export_rtstruct=False,
+                  ct_objects=[object()], dose_objects=[], struct_objects=[],
+                  export_objects=[object()], study_datetime=datetime(2026, 1, 1))
+    operator = SimpleNamespace(report=lambda *args: None)
+    list(operators.DICOMATOR_OT_export_dicom._export_job(operator, context, config))
+    assert sampled == [expected_subframe, expected_subframe]
+    assert priorities == [use_priority]
+    assert (scene.frame_current, scene.frame_subframe) == (7, 0.375)
+
+
+@pytest.mark.parametrize("failure", ["timer", "job"])
+def test_finish_releases_every_resource_even_when_cleanup_raises(tmp_path, failure):
+    final_path, staging = operators._prepare_atomic_output_directory(str(tmp_path / "export"))
+    Path(staging, "partial.dcm").write_bytes(b"partial")
+    cleaned = []
+
+    def remove_timer(timer):
+        cleaned.append("timer")
+        if failure == "timer":
+            raise RuntimeError("timer already removed")
+
+    def job():
+        try:
+            yield 0.0
+        finally:
+            cleaned.append("job")
+            if failure == "job":
+                raise RuntimeError("frame restore failed")
+
+    operator = operators.DICOMATOR_OT_export_dicom()
+    operator._timer = object()
+    operator._job = job()
+    next(operator._job)
+    operator._staging_dir = staging
+    operator._final_output_dir = final_path
+    operators.DICOMATOR_OT_export_dicom._running = True
+    context = SimpleNamespace(
+        window_manager=SimpleNamespace(event_timer_remove=remove_timer,
+                                       progress_end=lambda: cleaned.append("progress")),
+        workspace=SimpleNamespace(status_text_set=lambda value: cleaned.append("status")),
+    )
+    error = operator._finish(context, commit=True)
+    assert error
+    assert cleaned == ["timer", "job", "status", "progress"]
+    assert operator._job is operator._timer is operator._staging_dir is None
+    assert not operators.DICOMATOR_OT_export_dicom._running
+    assert not Path(staging).exists()
+    assert not Path(final_path).exists()
+
+
+@pytest.mark.parametrize("mode, expected_subframe", [("BASIC", 0.375), ("ADVANCED", 0.0)])
+def test_execute_snapshots_subframe_and_cleans_up_failed_start(tmp_path, monkeypatch, mode, expected_subframe):
+    props = _props(ui_mode=mode, export_4d=True, use_timeline_range=False,
+                   frame_start=7, frame_end=7, frame_step=1,
+                   export_directory=str(tmp_path / "export"))
+    captured = []
+    reports = []
+
+    def export_job(self, context, config):
+        captured.append(config)
+        return (value for value in ())
+
+    def fail_timer(*args, **kwargs):
+        raise RuntimeError("window closed")
+
+    def fail_progress_end():
+        raise RuntimeError("progress unavailable")
+
+    monkeypatch.setattr(operators, "resolve_output_directory", lambda path: path)
+    monkeypatch.setattr(operators.DICOMATOR_OT_export_dicom, "_export_job", export_job)
+    mesh = SimpleNamespace(type="MESH", name="Cube", dicomator_object_type="CT")
+    context = SimpleNamespace(
+        scene=SimpleNamespace(dicomator_props=props, frame_current=7, frame_subframe=0.375),
+        selected_objects=[mesh], active_object=mesh, window=object(),
+        window_manager=SimpleNamespace(progress_begin=lambda *args: None,
+                                       event_timer_add=fail_timer, progress_end=fail_progress_end),
+        workspace=SimpleNamespace(status_text_set=lambda value: None),
+    )
+    operator = operators.DICOMATOR_OT_export_dicom()
+    operator.report = lambda level, message: reports.append(message)
+    assert operator.execute(context) == {'CANCELLED'}
+    assert captured[0]['subframe'] == expected_subframe
+    assert not Path(captured[0]['output_dir']).exists()
+    assert operator._job is operator._staging_dir is None
+    assert not operators.DICOMATOR_OT_export_dicom._running
+    assert "window closed" in reports[-1]
+    assert "progress unavailable" in reports[-1]
