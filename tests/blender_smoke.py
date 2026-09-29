@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import bpy
 import numpy as np
@@ -15,6 +16,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT.parent))
 
 import DICOMator  # noqa: E402
 from DICOMator import constants  # noqa: E402
+from DICOMator.operators import DICOMATOR_OT_export_dicom  # noqa: E402
 
 
 def _assert_registration_cycle() -> None:
@@ -126,12 +128,73 @@ def _assert_hollow_rtstruct_export() -> None:
         DICOMator.unregister()
 
 
+def _assert_animated_export_and_mode_priority() -> None:
+    """Run the operator pipeline on overlapping animated Blender meshes."""
+    DICOMator.register()
+    scene = bpy.context.scene
+    saved_frame, saved_subframe = scene.frame_current, scene.frame_subframe
+    try:
+        meshes = []
+        for name, hu, priority in (("A", 100, 10), ("Z", 250, 0)):
+            bpy.ops.mesh.primitive_cube_add(size=0.02)
+            cube = bpy.context.active_object
+            cube.name = name
+            cube.dicomator_hu, cube.dicomator_priority = hu, priority
+            cube.location.x = 0.0
+            cube.keyframe_insert(data_path="location", frame=1)
+            cube.location.x = 0.02
+            cube.keyframe_insert(data_path="location", frame=2)
+            meshes.append(cube)
+        scene.frame_set(1, subframe=0.375)
+        expected_x_mm = (meshes[0].matrix_world.translation.x - 0.01 - 0.001) * 1000
+        props = scene.dicomator_props
+        props.export_4d = False
+        for mode, expected_hu in (("BASIC", 250), ("INTERMEDIATE", 100)):
+            with tempfile.TemporaryDirectory(prefix="dicomator-animation-smoke-") as parent:
+                props.ui_mode = mode
+                props.export_directory = str(Path(parent) / "export")
+                context = SimpleNamespace(
+                    scene=scene, selected_objects=meshes, active_object=meshes[0], window=None,
+                    evaluated_depsgraph_get=bpy.context.evaluated_depsgraph_get,
+                    workspace=SimpleNamespace(status_text_set=lambda value: None),
+                    window_manager=SimpleNamespace(
+                        progress_begin=lambda *args: None, progress_end=lambda: None,
+                        event_timer_add=lambda *args, **kwargs: object(),
+                        event_timer_remove=lambda timer: None, modal_handler_add=lambda operator: None,
+                    ),
+                )
+                operator = SimpleNamespace(report=lambda *args: None, _timer=None)
+                operator._export_job = lambda ctx, config: DICOMATOR_OT_export_dicom._export_job(
+                    operator, ctx, config
+                )
+                assert DICOMATOR_OT_export_dicom.execute(operator, context) == {'RUNNING_MODAL'}
+                try:
+                    while True:
+                        next(operator._job)
+                except StopIteration as stop:
+                    assert "error" not in stop.value, stop.value
+                finally:
+                    error = DICOMATOR_OT_export_dicom._finish(operator, context, commit=True)
+                assert error is None, error
+                files = sorted(Path(props.export_directory).glob("CT_Slice_*.dcm"))
+                assert files
+                slices = [pydicom.dcmread(path) for path in files]
+                assert abs(float(slices[0].ImagePositionPatient[0]) - expected_x_mm) < 1e-4
+                assert max(int(ds.pixel_array.max()) for ds in slices) == expected_hu
+                assert scene.frame_current == 1 and abs(scene.frame_subframe - 0.375) < 1e-6
+                assert meshes[0].dicomator_priority == 10
+    finally:
+        scene.frame_set(saved_frame, subframe=saved_subframe)
+        DICOMator.unregister()
+
+
 def main() -> None:
     assert constants.ensure_pydicom_available(), constants.get_pydicom_error()
     _assert_failed_registration_rolls_back()
     _assert_registration_cycle()
     _assert_cube_ct_export()
     _assert_hollow_rtstruct_export()
+    _assert_animated_export_and_mode_priority()
     print(f"DICOMator Blender smoke test passed in Blender {bpy.app.version_string}")
 
 
