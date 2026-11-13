@@ -212,7 +212,13 @@ def _draw_export_action(layout: bpy.types.UILayout, context: Context) -> None:
         layout.label(text="Choose at least one output", icon='INFO')
         return
 
-    selected_meshes = _selected_meshes(context)
+    # The operator exports selected meshes only; the active-object fallback of
+    # _selected_meshes() is for the property panels, not for this check, or
+    # the button would show for an active-but-deselected mesh and then fail.
+    selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+    if not selected_meshes:
+        layout.label(text="Select a mesh", icon='INFO')
+        return
     counts = _export_type_counts(selected_meshes)
     if (outputs["image_series"] or outputs["drr"]) and not counts["CT"]:
         layout.label(text="No image mesh selected", icon='ERROR')

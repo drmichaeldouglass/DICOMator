@@ -74,19 +74,35 @@ def _ray_box_intersections(
     return entry, exit_, valid
 
 
+#: Line integral ``L = sum(mu * dl)`` (dimensionless) mapped to the top of the
+#: uint16 range by the fixed 4D mapping. 40 is about 2 m of water at the default
+#: 20 m^-1, so no patient path saturates, while one grey level is still only
+#: ~6e-4 attenuation lengths (2 mm of bone is ~0.04, i.e. ~65 levels).
+FIXED_MAX_LINE_INTEGRAL = 40.0
+
+
 def _normalize_projection(line_integrals: np.ndarray, fixed: bool = False) -> np.ndarray:
     """Map line integrals into a 16-bit display-ready DRR image.
 
-    When ``fixed`` is True the physical absorption fraction ``1 - exp(-L)``
-    is mapped directly onto the uint16 range without percentile stretching,
-    so intensities stay comparable across 4D phases.
+    Pixel values are proportional to the line integral ``L``, i.e. to
+    ``-ln(I / I0)``, which is what a radiograph's optical density tracks and
+    how DRRs are conventionally displayed. Mapping the absorbed fraction
+    ``1 - exp(-L)`` instead would saturate: a 30 cm patient already has
+    ``L`` ~ 6, where that curve is flat, so bone and soft tissue would differ
+    by only a few dozen of the 65535 grey levels.
+
+    When ``fixed`` is True ``L`` is scaled by the constant
+    :data:`FIXED_MAX_LINE_INTEGRAL` without percentile stretching, so
+    intensities stay comparable across 4D phases.
     """
 
-    transmission = np.exp(-line_integrals.astype(np.float32, copy=False))
-    radiograph = 1.0 - transmission
+    integrals = np.clip(line_integrals.astype(np.float32, copy=False), 0.0, None)
 
     if fixed:
-        return np.round(np.clip(radiograph, 0.0, 1.0) * 65535.0).astype(np.uint16, copy=False)
+        scaled = np.clip(integrals / np.float32(FIXED_MAX_LINE_INTEGRAL), 0.0, 1.0)
+        return np.round(scaled * 65535.0).astype(np.uint16, copy=False)
+
+    radiograph = integrals
 
     if not np.any(radiograph > 0.0):
         return np.zeros(radiograph.shape, dtype=np.uint16)

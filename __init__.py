@@ -17,9 +17,11 @@ for _module_name in (
     "artifacts",
     "dicom_export",
     "drr",
+    # Before the exporters and operators that import from it, so a reload
+    # never binds names from the previous version of this module.
+    "voxelization",
     "rtdose_export",
     "rtstruct_export",
-    "voxelization",
     "properties",
     "operators",
     "panels",

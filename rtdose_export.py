@@ -188,8 +188,12 @@ def export_rtdose_to_dicom(
     output_dir:
         Absolute path to the output directory.  Created if it does not
         exist.
-    patient_name, patient_id, patient_sex, patient_position:
+    patient_name, patient_id, patient_sex:
         Standard DICOM patient module attributes.
+    patient_position:
+        Accepted for call compatibility but not written: an RT Dose uses the
+        RT Series module (PS3.3 C.8.8.1), which has no Patient Position, so
+        the attribute is outside the IOD (as for the RT Structure Set).
     series_description:
         Human-readable label placed in ``SeriesDescription``.
     dose_type:
@@ -383,7 +387,6 @@ def export_rtdose_to_dicom(
         # --- Frame of reference ---
         ds.FrameOfReferenceUID = frame_of_reference_uid
         ds.PositionReferenceIndicator = ""
-        ds.PatientPosition = str(patient_position)
 
         # --- General image / multi-frame ---
         ds.InstanceNumber = "1"

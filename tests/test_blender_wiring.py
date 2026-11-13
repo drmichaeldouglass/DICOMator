@@ -226,3 +226,33 @@ def test_register_and_unregister_are_symmetric(object_properties):
     _register, _, unregister = entry_point.partition("def unregister()")
     for name in object_properties | {SCENE_POINTER}:
         assert f"bpy.types.Object.{name}" in unregister or f"bpy.types.Scene.{name}" in unregister, name
+
+
+def test_reload_order_follows_intra_package_imports():
+    """``__init__`` reloads submodules in a fixed order when the add-on is
+    re-enabled. A module reloaded before one it imports from would bind the
+    previous version's names (or fail on a newly added one)."""
+
+    tree = ast.parse((ROOT / "__init__.py").read_text())
+    order: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.For) and isinstance(node.iter, ast.Tuple):
+            order = [element.value for element in node.iter.elts]
+            break
+    assert order, "reload tuple not found in __init__.py"
+
+    for position, module in enumerate(order):
+        source = ast.parse((ROOT / f"{module}.py").read_text())
+        dependencies = {
+            node.module
+            for node in ast.walk(source)
+            if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module
+        }
+        dependencies |= {
+            alias.name
+            for node in ast.walk(source)
+            if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module is None
+            for alias in node.names
+        }
+        for dependency in dependencies & set(order):
+            assert order.index(dependency) < position, f"{module} is reloaded before {dependency}"

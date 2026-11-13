@@ -7,10 +7,13 @@ Algorithm
 ---------
 For each Z plane in the dose/CT grid, a bmesh copy of each structure mesh is
 bisected using ``bmesh.ops.bisect_plane``.  The resulting cut edges are
-graph-walked to recover ordered closed loops. ROIs in which one loop lies
-entirely inside another on some plane (a cavity) use ``CLOSEDPLANAR_XOR``
-throughout to preserve the hole independently of loop winding; all other ROIs,
-including ones with several separate loops, use ``CLOSED_PLANAR``.
+graph-walked to recover ordered closed loops. Whether a loop nested inside
+another is a hole is decided in 3D, exactly as the voxelizer decides it: only
+a mesh with a cavity (a closed shell inside another shell) keeps nested loops,
+and those ROIs use ``CLOSEDPLANAR_XOR`` throughout to preserve the hole
+independently of loop winding. For any other mesh a loop lying inside another
+is an overlapping solid that adds nothing to the union, so it is dropped and
+the ROI uses ``CLOSED_PLANAR``.
 
 Coordinate convention
 ---------------------
@@ -39,6 +42,7 @@ import bpy
 import numpy as np
 
 from . import constants as shared_constants
+from .voxelization import object_has_cavity
 from .constants import (
     RTSTRUCT_SOP_CLASS,
     apply_synthetic_metadata,
@@ -411,6 +415,39 @@ def _has_nested_loops(loops: Sequence[Sequence[Sequence[float]]]) -> bool:
     return False
 
 
+def _drop_loops_inside_other_loops(
+    loops: Sequence[Sequence[Sequence[float]]],
+) -> list:
+    """Remove loops lying entirely inside another loop on the same plane.
+
+    Used for meshes without a 3D cavity: there a nested loop is the cut of a
+    solid overlapping a larger one (an organ joined into a bigger mesh), so
+    it adds nothing to the union the voxelizer fills. Keeping it would make
+    a reader's even/odd or XOR rule carve it out as a hole. Loops are visited
+    largest first, so a duplicate of a kept loop cannot remove its original.
+    """
+    def area(loop) -> float:
+        xy = np.asarray(loop, dtype=np.float64)[:, :2]
+        x, y = xy[:, 0], xy[:, 1]
+        return 0.5 * abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
+
+    candidates = sorted((loop for loop in loops if len(loop) >= 3), key=area, reverse=True)
+    kept: list = []
+    kept_xy: list[np.ndarray] = []
+    for loop in candidates:
+        xy = np.asarray(loop, dtype=np.float64)[:, :2]
+        step = max(1, len(xy) // _NESTING_SAMPLE_POINTS)
+        samples = xy[::step]
+        if any(
+            all(_point_in_loop(float(x), float(y), outer) for x, y in samples)
+            for outer in kept_xy
+        ):
+            continue
+        kept.append(loop)
+        kept_xy.append(xy)
+    return kept
+
+
 def build_rtstruct_dataset(
     roi_defs: Sequence[RoiDefinition],
     *,
@@ -608,7 +645,10 @@ def build_rtstruct_dataset(
                     contour_item.ContourImageSequence = [img_ref]
                 contour_sequence.append(contour_item)
 
-        roi_contour_item.ContourSequence = contour_sequence
+        # Contour Sequence is Type 3, but when present it must hold at least
+        # one item (PS3.3 C.8.8.6), so an ROI with no cross-sections omits it.
+        if contour_sequence:
+            roi_contour_item.ContourSequence = contour_sequence
         roi_contour_sequence.append(roi_contour_item)
 
     ds.ROIContourSequence = roi_contour_sequence
@@ -777,6 +817,11 @@ def export_rtstruct_to_dicom_iter(
                 next(subtask)
             except StopIteration as stop:
                 contours, dropped = stop.value
+                if not object_has_cavity(obj, depsgraph, apply_modifiers=apply_modifiers):
+                    contours = {
+                        z_m: _drop_loops_inside_other_loops(loops)
+                        for z_m, loops in contours.items()
+                    }
                 all_contours.append(contours)
                 if dropped:
                     warnings.append(

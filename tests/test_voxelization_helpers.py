@@ -341,12 +341,26 @@ class _Collection:
         buffer[:] = self._values
 
 
-def _mesh_object(name, boxes, hu=500.0):
+def _mesh_object(name, boxes, hu=500.0, split_faces=False, drop_faces=()):
+    """Mesh object made of axis-aligned boxes.
+
+    ``split_faces`` gives every face its own copies of its vertices, as a
+    hard-edged glTF import or an Edge Split modifier does. ``drop_faces``
+    removes faces (by index into the combined face list) to open holes.
+    """
     verts, polys = [], []
     for lo, hi in boxes:
-        box_verts, box_polys = _box(lo, hi, offset=len(verts))
-        verts.extend(box_verts)
-        polys.extend(box_polys)
+        box_verts, box_polys = _box(lo, hi)
+        for quad in box_polys:
+            if split_faces:
+                base = len(verts)
+                verts.extend(box_verts[i] for i in quad)
+                polys.append([base, base + 1, base + 2, base + 3])
+            else:
+                polys.append([i + len(verts) for i in quad])
+        if not split_faces:
+            verts.extend(box_verts)
+    polys = [poly for index, poly in enumerate(polys) if index not in set(drop_faces)]
     loop_start = np.cumsum([0] + [len(p) for p in polys[:-1]])
     loop_verts = [i for poly in polys for i in poly]
     data = SimpleNamespace(
@@ -360,9 +374,9 @@ def _mesh_object(name, boxes, hu=500.0):
     )
 
 
-def _voxelize_boxes(monkeypatch, boxes, kind="hu"):
+def _voxelize_boxes(monkeypatch, boxes, kind="hu", **mesh_options):
     monkeypatch.setattr(voxelization, "BVHTree", _TriangleBVH)
-    obj = _mesh_object("Joined", boxes)
+    obj = _mesh_object("Joined", boxes, **mesh_options)
     factory = getattr(voxelization, f"voxelize_objects_to_{kind}_iter")
     grid, _origin, _dims = voxelization._drive(
         factory([obj], voxel_size=0.01, padding=0, bbox_override=(0.0, 0.1, 0.0, 0.1, 0.0, 0.1)),
@@ -419,3 +433,69 @@ def test_polygon_islands_groups_connected_faces():
     polys = [[0, 1, 2], [2, 3, 0], [4, 5, 6], [6, 7, 4], [8, 9, 10]]
     islands = sorted(sorted(island.tolist()) for island in voxelization._polygon_islands(polys, 11))
     assert islands == [[0, 1], [2, 3], [4]]
+
+
+def test_split_vertex_cube_is_still_one_closed_solid(monkeypatch):
+    """Duplicated seam vertices must not break a closed surface into six
+    open faces that never pair up (the cube used to voxelize to nothing)."""
+    box = ((0.01, 0.01, 0.01), (0.06, 0.06, 0.06))
+    grid = _voxelize_boxes(monkeypatch, [box], split_faces=True)
+    np.testing.assert_array_equal(grid == 500, _box_mask(*box))
+
+
+def test_split_vertex_nested_shell_still_makes_a_hollow_object(monkeypatch):
+    outer = ((0.01, 0.01, 0.01), (0.09, 0.09, 0.09))
+    inner = ((0.03, 0.03, 0.03), (0.07, 0.07, 0.07))
+    grid = _voxelize_boxes(monkeypatch, [outer, inner], split_faces=True)
+    expected = _box_mask(*outer) & ~_box_mask(*inner)
+    np.testing.assert_array_equal(grid == 500, expected)
+
+
+def test_open_pieces_are_pooled_into_one_even_odd_surface(monkeypatch):
+    """A box whose side walls are missing still has its top and bottom faces;
+    pooled together they pair up and fill the column between them."""
+    box = ((0.01, 0.01, 0.01), (0.06, 0.06, 0.06))
+    _verts, quads = _box(*box)
+    horizontal = [
+        index for index, quad in enumerate(quads)
+        if len({_verts[i][2] for i in quad}) == 1
+    ]
+    walls = [index for index in range(len(quads)) if index not in horizontal]
+    grid = _voxelize_boxes(monkeypatch, [box], split_faces=True, drop_faces=walls)
+    np.testing.assert_array_equal(grid == 500, _box_mask(*box))
+
+
+def test_welded_ids_merge_coincident_vertices_only():
+    verts = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 1e-3]])
+    ids = voxelization._welded_vertex_ids(verts)
+    assert ids[0] == ids[2]
+    assert len({int(ids[0]), int(ids[1]), int(ids[3])}) == 3
+
+
+def test_open_edge_flags_follow_watertightness():
+    _verts, quads = _box((0.0, 0.0, 0.0), (1.0, 1.0, 1.0))
+    assert not voxelization._polygons_on_open_edges(quads).any()
+    assert voxelization._polygons_on_open_edges(quads[:-1]).sum() == 4
+
+
+def test_prepared_geometry_keeps_same_named_local_and_linked_objects_apart(monkeypatch):
+    """A local 'Body' and a library-linked 'Body' share ``name`` but not
+    ``name_full``; one must not be voxelized with the other's geometry."""
+    monkeypatch.setattr(voxelization, "BVHTree", _TriangleBVH)
+    local = _mesh_object("Body", [((0.01, 0.01, 0.01), (0.03, 0.03, 0.03))])
+    linked = _mesh_object("Body", [((0.06, 0.06, 0.06), (0.09, 0.09, 0.09))], hu=900.0)
+    local.name_full = "Body"
+    linked.name_full = "Body [anatomy.blend]"
+    prepared = voxelization._drive(
+        voxelization.prepare_object_geometry_iter([local, linked], None, apply_modifiers=False), None
+    )
+    assert set(prepared) == {"Body", "Body [anatomy.blend]"}
+    grid, _origin, _dims = voxelization._drive(
+        voxelization.voxelize_objects_to_hu_iter(
+            [local, linked], voxel_size=0.01, padding=0,
+            bbox_override=(0.0, 0.1, 0.0, 0.1, 0.0, 0.1), prepared=prepared,
+        ),
+        None,
+    )
+    np.testing.assert_array_equal(grid == 500, _box_mask((0.01, 0.01, 0.01), (0.03, 0.03, 0.03)))
+    np.testing.assert_array_equal(grid == 900, _box_mask((0.06, 0.06, 0.06), (0.09, 0.09, 0.09)))

@@ -46,6 +46,8 @@ def test_rtdose_roundtrip(tmp_path):
     assert ds.SpecificCharacterSet == "ISO_IR 192"
     assert "PositionReferenceIndicator" in ds
     assert "OperatorsName" in ds
+    # RT Series module (PS3.3 C.8.8.1) has no Patient Position.
+    assert "PatientPosition" not in ds
 
     scaling = float(ds.DoseGridScaling)
     recon = ds.pixel_array.astype(np.float64) * scaling  # (frames, rows, cols)
