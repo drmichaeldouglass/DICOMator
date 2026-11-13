@@ -80,12 +80,30 @@ def test_normalize_projection_zeros():
     assert not np.any(out)
 
 
-def test_normalize_projection_fixed_maps_absorption_directly():
-    integrals = np.full((4, 4), -float(np.log(0.75)), dtype=np.float32)  # 1-exp(-L) = 0.25
+def test_normalize_projection_fixed_is_linear_in_line_integral():
+    integrals = np.full((4, 4), 0.25 * drr.FIXED_MAX_LINE_INTEGRAL, dtype=np.float32)
     out = drr._normalize_projection(integrals, fixed=True)
     assert out.dtype == np.uint16
     expected = int(np.round(0.25 * 65535.0))
     assert np.all(np.abs(out.astype(np.int64) - expected) <= 1)
+
+
+def test_normalize_projection_keeps_bone_contrast_through_a_thick_body():
+    """2 cm of extra bone behind 30 cm of water must stay clearly visible.
+
+    The former ``1 - exp(-L)`` mapping saturated at body thicknesses and left
+    only ~50 grey levels between these two rays in both modes.
+    """
+
+    mu_water = 20.0  # m^-1
+    soft = mu_water * 0.30
+    bone = soft + 2.0 * mu_water * 0.02  # HU 1000 -> mu = 2 * mu_water
+    integrals = np.zeros((10, 10), dtype=np.float32)  # air around the body
+    integrals[2:8, 2:8] = soft
+    integrals[4:6, 4:6] = bone
+    for fixed in (False, True):
+        out = drr._normalize_projection(integrals, fixed=fixed).astype(np.int64)
+        assert out[4, 4] - out[2, 2] > 500, fixed
 
 
 def test_normalize_projection_percentile_spans_uint16_range():

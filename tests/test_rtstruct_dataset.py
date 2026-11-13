@@ -235,3 +235,64 @@ def test_crossing_loops_are_not_treated_as_a_cavity():
     a = [(0.0, 0.0, 0.0), (0.06, 0.0, 0.0), (0.06, 0.06, 0.0), (0.0, 0.06, 0.0)]
     b = [(0.03, 0.03, 0.0), (0.09, 0.03, 0.0), (0.09, 0.09, 0.0), (0.03, 0.09, 0.0)]
     assert not rtstruct_export._has_nested_loops([a, b])
+
+
+def _square(x0, y0, size, z=0.0):
+    return [(x0, y0, z), (x0 + size, y0, z), (x0 + size, y0 + size, z), (x0, y0 + size, z)]
+
+
+def test_loops_inside_other_loops_are_dropped_largest_first():
+    big = _square(0.0, 0.0, 0.1)
+    inner = _square(0.03, 0.03, 0.02)
+    apart = _square(0.2, 0.0, 0.05)
+    kept = rtstruct_export._drop_loops_inside_other_loops([inner, apart, big])
+    assert kept == [big, apart]
+
+
+def test_roi_without_contours_omits_the_empty_contour_sequence(tmp_path):
+    """A present Contour Sequence must hold at least one item (PS3.3 C.8.8.6)."""
+    ds, _, _ = _build(roi_defs=[("Thin", (0, 255, 0), "ORGAN", {_z_for_slice(1): []})])
+    output = tmp_path / "rs.dcm"
+    ds.save_as(output, enforce_file_format=True)
+    restored = pydicom.dcmread(output)
+    assert "ContourSequence" not in restored.ROIContourSequence[0]
+    assert len(restored.StructureSetROISequence) == 1
+
+
+@pytest.mark.parametrize("has_cavity, expected_types, expected_count", [
+    (False, {"CLOSED_PLANAR"}, 1),
+    (True, {"CLOSEDPLANAR_XOR"}, 2),
+])
+def test_nested_loops_follow_the_3d_cavity_decision(
+    tmp_path, monkeypatch, has_cavity, expected_types, expected_count
+):
+    """A lobe joined to a bigger solid can cut a loop inside the bigger loop on
+    some planes. Only a real 3D cavity (as the voxelizer decides) may turn it
+    into a hole; otherwise the image fills it and the ROI must too."""
+    from types import SimpleNamespace
+
+    z0 = _z_for_slice(0)
+    outer = _square(0.0, 0.0, 0.1, z0)
+    lobe = _square(0.03, 0.03, 0.02, z0)
+
+    def fake_extract(obj, z_positions_m, depsgraph, *, apply_modifiers=True):
+        yield 1, 1
+        return {float(z): ([outer, lobe] if abs(z - z0) < 1e-9 else []) for z in z_positions_m}, 0
+
+    monkeypatch.setattr(rtstruct_export, "_extract_contours_iter", fake_extract)
+    monkeypatch.setattr(rtstruct_export, "object_has_cavity", lambda *a, **k: has_cavity)
+    obj = SimpleNamespace(name="Body", material_slots=[], dicomator_roi_type="ORGAN")
+    generator = rtstruct_export.export_rtstruct_to_dicom_iter(
+        [obj], SimpleNamespace(z=BBOX_MIN_Z_M), (0.001, 0.001, VZ_M), 2, str(tmp_path), None,
+    )
+    while True:
+        try:
+            next(generator)
+        except StopIteration as stop:
+            result = stop.value
+            break
+    assert "error" not in result, result
+    restored = pydicom.dcmread(tmp_path / "RTStruct.dcm")
+    contours = restored.ROIContourSequence[0].ContourSequence
+    assert len(contours) == expected_count
+    assert {c.ContourGeometricType for c in contours} == expected_types

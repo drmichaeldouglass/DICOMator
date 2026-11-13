@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 
 import numpy as np
 
@@ -164,16 +165,93 @@ def _resize_bilinear(image: np.ndarray, out_shape: tuple[int, int]) -> np.ndarra
     return _remap_bilinear(image, coord0, coord1, fill=0.0)
 
 
-def _smooth_random_field(shape: tuple[int, ...], scale: float, rng: np.random.Generator) -> np.ndarray:
+def _axis_spacings(shape: tuple[int, ...], voxel_size: Sequence[float] | None) -> np.ndarray:
+    """Return per-axis voxel spacing (any unit; only ratios matter), default 1."""
+
+    if voxel_size is None:
+        return np.ones(len(shape), dtype=np.float64)
+    spacings = np.asarray([float(v) for v in voxel_size], dtype=np.float64)
+    if spacings.shape != (len(shape),) or not np.all(np.isfinite(spacings)) or np.any(spacings <= 0.0):
+        raise ValueError("voxel_size must give one positive spacing per axis")
+    return spacings
+
+
+def _largest_extent(shape: tuple[int, ...], spacings: np.ndarray) -> float:
+    """Physical extent of the longest axis of a volume (same unit as ``spacings``)."""
+
+    return float(max(n * s for n, s in zip(shape, spacings, strict=True)))
+
+
+def _area_resample(image: np.ndarray, out_shape: tuple[int, int]) -> np.ndarray:
+    """Resample a 2D image to ``out_shape`` by exact area averaging.
+
+    Each output pixel is the mean of the source area it covers (pixels are
+    treated as piecewise constant), so the integral of the image is kept.
+    Point-sampling interpolation instead skips whatever falls between sample
+    positions: a 2x2-voxel metal seed on a 1024 grid reduced to 256 could
+    vanish completely or appear at full strength depending on where it sat.
+    """
+
+    result = np.asarray(image, dtype=np.float64)
+    for axis, m in enumerate(out_shape):
+        n = result.shape[axis]
+        if m == n:
+            continue
+        moved = np.moveaxis(result, axis, -1)
+        cumulative = np.concatenate(
+            (np.zeros(moved.shape[:-1] + (1,)), np.cumsum(moved, axis=-1)), axis=-1
+        )
+        # Source coordinates of the output pixel edges; the running integral
+        # at a fractional edge adds the covered part of the pixel it splits.
+        edges = np.linspace(0.0, float(n), int(m) + 1)
+        index = np.minimum(np.floor(edges).astype(np.int64), n - 1)
+        integral = cumulative[..., index] + (edges - index) * moved[..., index]
+        resampled = np.diff(integral, axis=-1) * (float(m) / float(n))
+        result = np.moveaxis(resampled, -1, axis)
+    return result.astype(np.float32)
+
+
+def _centred_coordinates(
+    shape: tuple[int, ...],
+    voxel_size: Sequence[float] | None = None,
+) -> list[np.ndarray]:
+    """Per-axis voxel-centre coordinates, centred on the volume.
+
+    Coordinates span about -1 to 1 along the largest physical extent and use
+    the same physical unit on every axis, so a thin slab spans only a small
+    range around 0 (a single slice sits at 0, not at the edge -1).
+    """
+
+    spacings = _axis_spacings(shape, voxel_size)
+    half_extent = 0.5 * _largest_extent(shape, spacings)
+    return [
+        ((np.arange(size, dtype=np.float64) - (size - 1) / 2.0) * spacing / half_extent).astype(np.float32)
+        for size, spacing in zip(shape, spacings, strict=True)
+    ]
+
+
+def _smooth_random_field(
+    shape: tuple[int, ...],
+    scale: float,
+    rng: np.random.Generator,
+    voxel_size: Sequence[float] | None = None,
+) -> np.ndarray:
     """Return a smooth, zero-centred random field in roughly ``[-1, 1]``.
 
     Used to model spatially slowly-varying physical quantities such as the
     static-field (B0) inhomogeneity that drives MRI geometric distortion.
+
+    ``scale`` is the correlation length as a fraction of the volume's
+    *largest* physical extent, applied identically along every axis. Scaling
+    each axis by its own length instead would make a thin stack of slices
+    vary as fast across 4 slices as across the whole in-plane field of view.
     """
 
+    spacings = _axis_spacings(shape, voxel_size)
+    correlation_length = float(scale) * _largest_extent(shape, spacings)
     field = rng.normal(0.0, 1.0, size=shape).astype(np.float32, copy=False)
-    for axis, axis_len in enumerate(shape):
-        window = max(3, int(round(float(scale) * max(1, axis_len))))
+    for axis, spacing in enumerate(spacings):
+        window = max(3, int(round(correlation_length / float(spacing))))
         if window % 2 == 0:
             window += 1
         field = _moving_average_along_axis(field, window, axis)
@@ -350,6 +428,7 @@ def add_metal_artifacts(
         scale = work_cap / float(max(width, height))
     w0 = max(8, int(round(width * scale)))
     h0 = max(8, int(round(height * scale)))
+    path_scale = float(width) / float(w0)
     angles = np.linspace(0.0, math.pi, num_views, endpoint=False)
     g0, g1 = np.indices((w0, h0), dtype=np.float32)
     half_diag = 0.5 * float(math.hypot(w0, h0)) + 1e-3
@@ -388,7 +467,9 @@ def add_metal_artifacts(
         attn = (metal_excess / attn_reference).astype(np.float32, copy=False)
 
         # Optionally downsample the attenuation map for the projection loop.
-        attn_small = _resize_bilinear(attn, (w0, h0)) if (w0, h0) != (width, height) else attn
+        # Area averaging keeps the metal's integrated attenuation, so a small
+        # seed cannot fall between sample points and lose its streaks.
+        attn_small = _area_resample(attn, (w0, h0)) if (w0, h0) != (width, height) else attn
         attn_canvas = np.zeros(canvas_shape, dtype=np.float32)
         attn_canvas[pad0:pad0 + w0, pad1:pad1 + h0] = attn_small
 
@@ -396,7 +477,10 @@ def add_metal_artifacts(
         for angle in angles:
             rotated = _rotate_bilinear(attn_canvas, float(angle))
             # Line integral of metal along the rotated projection direction.
-            path = rotated.sum(axis=0)
+            # Expressed in full-resolution voxels, so the balance between the
+            # path-squared and starvation terms does not depend on the
+            # working-grid downsampling.
+            path = rotated.sum(axis=0) * path_scale
 
             # Beam hardening: dark (negative) error growing with path length.
             beam_hardening = -(path ** 2)
@@ -416,7 +500,7 @@ def add_metal_artifacts(
         # Radial decay away from the metal so distant streaks fade, controlled by
         # ``falloff``. Distance is measured from the metal centroid. Axis 0 of
         # the working slice is the volume's X/width axis, axis 1 is Y/height.
-        mask_small = _resize_bilinear(source_mask.astype(np.float32), (w0, h0)) > 0.25
+        mask_small = _area_resample(source_mask.astype(np.float32), (w0, h0)) > 0.0
         if np.any(mask_small):
             c0 = float(np.mean(g0[mask_small]))
             c1 = float(np.mean(g1[mask_small]))
@@ -721,6 +805,7 @@ def add_bias_field_shading(
     strength: float = 0.25,
     scale: float = 0.3,
     rng: GeneratorLike = None,
+    voxel_size: Sequence[float] | None = None,
 ) -> np.ndarray:
     """Apply a smooth intensity bias field to mimic MRI coil shading.
 
@@ -735,6 +820,10 @@ def add_bias_field_shading(
         Larger values produce slower spatial variation.
     rng:
         Optional seed or :class:`numpy.random.Generator` for deterministic bias.
+    voxel_size:
+        Optional per-axis voxel spacing (any unit). Distances are measured
+        physically, relative to the volume's largest extent, so a thin slab
+        or anisotropic voxels do not compress the coil profile along one axis.
 
     Returns
     -------
@@ -751,7 +840,7 @@ def add_bias_field_shading(
     if source.size == 0:
         return intensity_array
 
-    axes = [np.linspace(-1.0, 1.0, size, dtype=np.float32) for size in source.shape]
+    axes = _centred_coordinates(source.shape, voxel_size)
     # ``sparse=True`` returns broadcastable (W,1,1)/(1,H,1)/(1,1,D) views rather
     # than three dense coordinate volumes. The accumulation below broadcasts
     # identically, so the result is unchanged while the coil-field setup drops
@@ -764,17 +853,8 @@ def add_bias_field_shading(
         radius_sq += (coord - center_value) ** 2
     coil_field = np.exp(-0.5 * radius_sq / (coil_width**2)).astype(np.float32, copy=False)
 
-    random_field = generator.normal(0.0, 1.0, size=source.shape).astype(np.float32, copy=False)
-    for axis, axis_len in enumerate(source.shape):
-        window = max(3, int(round(scale * max(1, axis_len))))
-        if window % 2 == 0:
-            window += 1
-        random_field = _moving_average_along_axis(random_field, window, axis)
-    # Averaging shrinks the noise by roughly sqrt(window volume); rescale it to
-    # the same [-1, 1] span as the coil term so its 25% weight is real.
-    random_max = float(np.max(np.abs(random_field)))
-    if random_max > 0.0:
-        random_field /= random_max
+    # Rescaled to the same [-1, 1] span as the coil term so its 25% weight is real.
+    random_field = _smooth_random_field(source.shape, float(scale), generator, voxel_size)
 
     field = 0.75 * coil_field + 0.25 * random_field
     field -= float(np.mean(field))
@@ -875,6 +955,7 @@ def add_mri_geometric_distortion(
     b0_scale: float = 0.35,
     readout_axis: int = 1,
     rng: GeneratorLike = None,
+    voxel_size: Sequence[float] | None = None,
 ) -> np.ndarray:
     """Warp an MR volume to mimic geometric distortion.
 
@@ -914,6 +995,9 @@ def add_mri_geometric_distortion(
         In-plane axis of the frequency-encode direction: ``0`` (x) or ``1`` (y).
     rng:
         Optional seed or generator for the off-resonance field.
+    voxel_size:
+        Optional per-axis voxel spacing (any unit) so the off-resonance field
+        has the same physical smoothness along every axis.
 
     Returns
     -------
@@ -948,7 +1032,7 @@ def add_mri_geometric_distortion(
     base1 = c1 + grad_factor * rel1
 
     if b0_strength > 0.0:
-        b0_field = _smooth_random_field((width, height, depth), float(b0_scale), generator)
+        b0_field = _smooth_random_field((width, height, depth), float(b0_scale), generator, voxel_size)
     else:
         b0_field = None
 

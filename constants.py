@@ -359,6 +359,20 @@ ARTIFACT_FLAGS = (
     "enable_gibbs_ringing",
 )
 
+#: Artifacts that only exist for one family of modalities. Anything not
+#: listed here (noise, motion) applies to every modality.
+CT_ONLY_ARTIFACT_FLAGS = frozenset({
+    "enable_partial_volume",
+    "enable_metal_artifacts",
+    "enable_ring_artifacts",
+    "enable_poisson_noise",
+})
+MR_ONLY_ARTIFACT_FLAGS = frozenset({
+    "enable_bias_field",
+    "enable_geometric_distortion",
+    "enable_gibbs_ringing",
+})
+
 # ---------------------------------------------------------------------------
 # UI complexity modes
 # ---------------------------------------------------------------------------
@@ -473,12 +487,39 @@ def resolve_export_outputs(props) -> dict[str, bool]:
     return outputs
 
 
-def artifacts_enabled_for_props(props) -> bool:
-    """Return True when any artifact is enabled *and* exposed by the mode."""
+def active_artifact_flags(props) -> frozenset[str]:
+    """Return the artifact flags the export will actually apply.
 
-    return ui_feature_visible(props, UI_FEATURE_ARTIFACTS) and any(
-        bool(getattr(props, flag, False)) for flag in ARTIFACT_FLAGS
-    )
+    A flag counts only when the mode exposes artifacts, the flag is on, it
+    belongs to the selected modality (a stored MR bias field does nothing to
+    a CT export), and its amount is non-zero. The export operator builds its
+    stages from this set and the memory estimate reads it, so the two cannot
+    disagree about what will run.
+    """
+
+    if not ui_feature_visible(props, UI_FEATURE_ARTIFACTS):
+        return frozenset()
+    is_mri = getattr(props, "imaging_modality", MODALITY_CT) in MRI_MODALITIES
+    excluded = CT_ONLY_ARTIFACT_FLAGS if is_mri else MR_ONLY_ARTIFACT_FLAGS
+    active = {
+        flag
+        for flag in ARTIFACT_FLAGS
+        if flag not in excluded and bool(getattr(props, flag, False))
+    }
+    for flag, amount in (("enable_noise", "noise_std_dev_hu"), ("enable_poisson_noise", "poisson_scale")):
+        try:
+            value = float(getattr(props, amount, 0.0))
+        except (TypeError, ValueError):
+            value = 0.0
+        if not value > 0.0:
+            active.discard(flag)
+    return frozenset(active)
+
+
+def artifacts_enabled_for_props(props) -> bool:
+    """Return True when the export will apply at least one artifact."""
+
+    return bool(active_artifact_flags(props))
 
 
 def four_d_export_enabled(props) -> bool:
@@ -537,17 +578,20 @@ def estimate_peak_memory_bytes(
         # The int16 HU grid itself.
         image_bytes = 2
         if artifacts_enabled:
-            # Worst measured non-Gibbs generator: quantum (Poisson) noise on CT
-            # and coil bias-field shading on MR both peak at 36 B/voxel of
-            # temporaries. Stages run one at a time, so the worst one bounds
-            # the chain.
-            image_bytes += 36
+            # Stages run one at a time, but while one runs the chain still
+            # holds the voxelized grid (above) and the previous stage's int16
+            # output (2 B). The worst non-Gibbs stage, quantum (Poisson)
+            # noise, peaks at 40 B/voxel of temporaries, and the chain adds up
+            # to 0.15 B/voxel of per-slice buffers (metal streaks), hence one
+            # more byte. Measured: full CT chain 44.1 B/voxel including the
+            # grid, Poisson alone 42.0, MR bias field alone 38.0.
+            image_bytes += 2 + 40 + 1
         if gibbs_enabled:
             # Gibbs ringing transforms slabs of slices in complex128, which
-            # peaks at 56 B/voxel once a whole moderate volume fits one slab.
-            # Larger volumes are bounded by the slab cap instead, so this stays
-            # the worst case.
-            image_bytes += 20
+            # peaks at 56 B/voxel once a whole moderate volume fits one slab
+            # (larger volumes are bounded by the slab cap instead). Measured:
+            # full MR chain with Gibbs 60.0 B/voxel including the grid.
+            image_bytes += 56 - 40
         if export_drr:
             # The float32 attenuation volume plus the temporaries of the
             # HU-to-attenuation conversion.
@@ -569,14 +613,14 @@ def estimate_peak_memory_bytes_for_props(total_voxels: int, props) -> int:
     """
 
     outputs = resolve_export_outputs(props)
-    artifacts_enabled = artifacts_enabled_for_props(props)
+    active = active_artifact_flags(props) if outputs["image_series"] else frozenset()
     return estimate_peak_memory_bytes(
         total_voxels,
         export_image_series=outputs["image_series"],
         export_drr=outputs["drr"],
         export_rtdose=outputs["rtdose"],
-        artifacts_enabled=artifacts_enabled,
-        gibbs_enabled=artifacts_enabled and bool(getattr(props, "enable_gibbs_ringing", False)),
+        artifacts_enabled=bool(active),
+        gibbs_enabled="enable_gibbs_ringing" in active,
     )
 
 
@@ -744,6 +788,9 @@ __all__ = [
     "get_material_intensity",
     "apply_synthetic_metadata",
     "ARTIFACT_FLAGS",
+    "CT_ONLY_ARTIFACT_FLAGS",
+    "MR_ONLY_ARTIFACT_FLAGS",
+    "active_artifact_flags",
     "UI_MODE_BASIC",
     "UI_MODE_INTERMEDIATE",
     "UI_MODE_ADVANCED",

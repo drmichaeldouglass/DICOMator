@@ -40,10 +40,10 @@ from .constants import (
     AIR_DENSITY,
     MODALITY_CT,
     MRI_MODALITIES,
-    UI_FEATURE_ARTIFACTS,
     UI_FEATURE_OBJECT_PRIORITY,
     UI_FEATURE_RT_DOSE,
     UI_MODE_LABELS,
+    active_artifact_flags,
     describe_grid_limits,
     ensure_pydicom_available,
     estimate_peak_memory_bytes_for_props,
@@ -120,27 +120,28 @@ def _configured_artifact_stages(props, *, base_seed: int = 0, phase_index: int =
     def stage_rng(stage: str) -> np.random.Generator:
         return _artifact_stage_rng(base_seed, phase_index, stage)
 
-    if not ui_feature_visible(props, UI_FEATURE_ARTIFACTS):
-        # Basic mode hides the Artifacts panel, so stored toggles must not keep
-        # altering the exported images from behind a panel the user cannot see.
+    # Basic mode hides the Artifacts panel, so stored toggles must not keep
+    # altering the exported images from behind a panel the user cannot see;
+    # the same set gates artifacts by modality and drives the memory estimate.
+    active = active_artifact_flags(props)
+    if not active:
         return []
 
     stages: list = []
+    # Voxel spacing (mm) so smooth MR fields have one physical length scale.
+    lateral_mm = get_float_prop(props, "lateral_resolution_mm", 1.0)
+    axial_mm = get_float_prop(props, "axial_resolution_mm", 1.0)
+    voxel_size_mm = (
+        (lateral_mm, lateral_mm, axial_mm)
+        if lateral_mm > 0.0 and axial_mm > 0.0 and math.isfinite(lateral_mm + axial_mm)
+        else None
+    )
     modality = getattr(props, "imaging_modality", MODALITY_CT)
     if modality not in MRI_MODALITIES and modality != MODALITY_CT:
         modality = MODALITY_CT
     is_mri = modality in MRI_MODALITIES
-    is_ct = modality == MODALITY_CT
 
-    if getattr(props, "enable_partial_volume", False) and is_ct:
-        kernel = max(1, _get_int_prop(props, "partial_volume_kernel", 3))
-        if kernel % 2 == 0:
-            kernel += 1
-        iterations = max(1, _get_int_prop(props, "partial_volume_iterations", 1))
-        mix = max(0.0, min(1.0, get_float_prop(props, "partial_volume_mix", 1.0)))
-        stages.append(partial(apply_partial_volume_effect, kernel_size=kernel, iterations=iterations, mix=mix))
-
-    if getattr(props, "enable_metal_artifacts", False) and is_ct:
+    if "enable_metal_artifacts" in active:
         intensity = max(0.0, get_float_prop(props, "metal_intensity", 400.0))
         threshold = get_float_prop(props, "metal_density_threshold", 2000.0)
         streaks = max(0, _get_int_prop(props, "metal_num_streaks", 10))
@@ -154,7 +155,7 @@ def _configured_artifact_stages(props, *, base_seed: int = 0, phase_index: int =
             rng=stage_rng("metal"),
         ))
 
-    if getattr(props, "enable_ring_artifacts", False) and is_ct:
+    if "enable_ring_artifacts" in active:
         ring_intensity = max(0.0, get_float_prop(props, "ring_intensity", 80.0))
         ring_radius = None if getattr(props, "ring_random_radius", False) else get_float_prop(props, "ring_radius", 0.5)
         # ``add_ring_artifacts`` requires strictly positive thickness.
@@ -170,7 +171,19 @@ def _configured_artifact_stages(props, *, base_seed: int = 0, phase_index: int =
             rng=stage_rng("ring"),
         ))
 
-    if getattr(props, "enable_motion_artifact", False):
+    # Partial volume models the scanner's finite resolution, so it acts on
+    # the reconstructed image including its streaks and rings. It runs after
+    # them: blurring first would dilute a small implant below the metal
+    # threshold before the metal stage could see it.
+    if "enable_partial_volume" in active:
+        kernel = max(1, _get_int_prop(props, "partial_volume_kernel", 3))
+        if kernel % 2 == 0:
+            kernel += 1
+        iterations = max(1, _get_int_prop(props, "partial_volume_iterations", 1))
+        mix = max(0.0, min(1.0, get_float_prop(props, "partial_volume_mix", 1.0)))
+        stages.append(partial(apply_partial_volume_effect, kernel_size=kernel, iterations=iterations, mix=mix))
+
+    if "enable_motion_artifact" in active:
         blur_size = max(1, _get_int_prop(props, "motion_blur_size", 9))
         if blur_size % 2 == 0:
             blur_size += 1
@@ -186,7 +199,7 @@ def _configured_artifact_stages(props, *, base_seed: int = 0, phase_index: int =
             fill_value=0.0 if is_mri else AIR_DENSITY,
         ))
 
-    if getattr(props, "enable_geometric_distortion", False) and is_mri:
+    if "enable_geometric_distortion" in active:
         gradient = get_float_prop(props, "geometric_gradient_strength", 0.05)
         b0 = max(0.0, get_float_prop(props, "geometric_b0_shift", 3.0))
         b0_scale = max(0.05, min(1.0, get_float_prop(props, "geometric_b0_scale", 0.35)))
@@ -198,14 +211,15 @@ def _configured_artifact_stages(props, *, base_seed: int = 0, phase_index: int =
             b0_scale=float(b0_scale),
             readout_axis=readout_axis,
             rng=stage_rng("distortion"),
+            voxel_size=voxel_size_mm,
         ))
 
-    if getattr(props, "enable_gibbs_ringing", False) and is_mri:
+    if "enable_gibbs_ringing" in active:
         gibbs_strength = max(0.0, min(1.0, get_float_prop(props, "gibbs_strength", 0.6)))
         gibbs_truncation = max(0.0, min(0.49, get_float_prop(props, "gibbs_truncation", 0.2)))
         stages.append(partial(add_gibbs_ringing, strength=float(gibbs_strength), truncation=float(gibbs_truncation)))
 
-    if getattr(props, "enable_bias_field", False) and is_mri:
+    if "enable_bias_field" in active:
         strength = max(0.0, min(1.0, get_float_prop(props, "bias_field_strength", 0.25)))
         scale = max(0.05, min(1.0, get_float_prop(props, "bias_field_scale", 0.3)))
         stages.append(partial(
@@ -213,9 +227,10 @@ def _configured_artifact_stages(props, *, base_seed: int = 0, phase_index: int =
             strength=float(strength),
             scale=float(scale),
             rng=stage_rng("bias"),
+            voxel_size=voxel_size_mm,
         ))
 
-    if getattr(props, "enable_noise", False) and get_float_prop(props, "noise_std_dev_hu", 0.0) > 0.0:
+    if "enable_noise" in active:
         std_dev = max(0.0, get_float_prop(props, "noise_std_dev_hu", 20.0))
         if is_mri:
             # MR magnitude images carry Rician (not Gaussian) noise; the value is
@@ -224,7 +239,7 @@ def _configured_artifact_stages(props, *, base_seed: int = 0, phase_index: int =
         else:
             stages.append(partial(add_gaussian_noise, std_hu=float(std_dev), rng=stage_rng("noise")))
 
-    if getattr(props, "enable_poisson_noise", False) and get_float_prop(props, "poisson_scale", 0.0) > 0.0 and is_ct:
+    if "enable_poisson_noise" in active:
         scale = max(1.0, get_float_prop(props, "poisson_scale", 150.0))
         stages.append(partial(add_poisson_noise, scale=float(scale), rng=stage_rng("poisson")))
 

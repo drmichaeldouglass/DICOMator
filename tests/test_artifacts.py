@@ -167,10 +167,13 @@ def test_golden_seed_regressions():
         pytest.skip("golden capture file not generated")
     golden = np.load(GOLDEN_PATH)
     outputs = _golden_outputs()
-    # Motion deliberately changed from circular to physical padding, so its
-    # legacy capture remains in the archive for history but is not compared.
+    # Motion deliberately changed from circular to physical padding, and the
+    # B0 field of the distortion deliberately changed to one physical
+    # correlation length on every axis (a 6-slice stack used to vary as fast
+    # across 6 slices as across the whole slice). Their legacy captures remain
+    # in the archive for history but are not compared.
     for key, actual in outputs.items():
-        if key == "motion":
+        if key in {"motion", "distortion"}:
             continue
         assert np.array_equal(actual, golden[key]), f"golden mismatch for {key!r}"
 
@@ -452,3 +455,68 @@ def test_inverse_map_jacobian_of_uniform_scaling():
     np.testing.assert_allclose(jacobian, 4.0)
     single_column = artifacts._inverse_map_jacobian(2.0 * o0[:, :1], o1[:, :1])
     np.testing.assert_allclose(single_column, 2.0)
+
+
+def test_area_resample_keeps_small_metal_regardless_of_position():
+    """Point-sampled downsampling could drop a 2x2 seed entirely, depending on
+    where it sat relative to the sample grid."""
+    totals = []
+    for offset in range(4):
+        image = np.zeros((1024, 64), dtype=np.float32)
+        image[512 + offset:514 + offset, 30:32] = 1.0
+        small = artifacts._area_resample(image, (256, 16))
+        totals.append(float(small.sum()) * (1024 / 256) * (64 / 16))
+    np.testing.assert_allclose(totals, 4.0, rtol=1e-5)
+
+
+def test_area_resample_is_identity_for_matching_shape_and_averages_blocks():
+    image = np.arange(16, dtype=np.float32).reshape(4, 4)
+    np.testing.assert_array_equal(artifacts._area_resample(image, (4, 4)), image)
+    np.testing.assert_allclose(
+        artifacts._area_resample(image, (2, 2)), [[2.5, 4.5], [10.5, 12.5]]
+    )
+
+
+def test_small_metal_seed_on_large_grid_always_streaks():
+    for offset in (0, 1, 2, 3):
+        volume = np.zeros((1024, 64, 1), dtype=np.int16)
+        volume[512 + offset:514 + offset, 30:32, 0] = 3071
+        out = artifacts.add_metal_artifacts(
+            volume, intensity=300.0, density_threshold=2000.0, rng=np.random.default_rng(1)
+        )
+        assert np.abs(out.astype(np.int32) - volume).max() > 50, offset
+
+
+def test_random_field_is_as_smooth_across_slices_as_in_plane():
+    """A thin stack must not get a field that jumps between adjacent slices."""
+    field = artifacts._smooth_random_field((96, 96, 6), 0.35, np.random.default_rng(3))
+    in_plane = float(np.abs(np.diff(field, axis=0)).max())
+    across = float(np.abs(np.diff(field, axis=2)).max())
+    assert across <= 2.0 * in_plane
+
+
+def test_random_field_honours_anisotropic_voxels():
+    """3 mm slices are three times further apart than 1 mm pixels, so the
+    window along Z must be a third as many voxels long."""
+    rng_a, rng_b = np.random.default_rng(5), np.random.default_rng(5)
+    iso = artifacts._smooth_random_field((40, 40, 40), 0.3, rng_a)
+    aniso = artifacts._smooth_random_field((40, 40, 40), 0.3, rng_b, voxel_size=(1.0, 1.0, 3.0))
+    assert np.abs(np.diff(aniso, axis=2)).mean() > np.abs(np.diff(iso, axis=2)).mean()
+
+
+def test_bias_coordinates_are_centred_and_isotropic():
+    """``linspace(-1, 1, 1)`` put a lone slice at the coil edge (z = -1), and
+    per-axis [-1, 1] spans stretched a thin slab across the whole coil."""
+    x, y, z = artifacts._centred_coordinates((100, 50, 1))
+    np.testing.assert_allclose([x[0], x[-1]], [-0.99, 0.99], atol=1e-6)
+    np.testing.assert_allclose([y[0], y[-1]], [-0.49, 0.49], atol=1e-6)
+    np.testing.assert_array_equal(z, [0.0])
+    _x, _y, z_thick = artifacts._centred_coordinates((100, 100, 3), voxel_size=(1.0, 1.0, 3.0))
+    np.testing.assert_allclose(z_thick, [-0.06, 0.0, 0.06], atol=1e-6)
+
+
+def test_bias_field_runs_on_a_single_slice():
+    volume = np.full((32, 32, 1), 100.0, dtype=np.float32)
+    out = artifacts.add_bias_field_shading(volume, strength=0.3, rng=np.random.default_rng(2))
+    assert out.shape == volume.shape
+    assert np.isfinite(out).all() and out.std() > 0.0

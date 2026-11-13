@@ -168,6 +168,18 @@ def test_basic_mode_runs_no_artifact_stages():
     assert not constants.artifacts_enabled_for_props(props)
 
 
+def test_metal_streaks_are_computed_before_partial_volume_blur():
+    """Blurring first would dilute a small implant below the metal threshold."""
+
+    props = _props(
+        ui_mode=ADVANCED, enable_partial_volume=True, enable_metal_artifacts=True,
+        enable_ring_artifacts=True,
+    )
+    funcs = [stage.func.__name__ for stage in operators._configured_artifact_stages(props)]
+    assert funcs.index("add_metal_artifacts") < funcs.index("apply_partial_volume_effect")
+    assert funcs.index("add_ring_artifacts") < funcs.index("apply_partial_volume_effect")
+
+
 @pytest.mark.parametrize("mode", [INTERMEDIATE, ADVANCED])
 def test_artifact_modes_build_the_configured_stages(mode):
     props = _props(ui_mode=mode, enable_noise=True, enable_ring_artifacts=True)

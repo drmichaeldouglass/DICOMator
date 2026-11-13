@@ -165,7 +165,7 @@ def test_grid_limits_catch_memory_only_overruns():
     assert side <= constants.MAX_GRID_DIMENSION
     assert total_voxels <= constants.MAX_TOTAL_VOXELS
 
-    props = _props(enable_noise=True)
+    props = _props(enable_noise=True, noise_std_dev_hu=20.0)
     memory_bytes = constants.estimate_peak_memory_bytes_for_props(total_voxels, props)
     assert memory_bytes > constants.MAX_ESTIMATED_MEMORY_BYTES
     assert constants.grid_limits_exceeded(side, side, side, memory_bytes)
@@ -177,7 +177,7 @@ def test_grid_limits_catch_memory_only_overruns():
 
 
 def test_memory_estimate_from_props_matches_explicit_arguments():
-    props = _props(export_drr=True, enable_gibbs_ringing=True)
+    props = _props(export_drr=True, enable_gibbs_ringing=True, imaging_modality="MRI_T1")
     assert constants.estimate_peak_memory_bytes_for_props(1000, props) == (
         constants.estimate_peak_memory_bytes(
             1000,
@@ -374,3 +374,60 @@ def test_execute_snapshots_subframe_and_cleans_up_failed_start(tmp_path, monkeyp
     assert not operators.DICOMATOR_OT_export_dicom._running
     assert "window closed" in reports[-1]
     assert "progress unavailable" in reports[-1]
+
+
+@pytest.mark.parametrize("modality, flag", [
+    ("CT", "enable_bias_field"),
+    ("CT", "enable_gibbs_ringing"),
+    ("CT", "enable_geometric_distortion"),
+    ("MRI_T1", "enable_poisson_noise"),
+    ("MRI_T1", "enable_metal_artifacts"),
+    ("MRI_T2", "enable_partial_volume"),
+])
+def test_artifacts_of_the_other_modality_do_not_inflate_the_estimate(modality, flag):
+    """A stored MR-only toggle never runs on a CT export (and vice versa), so it
+    must not push a valid grid over the memory guardrail."""
+
+    props = _props(imaging_modality=modality, poisson_scale=150.0, **{flag: True})
+    assert constants.active_artifact_flags(props) == frozenset()
+    assert operators._configured_artifact_stages(props) == []
+    lean = constants.estimate_peak_memory_bytes_for_props(1000, _props(imaging_modality=modality))
+    assert constants.estimate_peak_memory_bytes_for_props(1000, props) == lean
+
+
+def test_zero_amount_noise_is_not_counted():
+    props = _props(enable_noise=True, noise_std_dev_hu=0.0, enable_poisson_noise=True, poisson_scale=0.0)
+    assert constants.active_artifact_flags(props) == frozenset()
+
+
+def test_artifacts_do_not_count_without_an_image_series():
+    """Artifacts are applied to the image series only, never to the DRR."""
+
+    props = _props(export_image_series=False, export_drr=True, enable_noise=True, noise_std_dev_hu=20.0)
+    drr_only = _props(export_image_series=False, export_drr=True)
+    assert constants.estimate_peak_memory_bytes_for_props(1000, props) == (
+        constants.estimate_peak_memory_bytes_for_props(1000, drr_only)
+    )
+
+
+@pytest.mark.parametrize("modality, expected_per_voxel", [("CT", 45), ("MRI_T1", 61)])
+def test_artifact_estimate_covers_the_measured_chain_peak(modality, expected_per_voxel):
+    """Measured with tracemalloc on 200^3 grids: the full CT chain peaks at
+    44.1 B/voxel and the full MR chain (with Gibbs) at 60.0 B/voxel, because
+    the chain holds the grid and the previous stage's output while a stage
+    runs. The guardrail must not sit below those figures."""
+
+    flags = {flag: True for flag in constants.ARTIFACT_FLAGS}
+    props = _props(imaging_modality=modality, noise_std_dev_hu=20.0, poisson_scale=150.0, **flags)
+    assert constants.estimate_peak_memory_bytes_for_props(1000, props) == 1000 * expected_per_voxel
+
+
+def test_output_directory_expands_the_home_folder(monkeypatch, tmp_path):
+    """A typed "~/DICOM" is the home folder, not a directory named "~"."""
+
+    from types import SimpleNamespace as _NS
+
+    utils = load_module("utils")
+    monkeypatch.setattr(utils, "bpy", _NS(path=_NS(abspath=lambda value: value)))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert utils.resolve_output_directory("~/DICOM") == str(tmp_path / "DICOM")

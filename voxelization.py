@@ -50,6 +50,10 @@ PreparedGeometry = Tuple["list[Shell] | BVHTree", Bounds]
 #: nested inside it.
 _NESTING_SAMPLE_VERTICES = 8
 
+#: Vertices closer than this distance (metres) count as one point when the
+#: faces of a mesh are grouped into connected surfaces.
+_WELD_TOLERANCE_M = 1e-6
+
 #: Ray hits closer together than this distance (metres) are merged before
 #: entry/exit pairing. A ray grazing an edge shared by two faces reports the
 #: same surface twice; without merging, the duplicate flips the inside/outside
@@ -81,6 +85,16 @@ def restart_z_past_hit(hit_z: float) -> float:
     """
 
     return hit_z + max(_RAY_RESTART_EPSILON_M, abs(hit_z) * 1e-6)
+
+
+def _geometry_key(obj: Object) -> str:
+    """Key for prepared geometry that is unique per object.
+
+    A local object and one linked from a library can share ``name``; only
+    ``name_full`` (which carries the library) tells them apart, so keying by
+    ``name`` let one object be voxelized with the other's geometry.
+    """
+    return getattr(obj, "name_full", None) or obj.name
 
 
 def _resolve_voxel_size(voxel_size: VoxelSize | float) -> Tuple[float, float, float]:
@@ -143,18 +157,48 @@ def _vertex_bounds(verts: np.ndarray) -> Bounds:
     )
 
 
-def _polygon_islands(polygons: list[list[int]], vertex_count: int) -> list[np.ndarray]:
+def _flatten_polygons(polygons: list[list[int]]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return ``(flat_vertex_indices, corners_per_polygon, first_corner_of_polygon)``."""
+    counts = np.fromiter((len(poly) for poly in polygons), dtype=np.int64, count=len(polygons))
+    flat = np.fromiter(
+        (index for poly in polygons for index in poly), dtype=np.int64, count=int(counts.sum())
+    )
+    starts = np.concatenate(([0], np.cumsum(counts)[:-1])).astype(np.int64)
+    return flat, counts, starts
+
+
+def _welded_vertex_ids(verts: np.ndarray) -> np.ndarray:
+    """Give coincident vertices (within :data:`_WELD_TOLERANCE_M`) one shared id.
+
+    Hard-edged meshes (flat-shaded glTF/OBJ imports, Edge Split, faces split
+    with Y) duplicate vertices along their seams. They are still one closed
+    surface, so shells are grouped by vertex *position*, not vertex index.
+    """
+    if len(verts) == 0:
+        return np.zeros(0, dtype=np.int64)
+    keys = np.floor(np.asarray(verts, dtype=np.float64) / _WELD_TOLERANCE_M + 0.5).astype(np.int64)
+    _unique, inverse = np.unique(keys, axis=0, return_inverse=True)
+    return inverse.reshape(-1).astype(np.int64)
+
+
+def _polygon_islands(
+    polygons: list[list[int]],
+    vertex_count: int,
+    vertex_ids: Optional[np.ndarray] = None,
+) -> list[np.ndarray]:
     """Group polygon indices into connected islands (shared-vertex connectivity).
+
+    ``vertex_ids`` optionally maps each vertex index to a shared id (see
+    :func:`_welded_vertex_ids`) so polygons touching at coincident but
+    unshared vertices count as connected.
 
     Vectorized union-find: every polygon links its vertices to its first
     vertex; roots are hooked to the smaller root and paths fully compressed
     each round, so the loop needs only a handful of NumPy passes.
     """
-    counts = np.fromiter((len(poly) for poly in polygons), dtype=np.int64, count=len(polygons))
-    flat = np.fromiter(
-        (index for poly in polygons for index in poly), dtype=np.int64, count=int(counts.sum())
-    )
-    starts = np.concatenate(([0], np.cumsum(counts)[:-1]))
+    flat, counts, starts = _flatten_polygons(polygons)
+    if vertex_ids is not None:
+        flat = vertex_ids[flat]
     first = np.repeat(flat[starts], counts)
     parent = np.arange(max(vertex_count, int(flat.max()) + 1), dtype=np.int64)
     while True:
@@ -175,6 +219,37 @@ def _polygon_islands(polygons: list[list[int]], vertex_count: int) -> list[np.nd
     order = np.argsort(labels, kind="stable")
     boundaries = np.flatnonzero(np.diff(labels[order])) + 1
     return np.split(order, boundaries)
+
+
+def _polygons_on_open_edges(
+    polygons: list[list[int]],
+    vertex_ids: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Return a per-polygon flag: True where the polygon has an edge not shared
+    by exactly two polygons (a hole or a non-manifold fan).
+
+    A closed (watertight) surface has every edge on exactly two faces, so an
+    island with no flagged polygon is closed.
+    """
+    flat, counts, starts = _flatten_polygons(polygons)
+    if vertex_ids is not None:
+        flat = vertex_ids[flat]
+    following = np.arange(1, len(flat) + 1, dtype=np.int64)
+    following[starts + counts - 1] = starts
+    a = flat
+    b = flat[following]
+    polygon_of_corner = np.repeat(np.arange(len(polygons), dtype=np.int64), counts)
+    keep = a != b  # Welding can collapse an edge to a point; it has no neighbour.
+    edges = np.stack((np.minimum(a, b)[keep], np.maximum(a, b)[keep]), axis=1)
+    flagged = np.zeros(len(polygons), dtype=bool)
+    if len(edges) == 0:
+        return flagged
+    _unique, inverse, edge_counts = np.unique(
+        edges, axis=0, return_inverse=True, return_counts=True
+    )
+    open_corner = edge_counts[inverse.reshape(-1)] != 2
+    flagged[polygon_of_corner[keep][open_corner]] = True
+    return flagged
 
 
 def _column_hits(ray_cast, x: float, y: float, z_start: float, z_end: float) -> tuple[list[float], bool]:
@@ -208,14 +283,6 @@ def _column_hits(ray_cast, x: float, y: float, z_start: float, z_end: float) -> 
     return merged, stalled
 
 
-def _bounds_contain(outer: Bounds, inner: Bounds) -> bool:
-    return (
-        outer[0] <= inner[0] and inner[1] <= outer[1]
-        and outer[2] <= inner[2] and inner[3] <= outer[3]
-        and outer[4] <= inner[4] and inner[5] <= outer[5]
-    )
-
-
 def _shell_contains_points(bvh: BVHTree, bounds: Bounds, points: np.ndarray) -> bool:
     """Even-odd test: are (most of) ``points`` inside the closed shell ``bvh``?
 
@@ -247,6 +314,10 @@ def _object_geometry(
     hollow objects, exactly as even/odd pairing did, while two separate
     surfaces that merely overlap (organs joined into one object) fill their
     overlap instead of cancelling it. Face normals are never consulted.
+
+    Faces are grouped into surfaces by vertex position, so seams with
+    duplicated vertices do not split a closed surface. Pieces that are still
+    open after that are pooled into one even/odd surface.
     """
     if apply_modifiers and depsgraph is not None:
         obj_eval = obj.evaluated_get(depsgraph)
@@ -264,13 +335,13 @@ def _object_geometry(
         return None
     bounds = _vertex_bounds(verts_world)
 
-    islands = _polygon_islands(polygons, len(verts_world))
+    vertex_ids = _welded_vertex_ids(verts_world)
+    islands = _polygon_islands(polygons, len(verts_world), vertex_ids)
     if len(islands) == 1:
         return [(BVHTree.FromPolygons(verts_world.tolist(), polygons), 1, bounds)], bounds
 
-    shells: list[tuple[BVHTree, Bounds, np.ndarray]] = []
-    for island in islands:
-        island_polygons = [polygons[index] for index in island.tolist()]
+    def island_surface(polygon_indices: np.ndarray) -> tuple[BVHTree, np.ndarray]:
+        island_polygons = [polygons[index] for index in polygon_indices.tolist()]
         used = np.unique(np.fromiter(
             (vertex for poly in island_polygons for vertex in poly), dtype=np.int64
         ))
@@ -280,20 +351,66 @@ def _object_geometry(
             island_verts.tolist(),
             [[remap[vertex] for vertex in poly] for poly in island_polygons],
         )
+        return bvh, island_verts
+
+    # Only a closed surface has a well-defined inside, so only closed islands
+    # take part in the solid/cavity winding. Open pieces (a surface whose
+    # parts do not quite meet, stray faces) are pooled into one surface that
+    # is ray-cast with plain even/odd pairing, as a single-BVH mesh would be.
+    on_open_edge = _polygons_on_open_edges(polygons, vertex_ids)
+    closed_islands = [island for island in islands if not np.any(on_open_edge[island])]
+    open_islands = [island for island in islands if np.any(on_open_edge[island])]
+
+    shells: list[tuple[BVHTree, Bounds, np.ndarray]] = []
+    for island in closed_islands:
+        bvh, island_verts = island_surface(island)
         step = max(1, len(island_verts) // _NESTING_SAMPLE_VERTICES)
         shells.append((bvh, _vertex_bounds(island_verts), island_verts[::step][:_NESTING_SAMPLE_VERTICES]))
 
     result: list[Shell] = []
-    for index, (bvh, shell_bounds, samples) in enumerate(shells):
-        depth = sum(
-            1
-            for other_index, (other_bvh, other_bounds, _samples) in enumerate(shells)
-            if other_index != index
-            and _bounds_contain(other_bounds, shell_bounds)
-            and _shell_contains_points(other_bvh, other_bounds, samples)
-        )
-        result.append((bvh, -1 if depth % 2 else 1, shell_bounds))
+    if shells:
+        # Bounding-box containment is checked for all pairs at once, so only
+        # the few candidate pairs reach the (Python-level) ray-cast test.
+        all_bounds = np.array([shell_bounds for _bvh, shell_bounds, _samples in shells], dtype=np.float64)
+        for index, (bvh, shell_bounds, samples) in enumerate(shells):
+            inner = all_bounds[index]
+            candidates = np.flatnonzero(
+                (all_bounds[:, 0] <= inner[0]) & (inner[1] <= all_bounds[:, 1])
+                & (all_bounds[:, 2] <= inner[2]) & (inner[3] <= all_bounds[:, 3])
+                & (all_bounds[:, 4] <= inner[4]) & (inner[5] <= all_bounds[:, 5])
+            )
+            depth = sum(
+                1
+                for other_index in candidates.tolist()
+                if other_index != index
+                and _shell_contains_points(shells[other_index][0], shells[other_index][1], samples)
+            )
+            result.append((bvh, -1 if depth % 2 else 1, shell_bounds))
+
+    if open_islands:
+        bvh, open_verts = island_surface(np.concatenate(open_islands))
+        result.append((bvh, 1, _vertex_bounds(open_verts)))
     return result, bounds
+
+
+def object_has_cavity(
+    obj: Object,
+    depsgraph: Optional[bpy.types.Depsgraph] = None,
+    *,
+    apply_modifiers: bool = False,
+) -> bool:
+    """Return True when the voxelizer treats part of ``obj`` as a cavity.
+
+    A cavity is a closed shell nested inside an odd number of the object's
+    other shells (see :func:`_object_geometry`). Exporters that describe the
+    same object another way (RT Structure contours) use this so they agree
+    with the voxelized image about what is a hole.
+    """
+    geometry = _object_geometry(obj, depsgraph, apply_modifiers=apply_modifiers)
+    if geometry is None:
+        return False
+    shells, _bounds = geometry
+    return any(sign < 0 for _bvh, sign, _shell_bounds in shells)
 
 
 def _object_world_vertices(
@@ -375,7 +492,7 @@ def _voxelize_objects_iter(
     objects are appended to it so callers can surface them in the UI.
 
     ``prepared`` optionally supplies pre-built world-space geometry (from
-    :func:`prepare_object_geometry_iter`) keyed by object name, avoiding a
+    :func:`prepare_object_geometry_iter`) keyed by ``name_full``, avoiding a
     second mesh evaluation and BVH build; objects missing from the cache are
     treated as skipped (they had no usable geometry when prepared).
     """
@@ -443,7 +560,7 @@ def _voxelize_objects_iter(
     object_data: list[tuple[str, list[Shell], float, int, int, int, int, float, float]] = []
     for obj in sorted_objects:
         if prepared is not None:
-            geometry = prepared.get(obj.name)
+            geometry = prepared.get(_geometry_key(obj))
         else:
             geometry = _object_geometry(obj, depsgraph=depsgraph, apply_modifiers=apply_modifiers)
         if geometry is None:
@@ -619,16 +736,17 @@ def prepare_object_geometry_iter(
     """Evaluate each object's world-space BVH and bounds exactly once.
 
     Yields ``(objects_done, total_objects)`` and returns a dict keyed by
-    object name; objects without usable geometry are omitted. The cache is
-    only valid for the frame/depsgraph it was built with — callers must not
-    reuse it across animation frames.
+    ``name_full`` (unique even across linked libraries); objects without
+    usable geometry are omitted. The cache is only valid for the
+    frame/depsgraph it was built with — callers must not reuse it across
+    animation frames.
     """
     prepared: dict[str, PreparedGeometry] = {}
     total = max(1, len(objects))
     for index, obj in enumerate(objects, start=1):
         geometry = _object_geometry(obj, depsgraph=depsgraph, apply_modifiers=apply_modifiers)
         if geometry is not None:
-            prepared[obj.name] = geometry
+            prepared[_geometry_key(obj)] = geometry
         yield index, total
     return prepared
 

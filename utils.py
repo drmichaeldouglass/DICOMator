@@ -35,6 +35,8 @@ def resolve_output_directory(output_dir: str) -> str:
     # the open .blend file; unsaved files resolve relative to the current
     # working directory via os.path.abspath below.
     resolved_dir = bpy.path.abspath(resolved_dir)
+    # A typed "~/DICOM" means the home folder, not a directory named "~".
+    resolved_dir = os.path.expanduser(resolved_dir)
 
     return os.path.abspath(os.path.normpath(resolved_dir))
 
