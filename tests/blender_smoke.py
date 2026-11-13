@@ -128,6 +128,55 @@ def _assert_hollow_rtstruct_export() -> None:
         DICOMator.unregister()
 
 
+def _assert_buried_lobe_is_not_a_hole() -> None:
+    """A part overlapping a bigger part of the same mesh must not cut a hole."""
+    DICOMator.register()
+    try:
+        bpy.ops.mesh.primitive_uv_sphere_add(radius=0.05, location=(0.0, 0.0, 0.0))
+        body = bpy.context.active_object
+        bpy.ops.mesh.primitive_uv_sphere_add(radius=0.02, location=(0.035, 0.0, 0.0))
+        lobe = bpy.context.active_object
+        body.select_set(True)
+        lobe.select_set(True)
+        bpy.context.view_layer.objects.active = body
+        bpy.ops.object.join()
+        bpy.context.view_layer.update()
+        # At z = 18 mm the lobe's cut lies wholly inside the body's cut, yet
+        # the lobe pokes out of the body elsewhere, so it is solid, not a hole.
+        with tempfile.TemporaryDirectory(prefix="dicomator-lobe-smoke-") as output_dir:
+            result = DICOMator.export_rtstruct_to_dicom(
+                [body], Vector((0.0, 0.0, 0.0175)), (0.001, 0.001, 0.001),
+                1, output_dir, bpy.context.evaluated_depsgraph_get(),
+            )
+            assert "error" not in result, result
+            ds = pydicom.dcmread(Path(output_dir) / "RTStruct.dcm")
+            contours = ds.ROIContourSequence[0].ContourSequence
+            assert len(contours) == 1, len(contours)
+            assert contours[0].ContourGeometricType == "CLOSED_PLANAR"
+    finally:
+        DICOMator.unregister()
+
+
+def _assert_face_on_slice_plane_fills_the_slice() -> None:
+    """A flat face exactly on a plane of voxel centres must not speckle."""
+    DICOMator.register()
+    try:
+        bpy.ops.mesh.primitive_cube_add(size=0.1, location=(0.0, 0.0, 0.0))
+        cube = bpy.context.active_object
+        cube.dicomator_hu = 250.0
+        # Slice centres at -52, -50, ... +50, +52 mm: slices 1 and 51 sit
+        # exactly on the cube's bottom and top faces.
+        volume, _, _ = DICOMator.voxelize_objects_to_hu(
+            [cube], voxel_size=(0.002, 0.002, 0.002), padding=0,
+            bbox_override=(-0.02, 0.02, -0.02, 0.02, -0.053, 0.053),
+        )
+        assert np.all(volume[:, :, 1:52] == 250), "face slice is not uniformly filled"
+        assert np.all(volume[:, :, 0] == constants.AIR_DENSITY)
+        assert np.all(volume[:, :, 52] == constants.AIR_DENSITY)
+    finally:
+        DICOMator.unregister()
+
+
 def _assert_animated_export_and_mode_priority() -> None:
     """Run the operator pipeline on overlapping animated Blender meshes."""
     DICOMator.register()
@@ -194,6 +243,8 @@ def main() -> None:
     _assert_registration_cycle()
     _assert_cube_ct_export()
     _assert_hollow_rtstruct_export()
+    _assert_buried_lobe_is_not_a_hole()
+    _assert_face_on_slice_plane_fills_the_slice()
     _assert_animated_export_and_mode_priority()
     print(f"DICOMator Blender smoke test passed in Blender {bpy.app.version_string}")
 

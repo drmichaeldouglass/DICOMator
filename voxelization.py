@@ -87,6 +87,22 @@ def restart_z_past_hit(hit_z: float) -> float:
     return hit_z + max(_RAY_RESTART_EPSILON_M, abs(hit_z) * 1e-6)
 
 
+def surface_tolerance(z: float) -> float:
+    """Distance within which a voxel centre counts as lying *on* a surface at ``z``.
+
+    Ray hits are computed in single precision, so the Z reported for one flat
+    face differs from column to column by a few float32 steps. When that face
+    sits exactly on a plane of voxel centres (a 25 mm block on 2 mm slices),
+    comparing the raw numbers puts some columns of that slice inside and
+    others outside, leaving a speckled slice. Centres within this tolerance
+    of an entry or exit surface are therefore all treated the same way: as
+    inside. The tolerance follows the float32 spacing of the coordinate and
+    is at most 1% of the finest voxel spacing the add-on offers (0.1 mm).
+    """
+
+    return max(_RAY_RESTART_EPSILON_M, abs(z) * 1e-6)
+
+
 def _geometry_key(obj: Object) -> str:
     """Key for prepared geometry that is unique per object.
 
@@ -393,24 +409,58 @@ def _object_geometry(
     return result, bounds
 
 
-def object_has_cavity(
+#: Distance (metres) the fill-test ray starts below and ends above a shell.
+_FILL_TEST_MARGIN_M = 1e-3
+
+#: Answers "is this world-space point inside the object?"; ``None`` means the
+#: ray through the point was ambiguous (grazed an edge, open surface).
+FillTest = Callable[[float, float, float], Optional[bool]]
+
+
+def object_fill_test(
     obj: Object,
     depsgraph: Optional[bpy.types.Depsgraph] = None,
     *,
     apply_modifiers: bool = False,
-) -> bool:
-    """Return True when the voxelizer treats part of ``obj`` as a cavity.
+) -> Optional[FillTest]:
+    """Return a point-in-object test that follows the voxelizer's fill rule.
 
-    A cavity is a closed shell nested inside an odd number of the object's
-    other shells (see :func:`_object_geometry`). Exporters that describe the
-    same object another way (RT Structure contours) use this so they agree
-    with the voxelized image about what is a hole.
+    The returned function casts the same vertical ray the voxelizer casts
+    through a voxel column and applies the same rule: per shell, a point is
+    inside when an odd number of surface crossings lie below it, and the
+    object is filled where the signed sum over shells (solid +1, cavity -1,
+    see :func:`_object_geometry`) is positive. Exporters that describe the
+    same object another way (RT Structure contours) use it so they agree with
+    the voxelized image about what is solid and what is a hole.
+
+    Returns ``None`` when the object has no usable geometry.
     """
     geometry = _object_geometry(obj, depsgraph, apply_modifiers=apply_modifiers)
     if geometry is None:
-        return False
+        return None
     shells, _bounds = geometry
-    return any(sign < 0 for _bvh, sign, _shell_bounds in shells)
+
+    def is_filled(x: float, y: float, z: float) -> Optional[bool]:
+        winding = 0
+        for bvh, sign, (min_x, max_x, min_y, max_y, min_z, max_z) in shells:
+            if not (min_x <= x <= max_x and min_y <= y <= max_y and min_z <= z <= max_z):
+                continue
+            hits, stalled = _column_hits(
+                bvh.ray_cast, x, y, min_z - _FILL_TEST_MARGIN_M, max_z + _FILL_TEST_MARGIN_M
+            )
+            if stalled or len(hits) % 2:
+                # An unpaired crossing: the ray grazed an edge or the surface
+                # is open, so "inside" is not defined along this line.
+                return None
+            # Same inclusive rule as the voxel columns: a point on a surface
+            # belongs to the solid.
+            below = sum(1 for hit_z in hits if hit_z < z)
+            on_surface = any(abs(hit_z - z) <= surface_tolerance(hit_z) for hit_z in hits)
+            if on_surface or below % 2:
+                winding += sign
+        return winding > 0
+
+    return is_filled
 
 
 def _object_world_vertices(
@@ -653,8 +703,12 @@ def _voxelize_objects_iter(
                         break
             intervals: list[tuple[int, int]] = []
             for start in range(0, len(merged) - 1, 2):
-                start_idx = int(math.ceil((merged[start] - z0_center) * inv_dz))
-                end_idx = int(math.floor((merged[start + 1] - z0_center) * inv_dz))
+                # A voxel is filled when its centre lies between the entry and
+                # exit surfaces, both inclusive (see surface_tolerance()).
+                entry_z = merged[start] - surface_tolerance(merged[start])
+                exit_z = merged[start + 1] + surface_tolerance(merged[start + 1])
+                start_idx = int(math.ceil((entry_z - z0_center) * inv_dz))
+                end_idx = int(math.floor((exit_z - z0_center) * inv_dz))
                 s_idx = max(0, start_idx)
                 e_idx = min(depth - 1, end_idx)
                 if e_idx >= s_idx:
@@ -936,8 +990,10 @@ def voxelize_mesh(
 
 
 __all__ = [
+    "object_fill_test",
     "prepare_object_geometry_iter",
     "restart_z_past_hit",
+    "surface_tolerance",
     "voxelize_mesh",
     "voxelize_objects_to_hu",
     "voxelize_objects_to_hu_iter",
