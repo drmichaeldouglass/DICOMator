@@ -7,13 +7,12 @@ Algorithm
 ---------
 For each Z plane in the dose/CT grid, a bmesh copy of each structure mesh is
 bisected using ``bmesh.ops.bisect_plane``.  The resulting cut edges are
-graph-walked to recover ordered closed loops. Whether a loop nested inside
-another is a hole is decided in 3D, exactly as the voxelizer decides it: only
-a mesh with a cavity (a closed shell inside another shell) keeps nested loops,
-and those ROIs use ``CLOSEDPLANAR_XOR`` throughout to preserve the hole
-independently of loop winding. For any other mesh a loop lying inside another
-is an overlapping solid that adds nothing to the union, so it is dropped and
-the ROI uses ``CLOSED_PLANAR``.
+graph-walked to recover ordered closed loops. A loop is kept only where the
+solid actually ends at it, judged with the voxelizer's own fill rule: the
+inner loop of a ring, tube or hollow shell is a hole and stays, while the cut
+of a part buried inside a larger part of the same mesh is dropped. ROIs that
+keep a loop nested inside another use ``CLOSEDPLANAR_XOR`` throughout, so the
+hole survives independently of loop winding; all others use ``CLOSED_PLANAR``.
 
 Coordinate convention
 ---------------------
@@ -42,7 +41,7 @@ import bpy
 import numpy as np
 
 from . import constants as shared_constants
-from .voxelization import object_has_cavity
+from .voxelization import FillTest, object_fill_test
 from .constants import (
     RTSTRUCT_SOP_CLASS,
     apply_synthetic_metadata,
@@ -396,6 +395,16 @@ def _point_in_loop(x: float, y: float, loop_xy: np.ndarray) -> bool:
 _NESTING_SAMPLE_POINTS = 16
 
 
+def _lies_inside(inner_xy: np.ndarray, outer_xy: np.ndarray) -> bool:
+    """Return True when loop ``inner_xy`` lies entirely inside ``outer_xy``.
+
+    Evenly spaced vertices of the inner loop are tested; loops that cross
+    have some vertices inside and some outside, so they are not "inside".
+    """
+    step = max(1, len(inner_xy) // _NESTING_SAMPLE_POINTS)
+    return all(_point_in_loop(float(x), float(y), outer_xy) for x, y in inner_xy[::step])
+
+
 def _has_nested_loops(loops: Sequence[Sequence[Sequence[float]]]) -> bool:
     """Return True when one loop on a plane lies entirely inside another.
 
@@ -404,47 +413,99 @@ def _has_nested_loops(loops: Sequence[Sequence[Sequence[float]]]) -> bool:
     outside; treating those as XOR would carve their overlap out as a hole.
     """
     polygons = [np.asarray(loop, dtype=np.float64)[:, :2] for loop in loops if len(loop) >= 3]
-    for index, inner in enumerate(polygons):
-        step = max(1, len(inner) // _NESTING_SAMPLE_POINTS)
-        samples = inner[::step]
-        for other_index, outer in enumerate(polygons):
-            if other_index != index and all(
-                _point_in_loop(float(x), float(y), outer) for x, y in samples
-            ):
-                return True
-    return False
+    return any(
+        _lies_inside(inner, outer)
+        for index, inner in enumerate(polygons)
+        for other_index, outer in enumerate(polygons)
+        if other_index != index
+    )
 
 
-def _drop_loops_inside_other_loops(
-    loops: Sequence[Sequence[Sequence[float]]],
-) -> list:
-    """Remove loops lying entirely inside another loop on the same plane.
+#: Edges of a loop probed to decide whether the loop bounds the solid.
+_BOUNDARY_SAMPLE_EDGES = 8
 
-    Used for meshes without a 3D cavity: there a nested loop is the cut of a
-    solid overlapping a larger one (an organ joined into a bigger mesh), so
-    it adds nothing to the union the voxelizer fills. Keeping it would make
-    a reader's even/odd or XOR rule carve it out as a hole. Loops are visited
-    largest first, so a duplicate of a kept loop cannot remove its original.
+#: In-plane distance (metres) a probe point is moved off a contour edge, to
+#: either side. Far above single-precision noise in the mesh coordinates and
+#: far below the finest voxel spacing the add-on offers (0.1 mm).
+_BOUNDARY_PROBE_OFFSET_M = 2e-5
+
+
+def _loop_bounds_filled_region(
+    loop: Sequence[Sequence[float]],
+    z_m: float,
+    is_filled: FillTest,
+) -> Optional[bool]:
+    """Does the solid end at this loop (filled on one side, empty on the other)?
+
+    A cut through the mesh surface is a real contour only where it separates
+    solid from empty space. Probe points are placed just either side of edges
+    spread around the loop and classified with the voxelizer's own fill rule:
+
+    * ``True``  - some probe pair differs: the loop is an outline or a hole.
+    * ``False`` - every probe pair agrees: the loop lies inside solid (the cut
+      of a part overlapping a larger part) or inside empty space.
+    * ``None``  - no probe pair could be classified.
     """
-    def area(loop) -> float:
-        xy = np.asarray(loop, dtype=np.float64)[:, :2]
-        x, y = xy[:, 0], xy[:, 1]
-        return 0.5 * abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
+    xy = np.asarray(loop, dtype=np.float64)[:, :2]
+    edges = np.roll(xy, -1, axis=0) - xy
+    lengths = np.hypot(edges[:, 0], edges[:, 1])
+    # Probe edges spread evenly around the loop, so no stretch of it goes
+    # unexamined.
+    probe_edges = np.unique(
+        np.linspace(0, len(xy), _BOUNDARY_SAMPLE_EDGES, endpoint=False).astype(np.int64)
+    )
+    agreeing_pairs = 0
+    for index in probe_edges.tolist():
+        length = float(lengths[index])
+        if length <= 4.0 * _BOUNDARY_PROBE_OFFSET_M:
+            continue  # Too short to step off reliably.
+        mid_x, mid_y = xy[index] + 0.5 * edges[index]
+        # Unit normal of the edge within the cutting plane.
+        offset_x = -edges[index, 1] / length * _BOUNDARY_PROBE_OFFSET_M
+        offset_y = edges[index, 0] / length * _BOUNDARY_PROBE_OFFSET_M
+        one_side = is_filled(float(mid_x + offset_x), float(mid_y + offset_y), float(z_m))
+        other_side = is_filled(float(mid_x - offset_x), float(mid_y - offset_y), float(z_m))
+        if one_side is None or other_side is None:
+            continue
+        if one_side != other_side:
+            return True
+        agreeing_pairs += 1
+    return False if agreeing_pairs else None
 
-    candidates = sorted((loop for loop in loops if len(loop) >= 3), key=area, reverse=True)
+
+def _keep_boundary_loops(
+    loops: Sequence[Sequence[Sequence[float]]],
+    z_m: float,
+    is_filled: Optional[FillTest],
+) -> list:
+    """Drop cut loops that do not bound the solid the voxelizer fills.
+
+    Bisecting a mesh returns the cut of *every* surface, including surfaces
+    buried inside the solid: an organ joined into a larger body mesh cuts a
+    loop inside the body outline although the image is solid right across it.
+    A reader's even/odd or XOR rule would carve that loop out as a hole, so
+    it is removed. The inner loop of a ring, tube or hollow shell is kept:
+    there the solid really does end.
+
+    Only a loop lying entirely inside another loop is examined. Loops that
+    cross each other (partly overlapping parts) are kept whole, as are loops
+    that stand apart.
+    """
+    if is_filled is None or len(loops) < 2:
+        return list(loops)
+    outlines = [
+        np.asarray(loop, dtype=np.float64)[:, :2] if len(loop) >= 3 else None for loop in loops
+    ]
     kept: list = []
-    kept_xy: list[np.ndarray] = []
-    for loop in candidates:
-        xy = np.asarray(loop, dtype=np.float64)[:, :2]
-        step = max(1, len(xy) // _NESTING_SAMPLE_POINTS)
-        samples = xy[::step]
-        if any(
-            all(_point_in_loop(float(x), float(y), outer) for x, y in samples)
-            for outer in kept_xy
-        ):
+    for index, loop in enumerate(loops):
+        xy = outlines[index]
+        nested = xy is not None and any(
+            other is not None and other_index != index and _lies_inside(xy, other)
+            for other_index, other in enumerate(outlines)
+        )
+        if nested and _loop_bounds_filled_region(loop, z_m, is_filled) is False:
             continue
         kept.append(loop)
-        kept_xy.append(xy)
     return kept
 
 
@@ -540,6 +601,12 @@ def build_rtstruct_dataset(
     ds.StructureSetName = truncate_lo(series_description, "DICOMator")
     ds.StructureSetDate = date_str
     ds.StructureSetTime = time_str
+
+    # --- Approval ---
+    # The Approval module is mandatory in the RT Structure Set IOD (PS3.3
+    # A.19.3) and Approval Status is Type 1; strict importers reject a
+    # structure set without it. Synthetic contours are never reviewed.
+    ds.ApprovalStatus = "UNAPPROVED"
 
     # --- Referenced Frame of Reference Sequence ---
     ref_for_seq = Dataset()
@@ -817,9 +884,10 @@ def export_rtstruct_to_dicom_iter(
                 next(subtask)
             except StopIteration as stop:
                 contours, dropped = stop.value
-                if not object_has_cavity(obj, depsgraph, apply_modifiers=apply_modifiers):
+                if any(len(loops) > 1 for loops in contours.values()):
+                    is_filled = object_fill_test(obj, depsgraph, apply_modifiers=apply_modifiers)
                     contours = {
-                        z_m: _drop_loops_inside_other_loops(loops)
+                        z_m: _keep_boundary_loops(loops, z_m, is_filled)
                         for z_m, loops in contours.items()
                     }
                 all_contours.append(contours)

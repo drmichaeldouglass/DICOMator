@@ -171,6 +171,47 @@ def test_cropped_grid_preserves_surface_pairing(kind, slab_bounds):
     np.testing.assert_array_equal(grid, np.broadcast_to(expected, grid.shape))
 
 
+class _NoisySlabBVH(_SlabBVH):
+    """Slab whose reported hit height wobbles per column, as float32 hits do."""
+
+    def ray_cast(self, origin, direction, max_dist):
+        location, normal, index, distance = super().ray_cast(origin, direction, max_dist)
+        if location is None:
+            return location, normal, index, distance
+        # Deterministic +/- 3e-8 m wobble that differs between columns.
+        wobble = 3e-8 if int(round((origin.x + origin.y) * 1000.0)) % 2 else -3e-8
+        return Vector((location.x, location.y, location.z + wobble)), normal, index, distance
+
+
+def test_face_on_a_plane_of_voxel_centres_fills_the_whole_slice():
+    """A flat face exactly on a slice-centre plane must not leave a speckled
+    slice: single-precision noise in the hit height put some columns of the
+    slice inside the solid and others outside."""
+    obj = SimpleNamespace(name="Slab", dicomator_hu=250.0)
+    # Voxel centres at 0.5, 1.5, ... mm; both faces sit exactly on a centre.
+    lower, upper = 0.0015, 0.0045
+    grid, _origin, _dims = voxelization._drive(
+        voxelization.voxelize_objects_to_hu_iter(
+            [obj], voxel_size=0.001, padding=0,
+            bbox_override=(0.0, 0.004, 0.0, 0.004, 0.0, 0.006),
+            prepared={"Slab": (
+                _NoisySlabBVH(lower, upper),
+                (0.0, 0.004, 0.0, 0.004, lower, upper),
+            )},
+        ),
+        None,
+    )
+    expected = np.array([-1000, 250, 250, 250, 250, -1000])
+    np.testing.assert_array_equal(grid, np.broadcast_to(expected, grid.shape))
+
+
+def test_surface_tolerance_is_far_below_the_finest_voxel():
+    assert voxelization.surface_tolerance(0.0) <= 1e-6
+    assert voxelization.surface_tolerance(1.0) <= 1e-6
+    # Single precision resolves ~4e-6 m at 50 m; the tolerance must cover it.
+    assert voxelization.surface_tolerance(50.0) >= 4e-6
+
+
 def _voxelize_slab(hu_value: float) -> np.ndarray:
     """Fill a small grid from one slab mesh carrying ``hu_value``."""
 
@@ -427,6 +468,41 @@ def test_overlapping_dose_shells_count_the_object_once(monkeypatch):
     b = ((0.03, 0.03, 0.03), (0.09, 0.09, 0.09))
     grid = _voxelize_boxes(monkeypatch, [a, b], kind="dose")
     assert float(grid.max()) == pytest.approx(2.0)
+
+
+def _fill_test_for_boxes(monkeypatch, boxes, **mesh_options):
+    monkeypatch.setattr(voxelization, "BVHTree", _TriangleBVH)
+    return voxelization.object_fill_test(_mesh_object("Joined", boxes, **mesh_options))
+
+
+def test_fill_test_matches_the_voxelizer_for_a_cavity(monkeypatch):
+    outer = ((0.01, 0.01, 0.01), (0.09, 0.09, 0.09))
+    inner = ((0.03, 0.03, 0.03), (0.07, 0.07, 0.07))
+    is_filled = _fill_test_for_boxes(monkeypatch, [outer, inner])
+    assert is_filled(0.021, 0.052, 0.05) is True      # in the wall
+    assert is_filled(0.051, 0.052, 0.05) is False     # in the cavity
+    assert is_filled(0.095, 0.052, 0.05) is False     # outside the object
+    assert is_filled(0.051, 0.052, 0.08) is True      # wall above the cavity
+
+
+def test_fill_test_fills_the_overlap_of_two_shells(monkeypatch):
+    a = ((0.01, 0.01, 0.01), (0.06, 0.06, 0.06))
+    b = ((0.03, 0.03, 0.03), (0.09, 0.09, 0.09))
+    is_filled = _fill_test_for_boxes(monkeypatch, [a, b])
+    assert is_filled(0.041, 0.052, 0.05) is True      # in both
+    assert is_filled(0.021, 0.022, 0.02) is True      # only in a
+    assert is_filled(0.081, 0.082, 0.02) is False     # beside b, below it
+
+
+def test_fill_test_gives_no_verdict_on_an_open_surface(monkeypatch):
+    """A ray leaving through a missing face has an unpaired crossing."""
+    box = ((0.01, 0.01, 0.01), (0.09, 0.09, 0.09))
+    is_filled = _fill_test_for_boxes(monkeypatch, [box], drop_faces=(1,))
+    assert is_filled(0.051, 0.052, 0.05) is None
+
+
+def test_fill_test_is_none_without_geometry():
+    assert voxelization.object_fill_test(_EmptyObject()) is None
 
 
 def test_polygon_islands_groups_connected_faces():

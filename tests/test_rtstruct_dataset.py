@@ -241,12 +241,63 @@ def _square(x0, y0, size, z=0.0):
     return [(x0, y0, z), (x0 + size, y0, z), (x0 + size, y0 + size, z), (x0, y0 + size, z)]
 
 
-def test_loops_inside_other_loops_are_dropped_largest_first():
+def _inside_square(x, y, x0, y0, size):
+    return x0 < x < x0 + size and y0 < y < y0 + size
+
+
+def test_hole_of_a_ring_is_kept():
+    """A torus or tube is one closed surface, yet its inner loop is a hole:
+    the solid ends there, so the loop must survive."""
+    outer = _square(0.0, 0.0, 0.1)
+    hole = _square(0.03, 0.03, 0.04)
+
+    def ring(x, y, _z):
+        return _inside_square(x, y, 0.0, 0.0, 0.1) and not _inside_square(x, y, 0.03, 0.03, 0.04)
+
+    assert rtstruct_export._keep_boundary_loops([outer, hole], 0.0, ring) == [outer, hole]
+
+
+def test_loop_buried_in_solid_is_dropped():
+    """The cut of a lobe overlapping a bigger part is solid on both sides."""
     big = _square(0.0, 0.0, 0.1)
-    inner = _square(0.03, 0.03, 0.02)
+    lobe = _square(0.03, 0.03, 0.02)
     apart = _square(0.2, 0.0, 0.05)
-    kept = rtstruct_export._drop_loops_inside_other_loops([inner, apart, big])
-    assert kept == [big, apart]
+
+    def solid(x, y, _z):
+        return _inside_square(x, y, 0.0, 0.0, 0.1) or _inside_square(x, y, 0.2, 0.0, 0.05)
+
+    assert rtstruct_export._keep_boundary_loops([lobe, apart, big], 0.0, solid) == [apart, big]
+
+
+def test_island_inside_a_hole_is_kept():
+    outer = _square(0.0, 0.0, 0.1)
+    hole = _square(0.02, 0.02, 0.06)
+    island = _square(0.04, 0.04, 0.02)
+
+    def filled(x, y, _z):
+        in_wall = _inside_square(x, y, 0.0, 0.0, 0.1) and not _inside_square(x, y, 0.02, 0.02, 0.06)
+        return in_wall or _inside_square(x, y, 0.04, 0.04, 0.02)
+
+    kept = rtstruct_export._keep_boundary_loops([outer, hole, island], 0.0, filled)
+    assert kept == [outer, hole, island]
+
+
+def test_crossing_loops_are_kept_whole():
+    a = _square(0.0, 0.0, 0.06)
+    b = _square(0.03, 0.03, 0.06)
+
+    def union(x, y, _z):
+        return _inside_square(x, y, 0.0, 0.0, 0.06) or _inside_square(x, y, 0.03, 0.03, 0.06)
+
+    assert rtstruct_export._keep_boundary_loops([a, b], 0.0, union) == [a, b]
+
+
+def test_nested_loop_is_kept_when_the_fill_test_is_ambiguous():
+    """Unpaired ray crossings (open mesh) give no verdict; never drop on that."""
+    outer = _square(0.0, 0.0, 0.1)
+    inner = _square(0.03, 0.03, 0.02)
+    assert rtstruct_export._keep_boundary_loops([outer, inner], 0.0, lambda *_: None) == [outer, inner]
+    assert rtstruct_export._keep_boundary_loops([outer, inner], 0.0, None) == [outer, inner]
 
 
 def test_roi_without_contours_omits_the_empty_contour_sequence(tmp_path):
@@ -259,16 +310,16 @@ def test_roi_without_contours_omits_the_empty_contour_sequence(tmp_path):
     assert len(restored.StructureSetROISequence) == 1
 
 
-@pytest.mark.parametrize("has_cavity, expected_types, expected_count", [
+@pytest.mark.parametrize("lobe_is_hole, expected_types, expected_count", [
     (False, {"CLOSED_PLANAR"}, 1),
     (True, {"CLOSEDPLANAR_XOR"}, 2),
 ])
-def test_nested_loops_follow_the_3d_cavity_decision(
-    tmp_path, monkeypatch, has_cavity, expected_types, expected_count
+def test_nested_loops_follow_the_voxelizer_fill_rule(
+    tmp_path, monkeypatch, lobe_is_hole, expected_types, expected_count
 ):
     """A lobe joined to a bigger solid can cut a loop inside the bigger loop on
-    some planes. Only a real 3D cavity (as the voxelizer decides) may turn it
-    into a hole; otherwise the image fills it and the ROI must too."""
+    some planes. It is a hole only where the voxelized image is empty inside
+    it; where the image is solid the ROI must be too."""
     from types import SimpleNamespace
 
     z0 = _z_for_slice(0)
@@ -280,7 +331,12 @@ def test_nested_loops_follow_the_3d_cavity_decision(
         return {float(z): ([outer, lobe] if abs(z - z0) < 1e-9 else []) for z in z_positions_m}, 0
 
     monkeypatch.setattr(rtstruct_export, "_extract_contours_iter", fake_extract)
-    monkeypatch.setattr(rtstruct_export, "object_has_cavity", lambda *a, **k: has_cavity)
+
+    def is_filled(x, y, _z):
+        in_lobe = _inside_square(x, y, 0.03, 0.03, 0.02)
+        return _inside_square(x, y, 0.0, 0.0, 0.1) and not (lobe_is_hole and in_lobe)
+
+    monkeypatch.setattr(rtstruct_export, "object_fill_test", lambda *a, **k: is_filled)
     obj = SimpleNamespace(name="Body", material_slots=[], dicomator_roi_type="ORGAN")
     generator = rtstruct_export.export_rtstruct_to_dicom_iter(
         [obj], SimpleNamespace(z=BBOX_MIN_Z_M), (0.001, 0.001, VZ_M), 2, str(tmp_path), None,
@@ -296,3 +352,12 @@ def test_nested_loops_follow_the_3d_cavity_decision(
     contours = restored.ROIContourSequence[0].ContourSequence
     assert len(contours) == expected_count
     assert {c.ContourGeometricType for c in contours} == expected_types
+
+
+def test_structure_set_carries_the_mandatory_approval_module(tmp_path):
+    """Approval is a mandatory module of the RT Structure Set IOD (PS3.3
+    A.19.3) and Approval Status (300E,0002) is Type 1."""
+    ds, _, _ = _build()
+    output = tmp_path / "rs.dcm"
+    ds.save_as(output, enforce_file_format=True)
+    assert pydicom.dcmread(output).ApprovalStatus == "UNAPPROVED"
