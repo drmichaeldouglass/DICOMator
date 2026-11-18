@@ -54,12 +54,6 @@ _NESTING_SAMPLE_VERTICES = 8
 #: faces of a mesh are grouped into connected surfaces.
 _WELD_TOLERANCE_M = 1e-6
 
-#: Ray hits closer together than this distance (metres) are merged before
-#: entry/exit pairing. A ray grazing an edge shared by two faces reports the
-#: same surface twice; without merging, the duplicate flips the inside/outside
-#: parity and incorrectly fills the remainder of the voxel column.
-_HIT_MERGE_TOLERANCE_M = 1e-5
-
 #: Number of voxel columns processed between progress yields.
 _PROGRESS_CHUNK = 2048
 
@@ -73,34 +67,20 @@ _MAX_COLUMN_HITS = 4096
 _RAY_RESTART_EPSILON_M = 1e-6
 
 
+def _float32_spacing(z: float) -> float:
+    # Binary32 has 24 significant bits, including its implicit leading bit.
+    _, exponent = math.frexp(z)
+    return math.ldexp(1.0, exponent - 24) if z else 0.0
+
+
 def restart_z_past_hit(hit_z: float) -> float:
-    """Return a Z just past ``hit_z`` so a restarted +Z ray clears that face.
-
-    ``mathutils.Vector`` stores single-precision floats, whose spacing already
-    swallows a fixed 1e-6 m nudge once ``|z|`` reaches 32 metres: the restarted
-    ray would round straight back onto the face it just hit and report the same
-    crossing forever. Scaling the step with the coordinate magnitude keeps it
-    ahead of the surface anywhere in the scene, while staying well below the
-    finest voxel spacing the add-on offers (0.1 mm).
-    """
-
-    return hit_z + max(_RAY_RESTART_EPSILON_M, abs(hit_z) * 1e-6)
+    """Advance at least a micron or one float32 step past the previous face."""
+    return hit_z + max(_RAY_RESTART_EPSILON_M, _float32_spacing(hit_z))
 
 
 def surface_tolerance(z: float) -> float:
-    """Distance within which a voxel centre counts as lying *on* a surface at ``z``.
-
-    Ray hits are computed in single precision, so the Z reported for one flat
-    face differs from column to column by a few float32 steps. When that face
-    sits exactly on a plane of voxel centres (a 25 mm block on 2 mm slices),
-    comparing the raw numbers puts some columns of that slice inside and
-    others outside, leaving a speckled slice. Centres within this tolerance
-    of an entry or exit surface are therefore all treated the same way: as
-    inside. The tolerance follows the float32 spacing of the coordinate and
-    is at most 1% of the finest voxel spacing the add-on offers (0.1 mm).
-    """
-
-    return max(_RAY_RESTART_EPSILON_M, abs(z) * 1e-6)
+    """Allow two float32 steps of hit noise when including a boundary voxel."""
+    return max(_RAY_RESTART_EPSILON_M, 2.0 * _float32_spacing(z))
 
 
 def _geometry_key(obj: Object) -> str:
@@ -269,7 +249,7 @@ def _polygons_on_open_edges(
 
 
 def _column_hits(ray_cast, x: float, y: float, z_start: float, z_end: float) -> tuple[list[float], bool]:
-    """Return the merged +Z surface crossings of one column and a stall flag."""
+    """Return distinct +Z surface crossings of one column and a stall flag."""
     origin_ray = Vector((x, y, z_start))
     ray_dir = Vector((0.0, 0.0, 1.0))
     hits_z: list[float] = []
@@ -280,7 +260,11 @@ def _column_hits(ray_cast, x: float, y: float, z_start: float, z_end: float) -> 
         )
         if location is None:
             break
-        hits_z.append(location.z)
+        # The next cast starts above this hit. Two distinct heights may be
+        # opposite sides of a thin wall. Merging them changes the parity of
+        # every interval above the wall, even when it contains no voxel centre.
+        if not hits_z or location.z > hits_z[-1]:
+            hits_z.append(location.z)
         if len(hits_z) >= _MAX_COLUMN_HITS:
             stalled = True
             break
@@ -291,12 +275,7 @@ def _column_hits(ray_cast, x: float, y: float, z_start: float, z_end: float) -> 
             stalled = True
             break
         origin_ray = next_origin
-    hits_z.sort()
-    merged: list[float] = []
-    for hit_z in hits_z:
-        if not merged or (hit_z - merged[-1]) > _HIT_MERGE_TOLERANCE_M:
-            merged.append(hit_z)
-    return merged, stalled
+    return hits_z, stalled
 
 
 def _shell_contains_points(bvh: BVHTree, bounds: Bounds, points: np.ndarray) -> bool:

@@ -79,6 +79,13 @@ def test_ct_series_geometry_and_pixels(tmp_path):
         np.testing.assert_array_equal(ds.pixel_array, grid[:, :, index].T)
 
 
+def test_direct_hu_rounds_fractional_intensities(tmp_path):
+    grid = np.array([[[-75.6], [50.7]]])
+    _, datasets = _export(tmp_path, grid)
+    np.testing.assert_array_equal(datasets[0].pixel_array, [[-76], [51]])
+    np.testing.assert_array_equal(grid[:, :, 0], [[-75.6, 50.7]])
+
+
 def test_shared_uids_are_respected(tmp_path):
     generate_uid = constants.generate_uid
     study_uid = generate_uid()
@@ -218,6 +225,7 @@ def test_direct_hu_clips_before_int16_cast(tmp_path):
     [
         (np.empty((0, 2, 2)), VOXEL_SIZE_M, "must not be empty"),
         (np.zeros((2, 2)), VOXEL_SIZE_M, "must be a 3D array"),
+        (np.full((2, 2, 2), 1 + 2j), VOXEL_SIZE_M, "real numeric"),
         (np.full((2, 2, 2), np.nan), VOXEL_SIZE_M, "NaN or infinite"),
         (np.zeros((2, 2, 2)), (0.002, 0.0, 0.004), "greater than zero"),
     ],

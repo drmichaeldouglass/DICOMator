@@ -296,7 +296,7 @@ Every enabled output is written as its own DICOM series inside a single study:
 - DRR generation projects the voxelized volume rather than the original triangle mesh, so image sharpness depends on the chosen voxel spacing.
 - Modifier/armature evaluation is optional but increases memory/time usage; complex rigs may still require baking.
 - Output orientation is fixed to axial slices aligned with Blender world axes, with one Blender unit required to equal one metre.
-- DRR export requires an active scene camera and uses image-type meshes without the CT/MR artifact stack.
+- DRR export requires an active orthographic or perspective scene camera and uses image-type meshes without the CT/MR artifact stack.
 - RT Structure Set contour extraction is performed per-slice using planar bisection; very thin or highly curved structures may produce incomplete contours at coarse voxel spacings.
 - RT Dose is plan-level synthetic data only. Fraction and beam dose are unavailable until DICOMator models the required fraction scheme and treatment geometry.
 - Each mesh contributes to exactly one DICOM object type; use duplicate meshes if the same geometry should be exported as multiple object types.
@@ -308,7 +308,7 @@ Every enabled output is written as its own DICOM series inside a single study:
   - Reinstall the DICOMator extension package. Its pydicom dependency is bundled and should be installed automatically by Blender.
 - **“Voxel grid too large”**
   - Increase voxel spacing (mm), reduce padding/selection size, or limit the frame range. To proceed anyway, switch to **Advanced** mode and enable **Allow Oversized Grids** in the Export panel.
-- **“Set an active scene camera before exporting a DRR”**
+- **“Set an active scene camera for DRR export”**
   - Assign a camera to the scene (`Scene Properties → Camera`) or make a camera active in the 3D View before DRR export.
 - **“Choose a new or empty export folder”**
   - DICOMator never mixes a new study with existing files. Choose an empty directory or move the previous export elsewhere.

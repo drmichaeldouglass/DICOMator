@@ -108,6 +108,57 @@ def _assert_cube_ct_export() -> None:
         DICOMator.unregister()
 
 
+def _assert_thin_wall_voxelization() -> None:
+    """A sub-voxel wall of a watertight C-section must not invert the cavity."""
+    profile = [
+        (0, 0), (0.01, 0), (0.01, 0.000005), (0.002, 0.000005),
+        (0.002, 0.004), (0.01, 0.004), (0.01, 0.008), (0, 0.008),
+    ]
+    count = len(profile)
+    vertices = [(x, y, z) for y in (0.0, 0.01) for x, z in profile]
+    faces = [tuple(range(count)), tuple(reversed(range(count, 2 * count)))]
+    for index in range(count):
+        following = (index + 1) % count
+        faces.append((following, index, index + count, following + count))
+    mesh = bpy.data.meshes.new("Thin wall")
+    mesh.from_pydata(vertices, [], faces)
+    obj = bpy.data.objects.new("Thin wall", mesh)
+    bpy.context.collection.objects.link(obj)
+    volume, _, _ = DICOMator.voxelize_objects_to_hu(
+        [obj], voxel_size=0.001, padding=0,
+        bbox_override=(0.005, 0.006, 0.005, 0.006, 0.0, 0.008),
+    )
+    np.testing.assert_array_equal(
+        volume[0, 0], [constants.AIR_DENSITY] * 4 + [constants.DEFAULT_DENSITY] * 4,
+    )
+
+
+def _assert_split_seam_rtstruct_export() -> None:
+    """A closed cube with vertices split per face still has a square contour."""
+    bpy.ops.mesh.primitive_cube_add(size=0.1)
+    cube = bpy.context.active_object.data
+    vertices, faces = [], []
+    for face in cube.polygons:
+        faces.append(tuple(range(len(vertices), len(vertices) + len(face.vertices))))
+        vertices.extend(tuple(cube.vertices[i].co) for i in face.vertices)
+    mesh = bpy.data.meshes.new("Cube with seams")
+    mesh.from_pydata(vertices, [], faces)
+    obj = bpy.data.objects.new("Cube with seams", mesh)
+    bpy.context.collection.objects.link(obj)
+    with tempfile.TemporaryDirectory() as output_dir:
+        result = DICOMator.export_rtstruct_to_dicom(
+            [obj], Vector((0, 0, -0.0005)), 0.001, 1, output_dir,
+            bpy.context.evaluated_depsgraph_get(),
+        )
+        assert "success" in result and not result["warnings"], result
+        ds = pydicom.dcmread(Path(output_dir) / "RTStruct.dcm")
+        contours = ds.ROIContourSequence[0].ContourSequence
+        assert len(contours) == 1
+        points = np.asarray(contours[0].ContourData, dtype=float).reshape(-1, 3)
+        assert set(map(tuple, points)) == {(x, y, 0.0) for x in (-50, 50) for y in (-50, 50)}
+        assert len(mesh.vertices) == 24
+
+
 def _assert_hollow_rtstruct_export() -> None:
     """Check that real mesh bisection preserves a torus's inner boundary."""
     DICOMator.register()
@@ -242,6 +293,8 @@ def main() -> None:
     _assert_failed_registration_rolls_back()
     _assert_registration_cycle()
     _assert_cube_ct_export()
+    _assert_thin_wall_voxelization()
+    _assert_split_seam_rtstruct_export()
     _assert_hollow_rtstruct_export()
     _assert_buried_lobe_is_not_a_hole()
     _assert_face_on_slice_plane_fills_the_slice()

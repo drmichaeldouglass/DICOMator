@@ -78,6 +78,7 @@ jobs:
             --background \
             --factory-startup \
             --python-use-system-env \
+            --python-exit-code 1 \
             --python tests/blender_smoke.py
         env:
           PYTHONPATH: /tmp/dicomator-python

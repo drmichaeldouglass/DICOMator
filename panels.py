@@ -28,7 +28,7 @@ from .constants import (
     ui_feature_visible,
     ui_mode_of,
 )
-from .drr import resolve_drr_detector_size
+from .drr import drr_camera_error, resolve_drr_detector_size
 from .utils import get_float_prop, get_str_prop, resolve_output_directory
 
 
@@ -230,9 +230,9 @@ def _draw_export_action(layout: bpy.types.UILayout, context: Context) -> None:
         layout.label(text="No structure mesh selected", icon='ERROR')
         return
     if outputs["drr"]:
-        camera_obj = context.scene.camera
-        if camera_obj is None or camera_obj.type != 'CAMERA':
-            layout.label(text="Set a scene camera", icon='ERROR')
+        camera_error = drr_camera_error(context.scene.camera)
+        if camera_error:
+            layout.label(text=camera_error, icon='ERROR')
             return
 
     export_meshes = _objects_for_enabled_outputs(selected_meshes, outputs)
@@ -352,7 +352,8 @@ class VIEW3D_PT_dicomator_selection_info(Panel):
         if resolve_export_outputs(props)["drr"]:
             camera_obj = context.scene.camera
             detector_box = layout.column(align=True)
-            if camera_obj and camera_obj.type == 'CAMERA':
+            camera_error = drr_camera_error(camera_obj)
+            if camera_error is None:
                 detector_box.label(text=f"Active Camera: {camera_obj.name}", icon='CAMERA_DATA')
                 detector_width, detector_height = resolve_drr_detector_size(
                     context.scene,
@@ -360,7 +361,7 @@ class VIEW3D_PT_dicomator_selection_info(Panel):
                 )
                 detector_box.label(text=f"Detector: {detector_width} x {detector_height} px", icon='IMAGE_DATA')
             else:
-                detector_box.label(text="Set an active scene camera for DRR export", icon='ERROR')
+                detector_box.label(text=camera_error, icon='ERROR')
 
 
 class VIEW3D_PT_dicomator_per_object_hu(Panel):
@@ -469,7 +470,8 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
             drr_box.prop(props, "drr_resolution_scale")
             drr_box.prop(props, "drr_water_attenuation_m_inv")
             camera_obj = context.scene.camera
-            if camera_obj and camera_obj.type == 'CAMERA':
+            camera_error = drr_camera_error(camera_obj)
+            if camera_error is None:
                 detector_width, detector_height = resolve_drr_detector_size(
                     context.scene,
                     resolution_scale=get_float_prop(props, "drr_resolution_scale", 1.0),
@@ -479,7 +481,7 @@ class VIEW3D_PT_dicomator_export_settings(Panel):
                 if str(getattr(camera_obj.data, "type", "PERSP")).upper() != "ORTHO":
                     drr_box.label(text="Perspective camera: spatial tags omitted", icon='ERROR')
             else:
-                drr_box.label(text="No active scene camera", icon='ERROR')
+                drr_box.label(text=camera_error, icon='ERROR')
 
         layout.prop(props, "apply_modifiers", text="Apply Modifiers")
         if ui_feature_visible(props, UI_FEATURE_OVERSIZED_GRIDS):
