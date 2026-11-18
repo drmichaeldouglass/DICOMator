@@ -431,3 +431,37 @@ def test_output_directory_expands_the_home_folder(monkeypatch, tmp_path):
     monkeypatch.setattr(utils, "bpy", _NS(path=_NS(abspath=lambda value: value)))
     monkeypatch.setenv("HOME", str(tmp_path))
     assert utils.resolve_output_directory("~/DICOM") == str(tmp_path / "DICOM")
+
+
+def test_relative_export_path_of_an_unsaved_file_uses_the_home_folder(monkeypatch, tmp_path):
+    """An unsaved .blend has no folder for '//' to be relative to.
+
+    Blender would fall back to the working directory, which is '/' for an app
+    started from the macOS Finder, so the default export folder was unwritable
+    on a brand-new scene.
+    """
+
+    from types import SimpleNamespace as _NS
+
+    utils = load_module("utils")
+    monkeypatch.setattr(
+        utils, "bpy", _NS(data=_NS(filepath=""), path=_NS(abspath=lambda value: value))
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert utils.resolve_output_directory("//DICOM_Export") == str(tmp_path / "DICOM_Export")
+
+
+def test_relative_export_path_of_a_saved_file_stays_beside_the_blend(monkeypatch, tmp_path):
+    from types import SimpleNamespace as _NS
+
+    utils = load_module("utils")
+    blend_dir = tmp_path / "project"
+    monkeypatch.setattr(
+        utils,
+        "bpy",
+        _NS(
+            data=_NS(filepath=str(blend_dir / "phantom.blend")),
+            path=_NS(abspath=lambda value: str(blend_dir / value[2:])),
+        ),
+    )
+    assert utils.resolve_output_directory("//DICOM_Export") == str(blend_dir / "DICOM_Export")

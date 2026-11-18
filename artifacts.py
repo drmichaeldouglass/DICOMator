@@ -230,6 +230,46 @@ def _centred_coordinates(
     ]
 
 
+def _box_smooth_along_axis(array: np.ndarray, window: int, axis: int) -> np.ndarray:
+    """Edge-padded moving average of odd length ``window`` along ``axis``.
+
+    Gives the same result as :func:`_moving_average_along_axis` but never
+    builds the padded array. The window of a smooth field is set by the
+    volume's largest extent, so along a short axis (a stack of a few slices)
+    it can be thousands of samples long; padding a 2-slice volume to that
+    length allocated gigabytes. Here the window sum comes from a running
+    (cumulative) sum, and samples beyond either end are counted as copies of
+    the edge sample.
+    """
+
+    half = int(window) // 2
+    moved = np.moveaxis(array, axis, -1)
+    n = moved.shape[-1]
+    if half < 1 or n == 1:
+        # A window of one sample, or an axis whose every padded sample is the
+        # same value, leaves the data unchanged.
+        return array
+    cumulative = np.zeros(moved.shape[:-1] + (n + 1,), dtype=np.float64)
+    np.cumsum(moved, axis=-1, dtype=np.float64, out=cumulative[..., 1:])
+    index = np.arange(n)
+    upper = np.minimum(index + half + 1, n)
+    lower = np.maximum(index - half, 0)
+    total = cumulative[..., upper]
+    total -= cumulative[..., lower]
+    del cumulative
+    # Window positions that fall off the low / high end of the axis.
+    below = np.maximum(half - index, 0).astype(np.float64)
+    above = np.maximum(index + half - (n - 1), 0).astype(np.float64)
+    total += below * moved[..., :1]
+    total += above * moved[..., -1:]
+    total /= float(2 * half + 1)
+    return np.moveaxis(total.astype(np.float32), -1, axis)
+
+
+#: Moving-average passes per axis used to build a smooth random field.
+_SMOOTHING_PASSES = 3
+
+
 def _smooth_random_field(
     shape: tuple[int, ...],
     scale: float,
@@ -251,10 +291,18 @@ def _smooth_random_field(
     correlation_length = float(scale) * _largest_extent(shape, spacings)
     field = rng.normal(0.0, 1.0, size=shape).astype(np.float32, copy=False)
     for axis, spacing in enumerate(spacings):
-        window = max(3, int(round(correlation_length / float(spacing))))
+        # Three passes of a moving average approximate a Gaussian. A single
+        # pass leaves a field that is continuous but whose *gradient* is still
+        # white noise (it is the difference of two noise samples one window
+        # apart), and the distortion model multiplies the image by exactly
+        # that gradient (the Jacobian), which showed up as line-to-line
+        # striping. Dividing the window by sqrt(3) keeps the overall
+        # correlation length, because the variances of the passes add.
+        window = max(3, int(round(correlation_length / float(spacing) / math.sqrt(_SMOOTHING_PASSES))))
         if window % 2 == 0:
             window += 1
-        field = _moving_average_along_axis(field, window, axis)
+        for _pass in range(_SMOOTHING_PASSES):
+            field = _box_smooth_along_axis(field, window, axis)
     field -= float(np.mean(field))
     max_abs = float(np.max(np.abs(field)))
     if max_abs > 0.0:
@@ -391,8 +439,8 @@ def add_metal_artifacts(
         Voxels with HU above this value are treated as metal sources.
     num_streaks:
         Number of projection view angles distributed over 180 degrees. More
-        views produce a denser, finer star pattern. Values ``<= 0`` fall back to
-        an automatic count. (Kept named ``num_streaks`` for backward
+        views produce a denser, finer star pattern; at most 360 are used.
+        Values ``<= 0`` fall back to an automatic count of 60. (Kept named ``num_streaks`` for backward
         compatibility with existing callers/UI.)
     falloff:
         Controls how quickly streaks decay with distance from the metal. Higher
@@ -416,7 +464,7 @@ def add_metal_artifacts(
     # good approximation.
     work_cap = 256
     num_views = int(num_streaks) if int(num_streaks) > 0 else 60
-    num_views = int(np.clip(num_views, 16, 360))
+    num_views = int(np.clip(num_views, 1, 360))
     # ``falloff`` sharpens the radial decay of the back-projected streaks.
     decay = float(np.clip(falloff, 0.1, 24.0)) / 6.0
 
@@ -510,7 +558,12 @@ def add_metal_artifacts(
         rad_norm = rad / half_diag
         back_proj *= np.exp(-decay * rad_norm).astype(np.float32)
 
-        slice_peak = float(np.percentile(np.abs(back_proj), 99.5))
+        # The peak is measured outside the metal: the back-projection is
+        # strongest inside it, but those voxels are left untouched below, so
+        # including them made a large implant's visible streaks far weaker
+        # than the requested intensity.
+        streak_voxels = np.abs(back_proj[~mask_small]) if not np.all(mask_small) else np.abs(back_proj)
+        slice_peak = float(np.percentile(streak_voxels, 99.5))
         global_peak = max(global_peak, slice_peak)
         slice_fields.append((iz, back_proj, source_mask, slice_peak))
 
