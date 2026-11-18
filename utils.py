@@ -24,6 +24,12 @@ def get_str_prop(props, name: str, default: str) -> str:
         return str(default)
 
 
+def _blend_file_is_saved() -> bool:
+    """Return True when the open .blend file has been saved to disk."""
+
+    return bool(getattr(getattr(bpy, "data", None), "filepath", ""))
+
+
 def resolve_output_directory(output_dir: str) -> str:
     """Resolve Blender-relative paths into an absolute export directory."""
 
@@ -32,9 +38,15 @@ def resolve_output_directory(output_dir: str) -> str:
         return ""
 
     # bpy.path.abspath resolves the Blender-specific '//' prefix relative to
-    # the open .blend file; unsaved files resolve relative to the current
-    # working directory via os.path.abspath below.
-    resolved_dir = bpy.path.abspath(resolved_dir)
+    # the open .blend file. An unsaved file has no folder to be relative to,
+    # and Blender would fall back to the process working directory: '/' when
+    # launched from the macOS Finder, the install folder on Windows. Neither
+    # is writable, so the default '//DICOM_Export' would fail on a new scene.
+    # The home folder is used instead; the Export panel shows the result.
+    if resolved_dir.startswith("//") and not _blend_file_is_saved():
+        resolved_dir = os.path.join(os.path.expanduser("~"), resolved_dir[2:].lstrip("/\\"))
+    else:
+        resolved_dir = bpy.path.abspath(resolved_dir)
     # A typed "~/DICOM" means the home folder, not a directory named "~".
     resolved_dir = os.path.expanduser(resolved_dir)
 

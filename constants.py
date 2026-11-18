@@ -584,7 +584,7 @@ def estimate_peak_memory_bytes(
             # noise, peaks at 40 B/voxel of temporaries, and the chain adds up
             # to 0.15 B/voxel of per-slice buffers (metal streaks), hence one
             # more byte. Measured: full CT chain 44.1 B/voxel including the
-            # grid, Poisson alone 42.0, MR bias field alone 38.0.
+            # grid, Poisson alone 42.0, MR bias field alone 40.1.
             image_bytes += 2 + 40 + 1
         if gibbs_enabled:
             # Gibbs ringing transforms slabs of slices in complex128, which

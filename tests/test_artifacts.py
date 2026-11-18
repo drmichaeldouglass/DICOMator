@@ -520,3 +520,70 @@ def test_bias_field_runs_on_a_single_slice():
     out = artifacts.add_bias_field_shading(volume, strength=0.3, rng=np.random.default_rng(2))
     assert out.shape == volume.shape
     assert np.isfinite(out).all() and out.std() > 0.0
+
+
+def test_random_field_has_a_smooth_gradient():
+    """The distortion Jacobian is the field's gradient, so the gradient itself
+    must vary slowly. One moving-average pass left it as white noise, which
+    striped the distorted image from one line to the next."""
+    field = artifacts._smooth_random_field((160, 120, 8), 0.35, np.random.default_rng(3), (1.5, 1.5, 3.0))
+    for axis in (0, 1):
+        gradient = np.diff(field, axis=axis)
+        change = np.abs(np.diff(gradient, axis=axis)).mean()
+        assert change < 0.1 * np.abs(gradient).mean(), axis
+
+
+def test_geometric_distortion_does_not_stripe_a_uniform_region():
+    """Pile-up from a smooth off-resonance field changes gradually: adjacent
+    lines inside a uniform block must not flicker in intensity."""
+    volume = np.full((120, 120, 6), 1000, dtype=np.int16)
+    out = artifacts.add_mri_geometric_distortion(
+        volume, gradient_strength=0.0, b0_strength=5.0, b0_scale=0.35,
+        readout_axis=1, rng=np.random.default_rng(3), voxel_size=(1.5, 1.5, 3.0),
+    ).astype(np.float64)
+    interior = out[30:90, 30:90, :]
+    line_to_line = np.abs(np.diff(interior, n=2, axis=1)).mean()
+    assert line_to_line < 1.0  # was ~10 intensity units of ripple on 1000
+
+
+@pytest.mark.parametrize("shape,window,axis", [((7, 5, 3), 5, 0), ((7, 5, 3), 9, 1), ((6, 4, 2), 41, 2), ((4, 4, 1), 7, 2)])
+def test_box_smooth_matches_the_padded_moving_average(shape, window, axis):
+    data = np.random.default_rng(0).normal(size=shape).astype(np.float32)
+    expected = artifacts._moving_average_along_axis(data, window, axis)
+    np.testing.assert_allclose(artifacts._box_smooth_along_axis(data, window, axis), expected, atol=1e-5)
+
+
+def test_smooth_field_memory_stays_bounded_on_a_thin_slab():
+    """The smoothing window follows the largest extent, so a single slice
+    used to be edge-padded to hundreds of slices (236 MiB for 512 x 512 x 1)."""
+    import tracemalloc
+
+    shape = (256, 256, 1)
+    tracemalloc.start()
+    artifacts._smooth_random_field(shape, 1.0, np.random.default_rng(0), (1.0, 1.0, 1.0))
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert peak < 64 * np.prod(shape)
+
+
+def test_metal_streaks_reach_the_requested_intensity_around_a_large_implant():
+    """The streak peak is normalised outside the metal; measured over the
+    whole slice, a large implant delivered under half the requested HU."""
+    volume = np.zeros((128, 128, 1), dtype=np.int16)
+    volume[52:76, 52:76, 0] = 3000
+    out = artifacts.add_metal_artifacts(
+        volume, intensity=400.0, density_threshold=2000.0, rng=np.random.default_rng(1)
+    )
+    change = np.abs(out.astype(np.float64) - volume)[volume < 2000]
+    assert np.percentile(change, 99.5) > 300.0
+
+
+def test_metal_view_count_below_sixteen_is_honoured():
+    """The UI default of 10 views used to be silently replaced by 16."""
+    volume = np.zeros((64, 64, 1), dtype=np.int16)
+    volume[30:34, 30:34, 0] = 3000
+    ten, sixteen = (
+        artifacts.add_metal_artifacts(volume, num_streaks=count, rng=np.random.default_rng(1))
+        for count in (10, 16)
+    )
+    assert not np.array_equal(ten, sixteen)

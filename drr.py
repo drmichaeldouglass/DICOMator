@@ -28,10 +28,15 @@ def resolve_drr_detector_size(scene: bpy.types.Scene, resolution_scale: float = 
     """Return the DRR detector size in pixels from the active render settings."""
 
     render = scene.render
-    render_scale = float(render.resolution_percentage) / 100.0
+    percentage = int(render.resolution_percentage)
     scale = max(0.1, float(resolution_scale))
-    width = max(1, int(round(float(render.resolution_x) * render_scale * scale)))
-    height = max(1, int(round(float(render.resolution_y) * render_scale * scale)))
+    # Blender renders at ``resolution * percentage // 100`` (whole pixels,
+    # rounded down); start from that size so a DRR at scale 1.0 matches a
+    # render from the same camera pixel for pixel.
+    render_width = int(render.resolution_x) * percentage // 100
+    render_height = int(render.resolution_y) * percentage // 100
+    width = max(1, int(round(render_width * scale)))
+    height = max(1, int(round(render_height * scale)))
     return width, height
 
 
@@ -117,7 +122,11 @@ def _normalize_projection(line_integrals: np.ndarray, fixed: bool = False) -> np
         return np.zeros(radiograph.shape, dtype=np.uint16)
 
     low = float(np.percentile(radiograph, 1.0))
-    high = float(np.percentile(radiograph, 99.5))
+    # The upper limit is taken over attenuated rays only. Measured over the
+    # whole detector, a phantom covering a few percent of the frame had all
+    # of its dense structures above the 99.5th percentile and clipped to
+    # white; rays through air say nothing about the brightest anatomy.
+    high = float(np.percentile(radiograph[radiograph > 0.0], 99.5))
     if not math.isfinite(low) or not math.isfinite(high) or high <= low:
         low = float(radiograph.min())
         high = float(radiograph.max())

@@ -131,3 +131,22 @@ def test_hu_to_linear_attenuation_rejects_invalid_water_coefficient():
             pass
         else:
             raise AssertionError(f"Expected invalid water coefficient {value!r} to fail")
+
+
+def test_normalize_projection_keeps_contrast_in_a_small_object():
+    """An object covering ~1% of the detector must not clip to flat white:
+    the upper window limit is measured over attenuated rays, not over air."""
+    integrals = np.zeros((200, 200), dtype=np.float32)
+    integrals[90:110, 90:110] = 2.0          # soft tissue
+    integrals[96:104, 96:104] = np.linspace(4.0, 5.0, 64, dtype=np.float32).reshape(8, 8)  # bone
+    out = drr._normalize_projection(integrals)
+    assert len(np.unique(out[96:104, 96:104])) > 32
+    assert out[0, 0] == 0
+
+
+def test_detector_size_truncates_like_the_blender_render():
+    from types import SimpleNamespace as NS
+
+    scene = NS(render=NS(resolution_x=1923, resolution_y=1081, resolution_percentage=50))
+    assert drr.resolve_drr_detector_size(scene) == (961, 540)
+    assert drr.resolve_drr_detector_size(scene, resolution_scale=2.0) == (1922, 1080)

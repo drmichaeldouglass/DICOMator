@@ -106,9 +106,10 @@ def _walk_loops(cut_edges: list) -> tuple[list[list[tuple[float, float, float]]]
     Dangling chains are peeled off first (repeatedly removing degree-1
     vertices), so branch points such as a loop with a stray edge attached do
     not derail the loop walk. At crossings where multiple continuations
-    remain (e.g. a figure-eight cross-section), the walk closes back to its
-    start vertex when possible and otherwise picks the most collinear unused
-    edge, keeping each lobe's edges together.
+    remain (e.g. a figure-eight cross-section), the walk closes a loop back
+    onto its own path when possible and otherwise picks the most collinear
+    unused edge, keeping each lobe's edges together. Loops joined by a
+    bridging edge are each recovered; only the bridge is dropped.
 
     The walk uses vertex/edge object-identity comparisons, which are valid
     while the bmesh remains alive.
@@ -166,53 +167,51 @@ def _walk_loops(cut_edges: list) -> tuple[list[list[tuple[float, float, float]]]
         if id(seed) in used:
             continue
         used.add(id(seed))
-        start, current = seed.verts
-        path: list = [start, current]
-        prev_dir = _direction(start, current)
-        edges_in_path = 1
-        closed = False
-
-        while True:
+        # ``path`` is the chain of vertices walked so far. Whenever the walk
+        # returns to a vertex already on it, the part walked since that
+        # vertex is a closed loop: it is emitted and the walk carries on from
+        # what is left. Discarding the whole path instead lost valid contours
+        # whenever two loops were joined by a stray edge.
+        path: list = list(seed.verts)
+        while len(path) > 1:
+            current = path[-1]
             candidates = _unused(current)
             if not candidates:
-                break
+                # Dead end: give up this one edge and try another branch.
+                dropped += 1
+                path.pop()
+                continue
 
-            closing_edge = None
+            prev_dir = _direction(path[-2], current)
             best_edge = None
-            best_next = None
-            best_dir = None
-            best_dot = -2.0
+            best_key = (False, -2.0)
             for edge in candidates:
                 nxt = _other(edge, current)
-                if nxt is start and len(path) >= 3:
-                    closing_edge = edge
-                    break
                 direction = _direction(current, nxt)
                 dot = (
                     prev_dir[0] * direction[0]
                     + prev_dir[1] * direction[1]
                     + prev_dir[2] * direction[2]
                 )
-                if dot > best_dot:
-                    best_edge, best_next, best_dir, best_dot = edge, nxt, direction, dot
+                # Prefer an edge that closes a loop of three or more vertices,
+                # then the most collinear continuation.
+                key = (any(nxt is vert for vert in path[:-2]), dot)
+                if best_edge is None or key > best_key:
+                    best_edge, best_key = edge, key
 
-            if closing_edge is not None:
-                used.add(id(closing_edge))
-                edges_in_path += 1
-                closed = True
-                break
-            if best_edge is None:
-                break
             used.add(id(best_edge))
-            edges_in_path += 1
-            path.append(best_next)
-            prev_dir = best_dir
-            current = best_next
-
-        if closed and len(path) >= 3:
-            loops.append([(float(v.co.x), float(v.co.y), float(v.co.z)) for v in path])
-        else:
-            dropped += edges_in_path
+            nxt = _other(best_edge, current)
+            hit = next((index for index, vert in enumerate(path) if vert is nxt), None)
+            if hit is None:
+                path.append(nxt)
+                continue
+            loop = path[hit:]
+            if len(loop) >= 3:
+                loops.append([(float(v.co.x), float(v.co.y), float(v.co.z)) for v in loop])
+            else:
+                # Two edges joining the same pair of vertices enclose nothing.
+                dropped += len(loop)
+            path = path[:hit + 1]
 
     return loops, dropped
 
@@ -268,6 +267,30 @@ def _bmesh_z_extent(bm: bmesh.types.BMesh) -> tuple[float, float] | None:
     )
 
 
+def _outline_edges(cut_edges: list, z_m: float) -> list:
+    """Drop cut edges that lie *inside* a face resting on the slice plane.
+
+    ``bisect_plane`` reports every existing edge that lies in the plane, not
+    only new cuts. When a flat face of the mesh sits exactly on a slice (the
+    cap of a cylinder, a step in a stepped phantom) its internal edges come
+    back too: the diagonals of a triangulated cap, the grid of a subdivided
+    one. They join the outline's vertices by shortcuts, and the loop walk
+    could then return a triangle of the cap instead of its outline.
+
+    An edge belongs to the cross-section outline only if at least one of its
+    faces leaves the plane (a side wall). Edges whose faces all lie in the
+    plane, and loose edges with no face, are removed.
+    """
+
+    def in_plane(face) -> bool:
+        return all(abs(float(vert.co.z) - z_m) <= _BISECT_TOLERANCE_M for vert in face.verts)
+
+    return [
+        edge for edge in cut_edges
+        if any(not in_plane(face) for face in edge.link_faces)
+    ]
+
+
 def _slice_plane(
     bm_base: bmesh.types.BMesh, z_m: float
 ) -> tuple[list[list[tuple[float, float, float]]], int]:
@@ -289,7 +312,7 @@ def _slice_plane(
             clear_inner=False,
         )
         cut_edges = [elem for elem in result["geom_cut"] if isinstance(elem, bmesh.types.BMEdge)]
-        return _walk_loops(cut_edges)
+        return _walk_loops(_outline_edges(cut_edges, float(z_m)))
     finally:
         bm_slice.free()
 
