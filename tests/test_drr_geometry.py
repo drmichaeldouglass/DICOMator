@@ -276,3 +276,21 @@ def test_uniform_attenuation_integrates_partial_final_step(patched_vector, monke
         water_attenuation_coefficient_m_inv=20.0,
     )
     np.testing.assert_allclose(observed[0], 20.0 * path_length, rtol=2e-5)
+
+
+def test_full_field_uniform_slab_preserves_attenuation(patched_vector):
+    image, _ = drr.generate_drr_from_hu_volume(
+        np.zeros((2, 2, 1), dtype=np.int16), (1.0, 1.0, 0.1),
+        Vec3((-1.0, -1.0, 0.0)), _Scene(), _Camera(),
+    )
+    # 100 mm of water: integral 2, mapped to the fixed 0..40 range.
+    np.testing.assert_array_equal(image, np.full((2, 4), round(65535 * 2 / 40)))
+
+
+def test_panorama_cannot_be_exported_as_a_planar_drr(patched_vector):
+    camera = _Camera()
+    camera.data.type = "PANO"
+    with pytest.raises(ValueError, match="orthographic or perspective"):
+        drr.generate_drr_from_hu_volume(
+            np.zeros((2, 2, 2)), VOXEL_SIZE_M, Vec3(GRID_ORIGIN), _Scene(), camera,
+        )

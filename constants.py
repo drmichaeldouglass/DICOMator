@@ -321,8 +321,8 @@ def validate_numeric_array(
         raise ValueError(f"{name} must be a {ndim}D array")
     if array.size == 0 or any(int(length) <= 0 for length in array.shape):
         raise ValueError(f"{name} must not be empty")
-    if not np.issubdtype(array.dtype, np.number):
-        raise ValueError(f"{name} must contain numeric values")
+    if array.dtype.kind not in "iuf":
+        raise ValueError(f"{name} must contain real numeric values")
     if not bool(np.all(np.isfinite(array))):
         raise ValueError(f"{name} contains NaN or infinite values")
     return array

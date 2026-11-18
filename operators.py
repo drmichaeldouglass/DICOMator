@@ -17,7 +17,6 @@ from functools import partial
 from types import SimpleNamespace
 from typing import Generator, Iterable, Sequence
 
-import bmesh
 import bpy
 import numpy as np
 from bpy.types import Operator
@@ -57,9 +56,9 @@ from .constants import (
     ui_mode_of,
 )
 from .dicom_export import export_projection_to_dicom, export_voxel_grid_to_dicom_iter
-from .drr import generate_drr_from_hu_volume_iter
+from .drr import drr_camera_error, generate_drr_from_hu_volume_iter
 from .rtdose_export import export_rtdose_to_dicom
-from .rtstruct_export import export_rtstruct_to_dicom_iter
+from .rtstruct_export import _world_bmesh, export_rtstruct_to_dicom_iter
 from .utils import get_float_prop, resolve_output_directory
 from .voxelization import (
     _object_world_vertices,
@@ -397,24 +396,12 @@ def _non_manifold_names_iter(
 
     names: list[str] = []
     for index, obj in enumerate(objects, start=1):
-        bm = bmesh.new()
-        obj_eval = None
+        bm = _world_bmesh(obj, depsgraph, apply_modifiers=apply_modifiers)
         try:
-            if apply_modifiers and depsgraph is not None:
-                obj_eval = obj.evaluated_get(depsgraph)
-                mesh = obj_eval.to_mesh(
-                    preserve_all_data_layers=False,
-                    depsgraph=depsgraph,
-                )
-            else:
-                mesh = obj.data
-            bm.from_mesh(mesh)
             if any(not edge.is_manifold for edge in bm.edges):
                 names.append(obj.name)
         finally:
             bm.free()
-            if obj_eval is not None:
-                obj_eval.to_mesh_clear()
         yield index, len(objects)
     return names
 
@@ -655,8 +642,9 @@ class DICOMATOR_OT_export_dicom(Operator):
             export_objects.extend(struct_objects)
 
         camera_obj = context.scene.camera if export_drr else None
-        if export_drr and (camera_obj is None or camera_obj.type != 'CAMERA'):
-            self.report({'ERROR'}, "Set an active scene camera before exporting a DRR")
+        camera_error = drr_camera_error(camera_obj) if export_drr else None
+        if camera_error:
+            self.report({'ERROR'}, camera_error)
             return {'CANCELLED'}
         if export_drr and str(getattr(camera_obj.data, "type", "PERSP")).upper() != "ORTHO":
             self.report(

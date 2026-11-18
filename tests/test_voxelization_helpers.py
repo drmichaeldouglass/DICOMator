@@ -55,6 +55,14 @@ def test_restart_step_stays_sub_voxel_at_human_scale():
     assert voxelization.restart_z_past_hit(-0.25) + 0.25 < 1e-4
 
 
+@pytest.mark.parametrize("hit_z", [256.0, -256.0])
+def test_restart_and_boundary_tolerance_do_not_span_a_resolvable_wall(hit_z):
+    # A 0.125 mm wall at this translation spans at least four float32 steps.
+    thickness = 0.000125
+    assert voxelization.restart_z_past_hit(hit_z) < hit_z + thickness
+    assert voxelization.surface_tolerance(hit_z) < thickness
+
+
 class _EmptyVertices:
     """Vertex collection of an object whose modifiers emptied the mesh."""
 

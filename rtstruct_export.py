@@ -236,6 +236,12 @@ def _world_bmesh(
     bm = bmesh.new()
     try:
         bm.from_mesh(mesh_data)
+        # Imported flat-shaded faces can have separate vertices at the exact
+        # same position. Join their open seams on the temporary mesh before
+        # cutting, otherwise each face contributes a disconnected open chain.
+        boundary_vertices = [vert for vert in bm.verts if vert.is_boundary]
+        if boundary_vertices:
+            bmesh.ops.remove_doubles(bm, verts=boundary_vertices, dist=0.0)
         bm.transform(world_matrix)
     except Exception:
         bm.free()

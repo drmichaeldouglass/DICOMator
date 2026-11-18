@@ -155,9 +155,11 @@ def export_voxel_grid_to_dicom_iter(
     num_slices = source_grid.shape[2]
     if direct_hu:
         # Clip before casting so values outside int16 cannot wrap around.
-        hu_grid = np.clip(source_grid, MIN_HU_VALUE, MAX_HU_VALUE).astype(
-            np.int16, copy=False
-        )
+        clipped = np.clip(source_grid, MIN_HU_VALUE, MAX_HU_VALUE)
+        if np.issubdtype(clipped.dtype, np.floating):
+            np.rint(clipped, out=clipped)
+        hu_grid = clipped.astype(np.int16, copy=False)
+        del clipped
     else:
         hu_grid = np.where(source_grid > 0, DEFAULT_DENSITY, AIR_DENSITY).astype(
             np.int16, copy=False

@@ -15,6 +15,15 @@ DRRResult = tuple[np.ndarray, dict[str, object]]
 DRRGenerator = Generator[tuple[int, int], None, DRRResult]
 
 
+def drr_camera_error(camera_obj: bpy.types.Object | None) -> str | None:
+    """Return the reason this camera cannot produce a planar DRR."""
+    if camera_obj is None or camera_obj.type != 'CAMERA':
+        return "Set an active scene camera for DRR export"
+    if camera_obj.data.type not in {'ORTHO', 'PERSP'}:
+        return "DRR export requires an orthographic or perspective camera"
+    return None
+
+
 def resolve_drr_detector_size(scene: bpy.types.Scene, resolution_scale: float = 1.0) -> tuple[int, int]:
     """Return the DRR detector size in pixels from the active render settings."""
 
@@ -113,6 +122,11 @@ def _normalize_projection(line_integrals: np.ndarray, fixed: bool = False) -> np
         low = float(radiograph.min())
         high = float(radiograph.max())
 
+    if high == low:
+        # A homogeneous slab filling the detector has no contrast to stretch.
+        # Use the physical scale used for a 4D acquisition.
+        low, high = 0.0, FIXED_MAX_LINE_INTEGRAL
+
     scale = max(high - low, 1e-6)
     normalized = np.clip((radiograph - low) / scale, 0.0, 1.0)
     return np.round(normalized * 65535.0).astype(np.uint16, copy=False)
@@ -181,8 +195,9 @@ def generate_drr_from_hu_volume_iter(
 ) -> DRRGenerator:
     """Generator variant: yields ``(rows_done, total_rows)`` per detector chunk."""
 
-    if camera_obj is None or camera_obj.type != 'CAMERA':
-        raise ValueError("Scene must have an active camera for DRR export")
+    camera_error = drr_camera_error(camera_obj)
+    if camera_error:
+        raise ValueError(camera_error)
     hu_volume = validate_numeric_array(hu_volume, name="hu_volume", ndim=3)
     vx, vy, vz = resolve_positive_voxel_size(voxel_size)
     mu_water = float(water_attenuation_coefficient_m_inv)
@@ -377,6 +392,7 @@ def generate_drr_from_hu_volume_iter(
 
 
 __all__ = [
+    "drr_camera_error",
     "generate_drr_from_hu_volume",
     "generate_drr_from_hu_volume_iter",
     "resolve_drr_detector_size",
