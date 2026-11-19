@@ -173,13 +173,15 @@ def _walk_loops(cut_edges: list) -> tuple[list[list[tuple[float, float, float]]]
         # what is left. Discarding the whole path instead lost valid contours
         # whenever two loops were joined by a stray edge.
         path: list = list(seed.verts)
+        # Keep loop closure linear in the number of contour edges.
+        path_indices = {vert: index for index, vert in enumerate(path)}
         while len(path) > 1:
             current = path[-1]
             candidates = _unused(current)
             if not candidates:
                 # Dead end: give up this one edge and try another branch.
                 dropped += 1
-                path.pop()
+                del path_indices[path.pop()]
                 continue
 
             prev_dir = _direction(path[-2], current)
@@ -195,14 +197,15 @@ def _walk_loops(cut_edges: list) -> tuple[list[list[tuple[float, float, float]]]
                 )
                 # Prefer an edge that closes a loop of three or more vertices,
                 # then the most collinear continuation.
-                key = (any(nxt is vert for vert in path[:-2]), dot)
+                key = (path_indices.get(nxt, len(path)) < len(path) - 2, dot)
                 if best_edge is None or key > best_key:
                     best_edge, best_key = edge, key
 
             used.add(id(best_edge))
             nxt = _other(best_edge, current)
-            hit = next((index for index, vert in enumerate(path) if vert is nxt), None)
+            hit = path_indices.get(nxt)
             if hit is None:
+                path_indices[nxt] = len(path)
                 path.append(nxt)
                 continue
             loop = path[hit:]
@@ -211,7 +214,9 @@ def _walk_loops(cut_edges: list) -> tuple[list[list[tuple[float, float, float]]]
             else:
                 # Two edges joining the same pair of vertices enclose nothing.
                 dropped += len(loop)
-            path = path[:hit + 1]
+            for vert in loop[1:]:
+                del path_indices[vert]
+            del path[hit + 1:]
 
     return loops, dropped
 
@@ -879,10 +884,9 @@ def export_rtstruct_to_dicom_iter(
         bbox_min_z_m = float(bbox_min.z)
         if not math.isfinite(bbox_min_z_m):
             raise ValueError("bbox_min.z must be finite")
-    except (AttributeError, TypeError, ValueError) as exc:
+        os.makedirs(output_dir, exist_ok=True)
+    except (AttributeError, TypeError, ValueError, OSError) as exc:
         return {"error": str(exc)}
-
-    os.makedirs(output_dir, exist_ok=True)
 
     # Z positions at the voxel centre for each slice (metres).
     z_positions_m: list[float] = [

@@ -328,6 +328,16 @@ def validate_numeric_array(
     return array
 
 
+def validate_dicom_pixel_size(
+    width: int, height: int, *, bytes_per_pixel: int, frames: int = 1,
+) -> None:
+    """Check the US dimensions and native Pixel Data length of one DICOM file."""
+    if max(width, height) > 65535:
+        raise ValueError(f"DICOM image dimensions {width} x {height} exceed 65535 pixels per axis")
+    if width * height * frames * bytes_per_pixel > 2**32 - 2:
+        raise ValueError("Pixel Data exceeds the DICOM native encoding limit of 4 GiB minus 2 bytes")
+
+
 def resolve_positive_voxel_size(voxel_size) -> tuple[float, float, float]:
     """Return a finite positive three-component voxel size in metres."""
 
@@ -831,6 +841,7 @@ __all__ = [
     "truncate_pn",
     "truncate_sh",
     "validate_numeric_array",
+    "validate_dicom_pixel_size",
     "RTSTRUCT_SOP_CLASS",
     "RTDOSE_SOP_CLASS",
     "RTPLAN_SOP_CLASS",

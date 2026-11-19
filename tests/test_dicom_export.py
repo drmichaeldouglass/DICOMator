@@ -295,3 +295,20 @@ def test_drr_patient_orientation_follows_detector_axes(tmp_path):
     ds = pydicom.dcmread(str(tmp_path / "DRR_ap.dcm"))
     assert list(ds.PatientOrientation) == ["L", "F"]
     assert dicom_export._patient_orientation_codes((0.8, -0.6, 0.0, 0.0, 0.0, 1.0)) == ["LA", "H"]
+
+
+@pytest.mark.parametrize("values,phases,window", [
+    ([10, 11], None, (11, 2)),
+    ([0, 0], None, (32768, 65536)),
+    ([0, 5200], 2, (32768, 65536)),
+    ([150, 8500], 2, (32768, 65536)),
+])
+def test_drr_display_window(tmp_path, values, phases, window):
+    image = np.array([values], dtype=np.uint16)
+    result = dicom_export.export_projection_to_dicom(
+        image, str(tmp_path), number_of_temporal_positions=phases,
+    )
+    assert "success" in result, result
+    ds = pydicom.dcmread(next(tmp_path.glob("*.dcm")))
+    assert (float(ds.WindowCenter), float(ds.WindowWidth)) == window
+    np.testing.assert_array_equal(ds.pixel_array, image)

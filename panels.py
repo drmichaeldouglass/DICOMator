@@ -20,6 +20,7 @@ from .constants import (
     ensure_pydicom_available,
     estimate_peak_memory_bytes_for_props,
     export_outputs_selectable,
+    four_d_export_enabled,
     get_pydicom_error,
     grid_limits_exceeded,
     oversized_grids_allowed,
@@ -229,7 +230,7 @@ def _draw_export_action(layout: bpy.types.UILayout, context: Context) -> None:
     if outputs["rtstruct"] and not counts["RTSTRUCT"]:
         layout.label(text="No structure mesh selected", icon='ERROR')
         return
-    if outputs["drr"]:
+    if outputs["drr"] and not four_d_export_enabled(props):
         camera_error = drr_camera_error(context.scene.camera)
         if camera_error:
             layout.label(text=camera_error, icon='ERROR')
@@ -237,17 +238,15 @@ def _draw_export_action(layout: bpy.types.UILayout, context: Context) -> None:
 
     export_meshes = _objects_for_enabled_outputs(selected_meshes, outputs)
     estimate = _grid_estimate(_selection_bounds(export_meshes), props)
-    # The estimated peak memory has to be part of this check: the export
-    # operator aborts on it too, so leaving it out let the button look clear
-    # for a grid that would be rejected the moment it was pressed.
+    # Transformed bounding-box corners can overestimate a rotated mesh.
+    # Only the operator measures actual vertices on the requested frames.
     if estimate is not None and grid_limits_exceeded(
         *estimate[:3], estimate_peak_memory_bytes_for_props(estimate[3], props)
     ):
         if oversized_grids_allowed(props):
             layout.label(text="Oversized grid allowed", icon='ERROR')
         else:
-            layout.label(text="Grid too large - export will abort", icon='ERROR')
-            return
+            layout.label(text="Estimated grid exceeds limits; export checks mesh bounds", icon='INFO')
     layout.operator("dicomator.export_dicom", text=button_text, icon='EXPORT')
 
 
@@ -345,7 +344,7 @@ class VIEW3D_PT_dicomator_selection_info(Panel):
                 if oversized_grids_allowed(props):
                     col.label(text="Oversized grid allowed - may exhaust memory", icon='ERROR')
                 else:
-                    col.label(text="Grid too large - export blocked", icon='CANCEL')
+                    col.label(text="Estimated grid exceeds limits", icon='INFO')
             elif total_voxels > MAX_TOTAL_VOXELS // 2:
                 col.label(text="Large grid - may be slow", icon='ERROR')
 

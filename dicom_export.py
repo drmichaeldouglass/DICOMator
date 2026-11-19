@@ -25,6 +25,7 @@ from .constants import (
     truncate_lo,
     truncate_pn,
     truncate_sh,
+    validate_dicom_pixel_size,
     validate_numeric_array,
 )
 
@@ -139,14 +140,14 @@ def export_voxel_grid_to_dicom_iter(
 
     try:
         source_grid = validate_numeric_array(voxel_grid, name="voxel_grid", ndim=3)
+        validate_dicom_pixel_size(*source_grid.shape[:2], bytes_per_pixel=2)
         vx_m, vy_m, vz_m = resolve_positive_voxel_size(voxel_size)
         bbox_components = [float(bbox_min.x), float(bbox_min.y), float(bbox_min.z)]
         if not all(np.isfinite(component) for component in bbox_components):
             raise ValueError("bbox_min components must be finite")
-    except (AttributeError, TypeError, ValueError) as exc:
+        os.makedirs(output_dir, exist_ok=True)
+    except (AttributeError, TypeError, ValueError, OSError) as exc:
         return {'error': str(exc)}
-
-    os.makedirs(output_dir, exist_ok=True)
 
     current_datetime = study_datetime or datetime.now()
     date_str = current_datetime.strftime('%Y%m%d')
@@ -379,6 +380,7 @@ def export_projection_to_dicom(
             name="projection_image",
             ndim=2,
         )
+        validate_dicom_pixel_size(image_2d.shape[1], image_2d.shape[0], bytes_per_pixel=2)
         if pixel_spacing_mm is not None:
             if len(pixel_spacing_mm) != 2:
                 raise ValueError("pixel_spacing_mm must contain two values")
@@ -403,10 +405,9 @@ def export_projection_to_dicom(
                 raise ValueError("image_orientation_patient values must be finite")
         else:
             orientation = None
-    except (TypeError, ValueError) as exc:
+        os.makedirs(output_dir, exist_ok=True)
+    except (TypeError, ValueError, OSError) as exc:
         return {'error': str(exc)}
-
-    os.makedirs(output_dir, exist_ok=True)
 
     if image_2d.dtype != np.uint16:
         image_2d = np.clip(image_2d, 0, 65535).astype(np.uint16, copy=False)
@@ -503,11 +504,16 @@ def export_projection_to_dicom(
         # Intercept is present; DRR pixel values carry no physical unit.
         dataset.RescaleType = 'US'
 
-        image_min = int(image_2d.min()) if image_2d.size else 0
-        image_max = int(image_2d.max()) if image_2d.size else 0
-        window_width = max(1, image_max - image_min)
-        dataset.WindowCenter = int(image_min + window_width / 2)
-        dataset.WindowWidth = int(window_width)
+        # A temporal DRR uses one physical intensity scale. A separate VOI
+        # window per phase would undo that mapping in a DICOM viewer.
+        image_min, image_max = 0, 65535
+        if (number_of_temporal_positions or 1) <= 1:
+            low, high = int(image_2d.min()), int(image_2d.max())
+            if low < high:
+                image_min, image_max = low, high
+        # Inclusive integer input range for DICOM's default LINEAR VOI.
+        dataset.WindowCenter = (image_min + image_max + 1) / 2
+        dataset.WindowWidth = image_max - image_min + 1
         dataset.PixelData = image_2d.tobytes()
 
         safe_filename = os.path.basename(str(filename))

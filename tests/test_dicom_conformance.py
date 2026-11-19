@@ -257,3 +257,41 @@ def test_dose_grid_scaling_is_conformant_and_preserves_dose(tmp_path, peak_dose)
     reconstructed = counts.astype(np.float64).transpose(2, 1, 0) * float(scaling_text)
     assert float(reconstructed.max()) == pytest.approx(peak_dose, rel=1e-6)
     np.testing.assert_allclose(reconstructed, grid, rtol=1e-5, atol=peak_dose * 1e-6)
+
+
+@pytest.mark.parametrize("kind", ["CT", "MR", "DRR", "RTDOSE"])
+def test_unencodable_dimensions_create_no_instances(tmp_path, kind):
+    array = np.zeros((65536, 1, 1), dtype=np.int16)
+    if kind == "DRR":
+        result = dicom_export.export_projection_to_dicom(array[:, :, 0], str(tmp_path))
+    elif kind == "RTDOSE":
+        result = rtdose_export.export_rtdose_to_dicom(array, VOXEL_SIZE_M, BBOX_MIN, str(tmp_path))
+    else:
+        result = dicom_export.export_voxel_grid_to_dicom(
+            array, VOXEL_SIZE_M, str(tmp_path), BBOX_MIN, dicom_modality=kind,
+        )
+    assert "65535" in result["error"]
+    assert not list(tmp_path.iterdir())
+
+
+def test_native_pixel_data_limit_counts_all_frames_in_one_dose_file():
+    constants.validate_dicom_pixel_size(32768, 32768, bytes_per_pixel=2)
+    with pytest.raises(ValueError, match="native encoding"):
+        constants.validate_dicom_pixel_size(2048, 2048, frames=256, bytes_per_pixel=4)
+
+
+@pytest.mark.parametrize("kind", ["CT", "DRR", "RTDOSE", "RTSTRUCT"])
+def test_writers_report_unusable_output_directory(tmp_path, kind):
+    path = tmp_path / "occupied"
+    path.write_bytes(b"existing file")
+    grid = np.zeros((2, 2, 2), dtype=np.int16)
+    if kind == "CT":
+        result = dicom_export.export_voxel_grid_to_dicom(grid, VOXEL_SIZE_M, str(path), BBOX_MIN)
+    elif kind == "DRR":
+        result = dicom_export.export_projection_to_dicom(grid[:, :, 0], str(path))
+    elif kind == "RTDOSE":
+        result = rtdose_export.export_rtdose_to_dicom(grid, VOXEL_SIZE_M, BBOX_MIN, str(path))
+    else:
+        result = rtstruct_export.export_rtstruct_to_dicom([], BBOX_MIN, VOXEL_SIZE_M, 2, str(path), None)
+    assert str(path) in result["error"]
+    assert path.read_bytes() == b"existing file"

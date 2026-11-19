@@ -104,7 +104,7 @@ def _object_priority_key(obj: Object, *, use_object_priority: bool = True) -> tu
     return (
         int(getattr(obj, "dicomator_priority", 0)) if use_object_priority else 0,
         obj.name.casefold(),
-        obj.name,
+        _geometry_key(obj),
     )
 
 

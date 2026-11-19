@@ -583,3 +583,12 @@ def test_prepared_geometry_keeps_same_named_local_and_linked_objects_apart(monke
     )
     np.testing.assert_array_equal(grid == 500, _box_mask((0.01, 0.01, 0.01), (0.03, 0.03, 0.03)))
     np.testing.assert_array_equal(grid == 900, _box_mask((0.06, 0.06, 0.06), (0.09, 0.09, 0.09)))
+
+
+def test_equal_priority_linked_names_have_stable_overlap_order():
+    first, second = [
+        SimpleNamespace(name="Body", name_full=f"Body [{library}.blend]", dicomator_priority=2)
+        for library in ("A", "B")
+    ]
+    for selection in ([first, second], [second, first]):
+        assert sorted(selection, key=voxelization._object_priority_key) == [first, second]

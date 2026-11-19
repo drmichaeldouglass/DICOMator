@@ -294,3 +294,13 @@ def test_panorama_cannot_be_exported_as_a_planar_drr(patched_vector):
         drr.generate_drr_from_hu_volume(
             np.zeros((2, 2, 2)), VOXEL_SIZE_M, Vec3(GRID_ORIGIN), _Scene(), camera,
         )
+
+
+def test_unencodable_detector_fails_before_projection(patched_vector):
+    from types import SimpleNamespace
+
+    scene = SimpleNamespace(render=SimpleNamespace(resolution_x=65536, resolution_y=1, resolution_percentage=100))
+    with pytest.raises(ValueError, match="65535"):
+        drr.generate_drr_from_hu_volume(
+            np.zeros((1, 1, 1), dtype=np.int16), VOXEL_SIZE_M, Vec3(GRID_ORIGIN), scene, _Camera(),
+        )
