@@ -228,6 +228,35 @@ def _assert_face_on_slice_plane_fills_the_slice() -> None:
         DICOMator.unregister()
 
 
+def _run_operator(scene, meshes):
+    """Drive the real export job while standing in for Blender's UI event loop."""
+    context = SimpleNamespace(
+        scene=scene, selected_objects=meshes, active_object=meshes[0], window=None,
+        evaluated_depsgraph_get=bpy.context.evaluated_depsgraph_get,
+        workspace=SimpleNamespace(status_text_set=lambda value: None),
+        window_manager=SimpleNamespace(
+            progress_begin=lambda *args: None, progress_end=lambda: None,
+            event_timer_add=lambda *args, **kwargs: object(),
+            event_timer_remove=lambda timer: None, modal_handler_add=lambda operator: None,
+        ),
+    )
+    operator = SimpleNamespace(report=lambda *args: None, _timer=None)
+    operator._export_job = lambda ctx, config: DICOMATOR_OT_export_dicom._export_job(
+        operator, ctx, config
+    )
+    assert DICOMATOR_OT_export_dicom.execute(operator, context) == {'RUNNING_MODAL'}
+    outcome = {}
+    try:
+        while True:
+            next(operator._job)
+    except StopIteration as stop:
+        outcome = stop.value
+    finally:
+        error = DICOMATOR_OT_export_dicom._finish(operator, context, commit="success" in outcome)
+    assert error is None, error
+    return outcome
+
+
 def _assert_animated_export_and_mode_priority() -> None:
     """Run the operator pipeline on overlapping animated Blender meshes."""
     DICOMator.register()
@@ -253,29 +282,8 @@ def _assert_animated_export_and_mode_priority() -> None:
             with tempfile.TemporaryDirectory(prefix="dicomator-animation-smoke-") as parent:
                 props.ui_mode = mode
                 props.export_directory = str(Path(parent) / "export")
-                context = SimpleNamespace(
-                    scene=scene, selected_objects=meshes, active_object=meshes[0], window=None,
-                    evaluated_depsgraph_get=bpy.context.evaluated_depsgraph_get,
-                    workspace=SimpleNamespace(status_text_set=lambda value: None),
-                    window_manager=SimpleNamespace(
-                        progress_begin=lambda *args: None, progress_end=lambda: None,
-                        event_timer_add=lambda *args, **kwargs: object(),
-                        event_timer_remove=lambda timer: None, modal_handler_add=lambda operator: None,
-                    ),
-                )
-                operator = SimpleNamespace(report=lambda *args: None, _timer=None)
-                operator._export_job = lambda ctx, config: DICOMATOR_OT_export_dicom._export_job(
-                    operator, ctx, config
-                )
-                assert DICOMATOR_OT_export_dicom.execute(operator, context) == {'RUNNING_MODAL'}
-                try:
-                    while True:
-                        next(operator._job)
-                except StopIteration as stop:
-                    assert "error" not in stop.value, stop.value
-                finally:
-                    error = DICOMATOR_OT_export_dicom._finish(operator, context, commit=True)
-                assert error is None, error
+                outcome = _run_operator(scene, meshes)
+                assert "success" in outcome, outcome
                 files = sorted(Path(props.export_directory).glob("CT_Slice_*.dcm"))
                 assert files
                 slices = [pydicom.dcmread(path) for path in files]
@@ -285,6 +293,43 @@ def _assert_animated_export_and_mode_priority() -> None:
                 assert meshes[0].dicomator_priority == 10
     finally:
         scene.frame_set(saved_frame, subframe=saved_subframe)
+        DICOMator.unregister()
+
+
+def _assert_marker_bound_drr_export() -> None:
+    """A timeline cut changes both the projected pixels and their orientation."""
+    DICOMator.register()
+    scene = bpy.context.scene
+    try:
+        bpy.ops.mesh.primitive_cube_add(size=0.02)
+        cube = bpy.context.object
+        cube.scale.x = 2.0
+        for frame, position in ((1, (0, 0, 1)), (2, (1, 0, 0))):
+            bpy.ops.object.camera_add(location=position)
+            camera = bpy.context.object
+            camera.rotation_euler = (-camera.location).to_track_quat('-Z', 'Y').to_euler()
+            camera.data.type = 'ORTHO'
+            camera.data.ortho_scale = 0.06
+            scene.timeline_markers.new(str(frame), frame=frame).camera = camera
+        scene.frame_set(1)
+        scene.render.resolution_x = scene.render.resolution_y = 24
+        scene.render.resolution_percentage = 100
+        props = scene.dicomator_props
+        props.ui_mode = "ADVANCED"
+        props.export_image_series = False
+        props.export_drr = props.export_4d = True
+        props.use_timeline_range = False
+        props.frame_start, props.frame_end, props.frame_step = 1, 2, 1
+        with tempfile.TemporaryDirectory() as parent:
+            props.export_directory = str(Path(parent) / "projections")
+            outcome = _run_operator(scene, [cube])
+            assert "success" in outcome, outcome
+            a, b = [pydicom.dcmread(p) for p in sorted(Path(props.export_directory).glob("*DRR.dcm"))]
+            assert not np.allclose(a.ImageOrientationPatient, b.ImageOrientationPatient)
+            assert np.count_nonzero(a.pixel_array) > np.count_nonzero(b.pixel_array)
+            assert a.WindowCenter == b.WindowCenter and a.WindowWidth == b.WindowWidth
+            assert scene.frame_current == 1 and scene.camera == scene.timeline_markers["1"].camera
+    finally:
         DICOMator.unregister()
 
 
@@ -299,6 +344,7 @@ def main() -> None:
     _assert_buried_lobe_is_not_a_hole()
     _assert_face_on_slice_plane_fills_the_slice()
     _assert_animated_export_and_mode_priority()
+    _assert_marker_bound_drr_export()
     print(f"DICOMator Blender smoke test passed in Blender {bpy.app.version_string}")
 
 

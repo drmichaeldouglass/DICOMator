@@ -156,6 +156,7 @@ def test_rtdose_rejects_missing_required_plan_reference(tmp_path):
     [
         (np.empty((0, 2, 2)), VOXEL_SIZE_M, "must not be empty"),
         (np.zeros((2, 2)), VOXEL_SIZE_M, "must be a 3D array"),
+        (np.full((2, 2, 2), 1e40), VOXEL_SIZE_M, "float32 dose range"),
         (np.full((2, 2, 2), np.inf), VOXEL_SIZE_M, "NaN or infinite"),
         (np.zeros((2, 2, 2)), -0.002, "greater than zero"),
     ],
@@ -169,3 +170,21 @@ def test_rtdose_rejects_invalid_inputs(tmp_path, grid, voxel_size, error_text):
     )
     assert error_text in result["error"]
     assert not list(tmp_path.glob("*.dcm"))
+
+
+def test_single_plane_dose_omits_multi_frame_module(tmp_path):
+    grid = _dose_grid(shape=(3, 4, 1))
+    result = rtdose_export.export_rtdose_to_dicom(grid, VOXEL_SIZE_M, BBOX_MIN, str(tmp_path))
+    assert "success" in result, result
+    ds = pydicom.dcmread(tmp_path / "RTDose.dcm")
+    assert {"NumberOfFrames", "FrameIncrementPointer", "GridFrameOffsetVector"}.isdisjoint(ds.dir())
+    np.testing.assert_allclose(ds.pixel_array * float(ds.DoseGridScaling), grid[:, :, 0].T, rtol=1e-6)
+
+
+def test_tiny_dose_preserves_relative_intensities(tmp_path):
+    grid = np.array([0, 1e-39, 2e-39], dtype=np.float32).reshape((3, 1, 1))
+    with np.errstate(divide="raise", invalid="raise"):
+        result = rtdose_export.export_rtdose_to_dicom(grid, VOXEL_SIZE_M, BBOX_MIN, str(tmp_path))
+    assert "success" in result, result
+    ds = pydicom.dcmread(tmp_path / "RTDose.dcm")
+    np.testing.assert_allclose(ds.pixel_array * float(ds.DoseGridScaling), grid[:, :, 0].T, rtol=1e-6, atol=0)

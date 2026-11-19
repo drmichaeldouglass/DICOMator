@@ -8,7 +8,7 @@ import bpy
 import numpy as np
 from mathutils import Vector
 
-from .constants import resolve_positive_voxel_size, validate_numeric_array
+from .constants import resolve_positive_voxel_size, validate_dicom_pixel_size, validate_numeric_array
 
 ProgressCallback = Optional[Callable[[int, int], None]]
 DRRResult = tuple[np.ndarray, dict[str, object]]
@@ -212,6 +212,7 @@ def generate_drr_from_hu_volume_iter(
     mu_water = float(water_attenuation_coefficient_m_inv)
 
     detector_width, detector_height = resolve_drr_detector_size(scene, resolution_scale=resolution_scale)
+    validate_dicom_pixel_size(detector_width, detector_height, bytes_per_pixel=2)
     bounds_min = np.array((float(origin.x), float(origin.y), float(origin.z)), dtype=np.float32)
     bounds_max = bounds_min + np.array(
         (

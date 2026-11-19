@@ -27,7 +27,7 @@ Blender add-on that converts selected mesh objects into DICOM outputs for synthe
 
 ## Examples
 
-Sample outputs produced by the add-on:
+Sample outputs produced by the add-on. The [step-by-step workflows](#step-by-step-workflows) also show the same mesh phantom exported with different material presets, animation frames, camera angles and dose overlap settings.
 
 <table>
   <tr>
@@ -186,10 +186,9 @@ Basic and Intermediate always write exactly one image series. In Basic mode over
 | *Scene Unit Scale must be 1.0* | See [Prepare the scene](#prepare-the-scene) |
 | *No image / dose / structure mesh selected* | An enabled output has no mesh of the matching DICOM Type |
 | *Set an active scene camera for DRR export* | DRR is enabled and the scene has no camera |
-| *Grid too large - export will abort* | Increase the voxel size or reduce the selection |
 | *pydicom unavailable* | The bundled dependency did not install; reinstall the extension |
 
-  The button is greyed out in Edit Mode and while another export is running.
+The button is greyed out in Edit Mode and while another export is running. A grid-size warning in the sidebar uses the current frame’s bounding boxes. Export checks the actual mesh bounds across the requested frames before allocating the grid.
 
 ### Objects
 
@@ -239,12 +238,18 @@ Each recipe starts from meshes that are already modelled at real size and select
 3. Optionally, in Intermediate mode, enable the MR artifacts (Rician noise, bias field, geometric distortion, Gibbs ringing, motion).
 4. Export.
 
+![Axial CT, T1-weighted MR and T2-weighted MR exports of the same phantom](docs/assets/material-presets.png)
+
+The small central fluid insert illustrates the preset change. It appears dark on T1 and bright on T2.
+
 ### 4D (time-resolved) series
 
 1. Animate the meshes: keyframed transforms, shape keys, armatures or any modifier animation (a breathing lung, a moving tumour). Keep **Apply Modifiers** ticked for anything other than plain object transforms.
 2. Set **Mode** to **Intermediate** and tick **Export → Export 4D/Time Series**.
 3. Either use the timeline range or untick **Use Timeline Range** and enter **Start**, **End** and **Frame Step**. Ten phases from a 100-frame breathing cycle is Start `1`, End `100`, Step `10`.
 4. Export. The timeline visibly steps through the frames. Each phase is written as its own series (`Phase_001_CT_Slice_0001.dcm`, ...) on one fixed grid that covers the motion at every frame, labelled *Phase 1 (0.0%)*, *Phase 2 (10.0%)*, and so on.
+
+![Three exported CT phases with arrows marking an insert moving across a lung cavity](docs/assets/motion-phases.png)
 
 ### DRR (digitally reconstructed radiograph)
 
@@ -255,7 +260,11 @@ Each recipe starts from meshes that are already modelled at real size and select
 5. In **Export**, leave **Water Attenuation** at `20` m⁻¹ (about 60 keV) or change it to model another beam quality, and use **DRR Resolution Scale** for a quick low-resolution test.
 6. Export. The DRR is written as `DRR_Image_0001.dcm`.
 
+For a 4D DRR with camera cuts, bind cameras to timeline markers. Each phase uses the camera active at its frame.
+
 The DRR is a projection of the voxel grid, so its sharpness follows the voxel size, and it always uses CT numbers, even for an MR export.
+
+![Frontal and lateral DRRs of the phantom from two orthographic cameras](docs/assets/camera-drr.png)
 
 ### RT Dose and RT Structure Set
 
@@ -266,6 +275,10 @@ The DRR is a projection of the voxel grid, so its sharpness follows the voxel si
 5. Tick **Image**, **Dose** and **Structures**, select *all* the meshes, and export.
 
 The folder then holds the image slices plus `RTDose.dcm`, a minimal companion `RTPlan.dcm` and `RTStruct.dcm`, all in one study and one frame of reference, with the structure set referencing the image slices.
+
+![RT Structure contours on their referenced CT slice and the corresponding 50 Gy and 20 Gy overlap examples](docs/assets/rt-overlays.png)
+
+The overlays use the exported contour coordinates, dose scaling and image positions. The outer mesh contributes 30 Gy. The higher-priority inner mesh contributes 20 Gy, giving 50 Gy centrally with **Sum** and 20 Gy with **Overwrite**.
 
 ## Checking the export
 
@@ -423,9 +436,9 @@ Every enabled output is written as its own DICOM series inside a single study:
     - Decimal String values are re-formatted to fit the 16-byte DICOM limit without losing millimetre precision
 - **RT Dose output**
   - Storage class: `RTDoseStorage` (SOP class 1.2.840.10008.5.1.4.1.1.481.2)
-  - Data type: uint32 multi-frame image scaled by `DoseGridScaling` (Gy/count); maximum dose maps to the full uint32 range
+  - Dose pixels are stored as uint32 and scaled by `DoseGridScaling` (Gy/count). The peak count stays below 2³¹ for compatibility with readers using signed integers.
   - Grid dimensions and spatial coordinates match the image grid exactly, ensuring voxel-to-voxel correspondence
-  - `DoseType`, plan-level `DoseSummationType`, and `DoseUnits = GY` are set from the RT Dose settings; `FrameIncrementPointer` references `GridFrameOffsetVector`
+  - `DoseType`, plan-level `DoseSummationType`, and `DoseUnits = GY` are set from the RT Dose settings. Multi-frame grids include `FrameIncrementPointer` and `GridFrameOffsetVector`
   - A minimal companion RT Plan (`RTPlan.dcm` / `Phase_###_RTPlan.dcm`) is written as `UNAPPROVED` and referenced via `ReferencedRTPlanSequence`
   - Shares `StudyInstanceUID` and `FrameOfReferenceUID` with co-exported image, DRR, and structure outputs
 - **RT Structure Set output**
@@ -442,7 +455,7 @@ Every enabled output is written as its own DICOM series inside a single study:
   - Data type: uint16 monochrome projection image
   - HU is converted to linear attenuation with `mu = mu_water × (1 + HU/1000)` before ray integration
   - Pixel values are proportional to the attenuation line integral (`-ln(I/I0)`), as conventional DRRs are displayed, so bone stays distinct from soft tissue through a thick body
-  - Single-phase exports use percentile auto-windowing (the upper limit is the 99.5th percentile of the rays that pass through the phantom, so a small object in a large frame keeps its contrast); 4D exports use a fixed physical scale (a line integral of 40 maps to the top of the 16-bit range) so intensities stay comparable across phases
+  - Single-phase exports use the 99.5th percentile of attenuated rays as the upper display limit, preserving contrast for a small object in a large field. In 4D exports, a line integral of 40 maps to the top of the 16-bit range and every phase uses the same display window.
   - Geometry:
     - For orthographic cameras, `PixelSpacing` follows the world-space detector dimensions divided by detector pixels
     - `ImageOrientationPatient` follows the detector row/column axes

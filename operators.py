@@ -54,6 +54,7 @@ from .constants import (
     suppressed_feature_labels,
     ui_feature_visible,
     ui_mode_of,
+    validate_dicom_pixel_size,
 )
 from .dicom_export import export_projection_to_dicom, export_voxel_grid_to_dicom_iter
 from .drr import drr_camera_error, generate_drr_from_hu_volume_iter
@@ -641,16 +642,12 @@ class DICOMATOR_OT_export_dicom(Operator):
         if export_rtstruct:
             export_objects.extend(struct_objects)
 
-        camera_obj = context.scene.camera if export_drr else None
-        camera_error = drr_camera_error(camera_obj) if export_drr else None
+        # Timeline markers can bind a different camera on each exported frame.
+        check_camera_now = export_drr and not four_d_export_enabled(props)
+        camera_error = drr_camera_error(context.scene.camera) if check_camera_now else None
         if camera_error:
             self.report({'ERROR'}, camera_error)
             return {'CANCELLED'}
-        if export_drr and str(getattr(camera_obj.data, "type", "PERSP")).upper() != "ORTHO":
-            self.report(
-                {'WARNING'},
-                "Perspective DRR spatial tags will be omitted; use an orthographic camera for patient-space geometry",
-            )
 
         lateral_mm = get_float_prop(props, "lateral_resolution_mm", 2.0)
         axial_mm = get_float_prop(props, "axial_resolution_mm", 2.0)
@@ -701,7 +698,6 @@ class DICOMATOR_OT_export_dicom(Operator):
             'export_drr': export_drr,
             'export_rtdose': export_rtdose,
             'export_rtstruct': export_rtstruct,
-            'camera_obj': camera_obj,
             'output_dir': staging_dir,
             'final_output_dir': final_output_dir,
             'props': props_snapshot,
@@ -940,6 +936,10 @@ class DICOMATOR_OT_export_dicom(Operator):
         padded_bounds = _pad_bounds(bounds, voxel_size_m, padding_voxels)
         estimated_width, estimated_height, estimated_depth = _estimate_grid_dimensions(padded_bounds, voxel_size_m)
 
+        if export_image_series:
+            validate_dicom_pixel_size(estimated_width, estimated_height, bytes_per_pixel=2)
+        if export_rtdose:
+            validate_dicom_pixel_size(estimated_width, estimated_height, bytes_per_pixel=4, frames=estimated_depth)
         total_estimated_voxels = estimated_width * estimated_height * estimated_depth
         estimated_peak_bytes = estimate_peak_memory_bytes_for_props(
             total_estimated_voxels, props
@@ -1006,6 +1006,7 @@ class DICOMATOR_OT_export_dicom(Operator):
             ),
         )
 
+        warned_perspective = False
         work_start = 0.03
 
         try:
@@ -1020,6 +1021,16 @@ class DICOMATOR_OT_export_dicom(Operator):
 
                 context.scene.frame_set(frame, subframe=subframe)
                 depsgraph = context.evaluated_depsgraph_get()
+                camera_obj = None
+                if export_drr:
+                    camera_obj = context.scene.camera
+                    camera_error = drr_camera_error(camera_obj)
+                    if camera_error:
+                        return {'error': f"Frame {frame}: {camera_error}"}
+                    camera_obj = camera_obj.evaluated_get(depsgraph)
+                    if camera_obj.data.type == 'PERSP' and not warned_perspective:
+                        self.report({'WARNING'}, "Perspective DRRs omit patient-space geometry")
+                        warned_perspective = True
                 yield phase_start
 
                 phase_description = series_description_base
@@ -1153,7 +1164,7 @@ class DICOMATOR_OT_export_dicom(Operator):
                                 voxel_size_m,
                                 origin,
                                 context.scene,
-                                config['camera_obj'],
+                                camera_obj,
                                 resolution_scale=get_float_prop(props, "drr_resolution_scale", 1.0),
                                 # Percentile auto-windowing varies per image;
                                 # use the fixed physical mapping for 4D so

@@ -49,6 +49,7 @@ from .constants import (
     truncate_lo,
     truncate_pn,
     truncate_sh,
+    validate_dicom_pixel_size,
     validate_numeric_array,
 )
 
@@ -249,14 +250,17 @@ def export_rtdose_to_dicom(
 
     try:
         source_grid = validate_numeric_array(dose_grid, name="dose_grid", ndim=3)
+        if float(source_grid.max()) > float(np.finfo(np.float32).max):
+            raise ValueError("dose_grid exceeds the float32 dose range")
+        width, height, depth = source_grid.shape
+        validate_dicom_pixel_size(width, height, frames=depth, bytes_per_pixel=4)
         vx_m, vy_m, vz_m = resolve_positive_voxel_size(voxel_size)
         bbox_components = [float(bbox_min.x), float(bbox_min.y), float(bbox_min.z)]
         if not all(np.isfinite(component) for component in bbox_components):
             raise ValueError("bbox_min components must be finite")
-    except (AttributeError, TypeError, ValueError) as exc:
+        os.makedirs(output_dir, exist_ok=True)
+    except (AttributeError, TypeError, ValueError, OSError) as exc:
         return {"error": str(exc)}
-
-    os.makedirs(output_dir, exist_ok=True)
 
     vx_mm = vx_m * 1000.0
     vy_mm = vy_m * 1000.0
@@ -266,8 +270,6 @@ def export_rtdose_to_dicom(
 
     # Ensure we have a float32 array in (W, H, D) order; clamp negatives.
     dose_f32 = np.clip(source_grid, 0.0, None).astype(np.float32, copy=False)
-
-    width, height, depth = dose_f32.shape  # (W, H, D)
 
     # Compute the linear scaling factor.  Each pixel encodes:
     #   actual_dose = pixel_value × DoseGridScaling
@@ -303,7 +305,14 @@ def export_rtdose_to_dicom(
     # that does not exceed it: 2**31 - 1 is not representable in float32
     # and rounds up to 2**31, which would set the top bit on the peak voxels.
     safe_max_pixel = np.nextafter(np.float32(max_pixel_value), np.float32(0.0))
-    scaled = np.clip(dose_f32 / np.float32(dose_grid_scaling), np.float32(0.0), safe_max_pixel)
+    if dose_grid_scaling < np.finfo(np.float32).tiny:
+        # The DS scale may be smaller than the smallest float32 divisor.
+        # Normalize by the representable peak before converting to counts.
+        scaled = dose_f32 / np.float32(max_dose)
+        scaled *= np.float32(max_dose / dose_grid_scaling)
+    else:
+        scaled = dose_f32 / np.float32(dose_grid_scaling)
+    np.clip(scaled, np.float32(0.0), safe_max_pixel, out=scaled)
     pixel_frames = np.ascontiguousarray(
         scaled.astype(np.uint32).transpose(2, 1, 0)
     )
@@ -393,10 +402,10 @@ def export_rtdose_to_dicom(
         ds.ContentDate = date_str
         ds.ContentTime = time_str
         ds.ImageType = ["DERIVED", "PRIMARY", "DOSE"]
-        ds.NumberOfFrames = int(depth)
-        # Multi-frame module (PS3.3 C.7.6.6): FrameIncrementPointer is Type 1
-        # and for RT Dose must point at GridFrameOffsetVector (3004,000C).
-        ds.FrameIncrementPointer = pydicom.tag.Tag(0x3004, 0x000C)
+        if depth > 1:
+            ds.NumberOfFrames = int(depth)
+            ds.FrameIncrementPointer = pydicom.tag.Tag(0x3004, 0x000C)
+            ds.GridFrameOffsetVector = format_ds_sequence(iz * vz_mm for iz in range(depth))
 
         # --- Image plane ---
         # ImagePositionPatient is the center of the first voxel (PS3.3
@@ -410,12 +419,6 @@ def export_rtdose_to_dicom(
         ds.ImageOrientationPatient = format_ds_sequence((1.0, 0.0, 0.0, 0.0, 1.0, 0.0))
         ds.PixelSpacing = format_ds_sequence((vy_mm, vx_mm))
         ds.SliceThickness = format_ds(vz_mm)
-
-        # GridFrameOffsetVector: Z offsets in mm for each frame relative to
-        # ImagePositionPatient Z.  Frame 0 is at offset 0.
-        ds.GridFrameOffsetVector = format_ds_sequence(
-            iz * vz_mm for iz in range(depth)
-        )
 
         # --- Pixel dimensions ---
         ds.Rows = int(height)

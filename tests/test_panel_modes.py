@@ -457,11 +457,11 @@ def test_export_action_ignores_meshes_for_disabled_outputs(tmp_path, monkeypatch
         tmp_path,
         monkeypatch,
     )
-    assert "Grid too large - export will abort" not in drawn["labels"]
+    assert not any("exceeds limits" in label for label in drawn["labels"])
     assert drawn["operators"] == ["dicomator.export_dicom"]
 
 
-def test_export_action_hides_button_for_a_blocked_grid(tmp_path, monkeypatch):
+def test_export_action_defers_oversize_decision_to_exact_geometry(tmp_path, monkeypatch):
     drawn = _draw(
         panels.VIEW3D_PT_dicomator_panel,
         _props(),
@@ -469,5 +469,5 @@ def test_export_action_hides_button_for_a_blocked_grid(tmp_path, monkeypatch):
         tmp_path,
         monkeypatch,
     )
-    assert "Grid too large - export will abort" in drawn["labels"]
-    assert drawn["operators"] == []
+    assert "Estimated grid exceeds limits; export checks mesh bounds" in drawn["labels"]
+    assert drawn["operators"] == ["dicomator.export_dicom"]
