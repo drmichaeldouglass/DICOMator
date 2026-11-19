@@ -290,6 +290,25 @@ def truncate_lo(value: str | None, default: str = "") -> str:
     return truncate_dicom_text(value, 64, default)
 
 
+def describe_with_suffix(base: str | None, suffix: str, default: str = "") -> str:
+    """Return ``base + suffix`` within the 64-byte LO limit, keeping the suffix.
+
+    The suffix carries what tells co-exported series apart (the 4D phase, the
+    output type), so when the combined text is too long it is the user's base
+    description that is shortened. Truncating the joined string instead would
+    cut the suffix off first and leave every phase with the same description.
+    """
+
+    suffix_text = sanitize_dicom_text(suffix)
+    if suffix_text and suffix[:1].isspace():
+        # Sanitizing strips the separator space in front of e.g. " - DRR".
+        suffix_text = f" {suffix_text}"
+    room = 64 - len(suffix_text.encode("utf-8"))
+    if room < 1:
+        return truncate_lo(suffix_text.strip(), default)
+    return truncate_dicom_text(base, room, default) + suffix_text
+
+
 def truncate_pn(value: str | None, default: str = "") -> str:
     """Clamp ``value`` to a conservative 64-byte DICOM PN value."""
 
@@ -833,6 +852,7 @@ __all__ = [
     "grid_limits_exceeded",
     "format_ds",
     "format_ds_sequence",
+    "describe_with_suffix",
     "normalize_dicom_date",
     "resolve_positive_voxel_size",
     "sanitize_dicom_text",

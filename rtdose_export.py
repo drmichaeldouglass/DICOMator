@@ -42,6 +42,7 @@ from .constants import (
     RTDOSE_SOP_CLASS,
     RTPLAN_SOP_CLASS,
     apply_synthetic_metadata,
+    describe_with_suffix,
     format_ds,
     format_ds_sequence,
     normalize_dicom_date,
@@ -120,7 +121,7 @@ def _export_minimal_rtplan(
     # Offset so the companion plan series does not share the dose series'
     # number within the study.
     plan.SeriesNumber = int(series_number) + 1000
-    plan.SeriesDescription = truncate_lo(f"{series_description} - RT Plan")
+    plan.SeriesDescription = describe_with_suffix(series_description, " - RT Plan")
     plan.SeriesDate = date_str
     plan.SeriesTime = time_str
     plan.Manufacturer = "DICOMator"

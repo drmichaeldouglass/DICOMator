@@ -10,8 +10,8 @@ from __future__ import annotations
 import math
 import os
 import shutil
-import tempfile
 import time
+import uuid
 from datetime import datetime
 from functools import partial
 from types import SimpleNamespace
@@ -37,6 +37,7 @@ from .artifacts import (
 from . import constants as shared_constants
 from .constants import (
     AIR_DENSITY,
+    DEFAULT_DENSITY,
     MODALITY_CT,
     MRI_MODALITIES,
     UI_FEATURE_OBJECT_PRIORITY,
@@ -44,6 +45,7 @@ from .constants import (
     UI_MODE_LABELS,
     active_artifact_flags,
     describe_grid_limits,
+    describe_with_suffix,
     ensure_pydicom_available,
     estimate_peak_memory_bytes_for_props,
     four_d_export_enabled,
@@ -296,6 +298,17 @@ def _drr_hu_for_mr_export(obj) -> float:
     return 0.0 if value is None else value
 
 
+def _mr_signal_for_object(obj) -> float:
+    """Signal intensity a mesh contributes to an MR image (never negative).
+
+    An MR magnitude image cannot hold negative values. A custom mesh keeps the
+    number typed for it when the modality changes, so a CT value such as
+    -700 HU would otherwise be written into the MR series as negative signal.
+    """
+
+    return max(0.0, float(getattr(obj, "dicomator_hu", DEFAULT_DENSITY)))
+
+
 def _run_subtask(
     subtask: Generator[tuple[int, int], None, object],
     start: float,
@@ -502,11 +515,18 @@ def _prepare_atomic_output_directory(output_dir: str) -> tuple[str, str]:
             )
     if not os.access(output_parent, os.W_OK):
         raise PermissionError(f"directory is not writable: {output_parent}")
-    staging_dir = tempfile.mkdtemp(
-        prefix=f".{os.path.basename(final_output_dir) or 'DICOMator'}-",
-        dir=output_parent,
-    )
-    return final_output_dir, staging_dir
+    # The staging folder is renamed into place and so becomes the export
+    # folder itself. os.mkdir gives it the permissions of any newly created
+    # folder; tempfile.mkdtemp would make it readable by its owner only, which
+    # hides the export from other accounts on a shared drive or workstation.
+    base_name = os.path.basename(final_output_dir) or "DICOMator"
+    while True:
+        staging_dir = os.path.join(output_parent, f".{base_name}-{uuid.uuid4().hex[:8]}")
+        try:
+            os.mkdir(staging_dir)
+        except FileExistsError:
+            continue
+        return final_output_dir, staging_dir
 
 
 def _finalize_atomic_output_directory(
@@ -665,6 +685,17 @@ class DICOMATOR_OT_export_dicom(Operator):
             return {'CANCELLED'}
 
         modality_key = getattr(props, "imaging_modality", MODALITY_CT)
+        if export_image_series and modality_key in MRI_MODALITIES:
+            negative = [
+                obj.name for obj in ct_objects
+                if float(getattr(obj, "dicomator_hu", DEFAULT_DENSITY)) < 0.0
+            ]
+            if negative:
+                shown = ", ".join(negative[:5]) + ("..." if len(negative) > 5 else "")
+                self.report(
+                    {'WARNING'},
+                    f"MR signal cannot be negative; exported as 0 (signal void): {shown}",
+                )
         if export_drr and modality_key in MRI_MODALITIES:
             custom = [obj.name for obj in ct_objects if _drr_ct_number_for_object(obj) is None]
             message = "MR export: the DRR uses each mesh's CT material preset for attenuation"
@@ -1033,12 +1064,20 @@ class DICOMATOR_OT_export_dicom(Operator):
                         warned_perspective = True
                 yield phase_start
 
-                phase_description = series_description_base
+                phase_suffix = ""
                 if num_phases > 1:
                     # Label phases with their position in the respiratory/
                     # acquisition cycle starting at 0% (4DCT convention).
                     percent = ((phase_index - 1) / num_phases) * 100.0
-                    phase_description = f"{series_description_base} - Phase {phase_index} ({percent:.1f}%)"
+                    phase_suffix = f" - Phase {phase_index} ({percent:.1f}%)"
+
+                def describe(type_suffix: str = "", phase_suffix: str = phase_suffix) -> str:
+                    # The phase and output type are what tell the series of
+                    # one export apart, so a long description gives way to
+                    # them rather than pushing them past the 64-byte limit.
+                    return describe_with_suffix(
+                        series_description_base, phase_suffix + type_suffix, "DICOMator Export"
+                    )
 
                 # References collected from image export; RT Struct uses them
                 # when an image series is exported in the same phase.
@@ -1063,6 +1102,7 @@ class DICOMATOR_OT_export_dicom(Operator):
                             background_value=background_value,
                             messages=voxel_messages,
                             prepared=prepared_geometry,
+                            value_for_object=_mr_signal_for_object if dicom_modality == "MR" else None,
                             use_object_priority=ui_feature_visible(props, UI_FEATURE_OBJECT_PRIORITY),
                         ),
                         t_start,
@@ -1094,7 +1134,7 @@ class DICOMATOR_OT_export_dicom(Operator):
                                 patient_id=props.patient_id,
                                 patient_sex=props.patient_sex,
                                 patient_birth_date=getattr(props, "patient_birth_date", ""),
-                                series_description=phase_description,
+                                series_description=describe(),
                                 direct_hu=True,
                                 patient_position=props.patient_position,
                                 dicom_modality=dicom_modality,
@@ -1184,9 +1224,9 @@ class DICOMATOR_OT_export_dicom(Operator):
                             if num_phases > 1 else
                             "DRR_Image_0001.dcm"
                         )
-                        drr_description = phase_description
-                        if "DRR" not in drr_description.upper():
-                            drr_description = f"{drr_description} - DRR"
+                        drr_description = describe(
+                            "" if "DRR" in series_description_base.upper() else " - DRR"
+                        )
                         result = export_projection_to_dicom(
                             projection_image,
                             output_dir,
@@ -1263,7 +1303,7 @@ class DICOMATOR_OT_export_dicom(Operator):
                         patient_sex=props.patient_sex,
                         patient_birth_date=getattr(props, "patient_birth_date", ""),
                         patient_position=props.patient_position,
-                        series_description=f"{phase_description} - RT Dose",
+                        series_description=describe(" - RT Dose"),
                         dose_type=getattr(props, "dose_type", "PHYSICAL"),
                         dose_summation_type=getattr(props, "dose_summation_type", "PLAN"),
                         study_id=getattr(props, "study_id", "1"),
@@ -1306,7 +1346,7 @@ class DICOMATOR_OT_export_dicom(Operator):
                             patient_id=props.patient_id,
                             patient_sex=props.patient_sex,
                             patient_birth_date=getattr(props, "patient_birth_date", ""),
-                            series_description=f"{phase_description} - RT Structure",
+                            series_description=describe(" - RT Structure"),
                             study_id=getattr(props, "study_id", "1"),
                             accession_number=getattr(props, "accession_number", "1"),
                             study_datetime=config['study_datetime'],
