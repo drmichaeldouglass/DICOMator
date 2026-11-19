@@ -1,6 +1,8 @@
 """Tests for atomic export-directory handling and memory preflight."""
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 from datetime import datetime
@@ -52,6 +54,26 @@ def test_atomic_output_cancel_removes_partial_staging(tmp_path):
 
     assert not Path(staging).exists()
     assert not final.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_export_folder_gets_ordinary_folder_permissions(tmp_path):
+    """The staging folder becomes the export folder, so it must not be private."""
+
+    ordinary = tmp_path / "ordinary"
+    ordinary.mkdir()
+    final_path, staging = operators._prepare_atomic_output_directory(str(tmp_path / "export"))
+    operators._finalize_atomic_output_directory(staging, final_path, commit=True)
+
+    assert stat.S_IMODE(os.stat(final_path).st_mode) == stat.S_IMODE(ordinary.stat().st_mode)
+
+
+def test_mr_signal_is_never_negative():
+    """A custom CT value left on a mesh must not become negative MR signal."""
+
+    assert operators._mr_signal_for_object(SimpleNamespace(dicomator_hu=-700.0)) == 0.0
+    assert operators._mr_signal_for_object(SimpleNamespace(dicomator_hu=210.0)) == 210.0
+    assert operators._mr_signal_for_object(SimpleNamespace()) == 0.0
 
 
 def test_atomic_output_rejects_nonempty_destination(tmp_path):

@@ -234,7 +234,7 @@ Each recipe starts from meshes that are already modelled at real size and select
 ### MR series
 
 1. In **Objects**, set **Material Presets** to **T1 MR** or **T2 MR**. Every preset mesh switches to its MR intensity and the export becomes an MR series (background 0 instead of -1000).
-2. Meshes on **Custom** keep their typed value, so re-enter those as MR intensities (0 to about 250).
+2. Meshes on **Custom** keep their typed value, so re-enter those as MR intensities (0 to about 250). A negative value left over from CT is exported as 0 (signal void), with a warning naming the mesh.
 3. Optionally, in Intermediate mode, enable the MR artifacts (Rician noise, bias field, geometric distortion, Gibbs ringing, motion).
 4. Export.
 
@@ -348,7 +348,7 @@ The data can be imported into a treatment planning system for research, teaching
   - Patient Name, MRN (Patient ID), Birth Date (YYYYMMDD), Sex, and Patient Position (HFS/FFS/HFP/FFP/HFDR/HFDL/FFDR/FFDL)
   - Study ID and Accession Number are user-editable and written to every exported object
   - UTF-8 metadata is declared explicitly, value delimiters/control characters are sanitized, and DICOM byte limits are enforced
-  - Customizable Series Description per export or phase
+  - Customizable Series Description per export or phase (a long description is shortened to keep the phase and output-type suffix within DICOM's 64-character limit)
   - All objects exported together share a single study timestamp, so Study/Series/Content dates and times agree across image slices, DRR, dose, plan, and structure files
 - **Export path handling and progress feedback**
   - Accepts Blender-relative paths starting with `//` (resolved relative to the `.blend` file, or to your home folder while the file is unsaved)

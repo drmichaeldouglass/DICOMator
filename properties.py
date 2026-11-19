@@ -230,6 +230,12 @@ class DICOMATOR_PG_properties(bpy.types.PropertyGroup):
         description="Directory to save DICOM files",
         subtype='DIR_PATH',
         default="//DICOM_Export",
+        # The default (and the "Resolved:" line in the Export panel) rely on
+        # Blender's '//' prefix for "beside the .blend file". Without this
+        # flag Blender treats such a value as unsupported for the property:
+        # it warns when one is assigned and the folder browser cannot offer
+        # its Relative Path option.
+        options={'PATH_SUPPORTS_BLEND_RELATIVE'},
     )
     series_description: bpy.props.StringProperty(
         name="Series Description",

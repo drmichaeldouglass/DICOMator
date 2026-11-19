@@ -1,8 +1,10 @@
 """Exercise DICOMator registration and a small export in real Blender."""
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -296,6 +298,36 @@ def _assert_animated_export_and_mode_priority() -> None:
         DICOMator.unregister()
 
 
+def _assert_mr_export_is_non_negative_in_a_shared_folder() -> None:
+    """A stale CT value is not written as negative MR signal; the folder is not private."""
+    DICOMator.register()
+    scene = bpy.context.scene
+    try:
+        bpy.ops.mesh.primitive_cube_add(size=0.02)
+        cube = bpy.context.object
+        cube.dicomator_hu = -700.0
+        props = scene.dicomator_props
+        props.ui_mode, props.imaging_modality = "BASIC", "MRI_T1"
+        with warnings.catch_warnings():
+            # Blender warns when '//' is assigned to a path property that
+            # does not declare support for blend-relative paths.
+            warnings.simplefilter("error")
+            props.export_directory = "//DICOM_Export"
+        with tempfile.TemporaryDirectory() as parent:
+            props.export_directory = str(Path(parent) / "mr")
+            outcome = _run_operator(scene, [cube])
+            assert "success" in outcome, outcome
+            slices = [pydicom.dcmread(p) for p in Path(props.export_directory).glob("MR_Slice_*.dcm")]
+            assert slices and min(int(ds.pixel_array.min()) for ds in slices) == 0
+            if os.name == "posix":
+                ordinary = Path(parent) / "ordinary"
+                ordinary.mkdir()
+                assert Path(props.export_directory).stat().st_mode == ordinary.stat().st_mode
+    finally:
+        scene.dicomator_props.imaging_modality = "CT"
+        DICOMator.unregister()
+
+
 def _assert_marker_bound_drr_export() -> None:
     """A timeline cut changes both the projected pixels and their orientation."""
     DICOMator.register()
@@ -344,6 +376,7 @@ def main() -> None:
     _assert_buried_lobe_is_not_a_hole()
     _assert_face_on_slice_plane_fills_the_slice()
     _assert_animated_export_and_mode_priority()
+    _assert_mr_export_is_non_negative_in_a_shared_folder()
     _assert_marker_bound_drr_export()
     print(f"DICOMator Blender smoke test passed in Blender {bpy.app.version_string}")
 

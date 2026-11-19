@@ -312,3 +312,25 @@ def test_drr_display_window(tmp_path, values, phases, window):
     ds = pydicom.dcmread(next(tmp_path.glob("*.dcm")))
     assert (float(ds.WindowCenter), float(ds.WindowWidth)) == window
     np.testing.assert_array_equal(ds.pixel_array, image)
+
+
+def test_series_description_suffix_survives_a_long_description():
+    """The phase/type suffix tells co-exported series apart, so it is kept."""
+
+    long_base = "Thorax phantom with a moving tumour, respiratory-gated acquisition protocol B"
+    first = constants.describe_with_suffix(long_base, " - Phase 1 (0.0%)")
+    second = constants.describe_with_suffix(long_base, " - Phase 2 (50.0%) - DRR")
+
+    assert first.endswith(" - Phase 1 (0.0%)") and second.endswith(" - Phase 2 (50.0%) - DRR")
+    assert first != second
+    assert len(first.encode("utf-8")) <= 64 and len(second.encode("utf-8")) <= 64
+    assert first.startswith("Thorax phantom")
+
+
+def test_series_description_suffix_leaves_short_descriptions_alone():
+    assert constants.describe_with_suffix("Chest", " - RT Dose") == "Chest - RT Dose"
+    assert constants.describe_with_suffix("Chest", "") == "Chest"
+    assert constants.describe_with_suffix("", " - DRR", "DICOMator Export") == "DICOMator Export - DRR"
+    # Multi-byte text is cut on a character boundary, within the byte limit.
+    accented = constants.describe_with_suffix("é" * 60, " - DRR")
+    assert accented.endswith(" - DRR") and len(accented.encode("utf-8")) <= 64
