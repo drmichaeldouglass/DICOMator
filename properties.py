@@ -26,12 +26,21 @@ def apply_material_intensity(obj: bpy.types.Object, modality: str) -> None:
 
 
 def update_imaging_modality(self, context: bpy.types.Context) -> None:
-    """Refresh material-derived intensities when the modality changes."""
+    """Refresh material-derived intensities when the modality changes.
 
-    if context is None or context.scene is None:
+    The setting belongs to one scene (``self.id_data``), which is not always
+    the scene on screen: a script, or a window showing another scene, can
+    change it. Its own meshes are the ones to update; ``context.scene`` is
+    only the fallback when the owner cannot be resolved.
+    """
+
+    scene = getattr(self, "id_data", None)
+    if scene is None or not hasattr(scene, "objects"):
+        scene = getattr(context, "scene", None)
+    if scene is None:
         return
 
-    for obj in context.scene.objects:
+    for obj in scene.objects:
         if obj.type != 'MESH':
             continue
         apply_material_intensity(obj, self.imaging_modality)

@@ -367,7 +367,7 @@ The data can be imported into a treatment planning system for research, teaching
 - **RT Structure Set export**
   - Mesh objects tagged as RT Structure are sliced at each image Z-plane using bmesh bisection
   - Closed planar contours are extracted from cut edges and written as a DICOM RT Structure Set (`RTStructureSetStorage`)
-  - ROI display colour is read from the object's first material diffuse colour, or a clinical-style palette is used as a fallback
+  - ROI display colour is read from the object's first material diffuse colour and written as it appears in the viewport, or a clinical-style palette is used as a fallback
   - Supports ROI types GTV, CTV, PTV, OAR, External, Control, Avoidance, Organ, Treated Volume, and Irradiated Volume
 - **Selection insights**
   - Live estimates of grid dimensions, voxel counts, approximate peak memory usage, and DRR detector size before export
@@ -448,7 +448,7 @@ Every enabled output is written as its own DICOM series inside a single study:
   - Where a flat face of the mesh rests exactly on a slice plane (a cylinder cap, a step), the contour is the outline of that face; edges inside the face are ignored
   - Holes follow the voxelized image: a cut loop lying inside another loop is kept only where the solid really ends at it, judged with the voxelizer's own fill rule. The inner loop of a ring, tube or hollow shell is therefore a hole, and such ROIs use `CLOSEDPLANAR_XOR` for every contour, preserving holes regardless of loop winding. A loop buried inside solid (a part overlapping a larger part of the same mesh) is dropped, and ROIs without holes use the more widely supported `CLOSED_PLANAR`. Parts of one mesh that only partly overlap on a slice are written as crossing contours; join them with a Boolean union first if your planning system does not merge crossing contours.
   - An ROI with no cross-sections on any slice omits its (then empty) `ContourSequence`, as PS3.3 requires
-  - Each ROI's colour is taken from the object's material diffuse colour (0–255 RGB); a clinical-style palette provides fallback colours
+  - Each ROI's colour is taken from the object's material diffuse colour, converted from Blender's linear storage to the 0–255 sRGB values shown in the viewport; a clinical-style palette provides fallback colours
   - References the co-exported image series (series, SOP class, and per-slice SOP instances) when Image output is enabled
 - **DRR output**
   - Storage class: Secondary Capture (`SecondaryCaptureImageStorage`) with `ImageType = DERIVED\PRIMARY\DRR`, `Modality = OT`, and `ConversionType = SYN`

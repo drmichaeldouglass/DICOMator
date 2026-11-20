@@ -146,20 +146,31 @@ def _rotate_bilinear(image: np.ndarray, angle_rad: float, fill: float = 0.0) -> 
 
 
 def _resize_bilinear(image: np.ndarray, out_shape: tuple[int, int]) -> np.ndarray:
-    """Resample a 2D image to ``out_shape`` using bilinear interpolation."""
+    """Resample a 2D image to ``out_shape`` using bilinear interpolation.
+
+    Both grids cover the same field of view, so output pixel ``i`` (of ``m``)
+    has its centre at source coordinate ``(i + 0.5) * n / m - 0.5``. This is
+    the inverse of :func:`_area_resample`, so a field that was reduced with
+    one and enlarged with the other lands back where it started. Mapping the
+    first and last pixel centres onto each other instead ("align corners")
+    stretches the image about its centre: on a 1024-voxel slice worked on at
+    256 it moved off-centre metal streaks more than a voxel away from the
+    implant that causes them.
+    """
 
     n0, n1 = image.shape
     m0, m1 = out_shape
     if (n0, n1) == (m0, m1):
         return image.astype(np.float32, copy=False)
-    # Map output pixel centres back to source coordinates (align corners).
-    # A source axis of length 1 spans no distance, so every output sample must
-    # read index 0; walking a non-zero step would push all but the first
-    # row/column outside the image, where they are replaced by the fill value.
-    step0 = (n0 - 1) / (m0 - 1) if m0 > 1 else 0.0
-    step1 = (n1 - 1) / (m1 - 1) if m1 > 1 else 0.0
-    s0 = np.arange(m0, dtype=np.float32) * np.float32(step0)
-    s1 = np.arange(m1, dtype=np.float32) * np.float32(step1)
+
+    def source_coordinates(n: int, m: int) -> np.ndarray:
+        centres = (np.arange(m, dtype=np.float64) + 0.5) * (float(n) / float(m)) - 0.5
+        # Output pixels beyond the outermost source centres repeat the edge
+        # value (this also covers a source axis of length 1).
+        return np.clip(centres, 0.0, float(n - 1)).astype(np.float32)
+
+    s0 = source_coordinates(n0, m0)
+    s1 = source_coordinates(n1, m1)
     coord0 = np.repeat(s0[:, None], m1, axis=1)
     coord1 = np.repeat(s1[None, :], m0, axis=0)
     return _remap_bilinear(image, coord0, coord1, fill=0.0)

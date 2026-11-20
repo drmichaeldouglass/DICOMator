@@ -339,3 +339,34 @@ def test_rings_are_shared_by_4d_phases_but_noise_is_not():
     ring2, noise2 = phase2
     np.testing.assert_array_equal(_stage_rng_draws(ring1), _stage_rng_draws(ring2))
     assert not np.array_equal(_stage_rng_draws(noise1), _stage_rng_draws(noise2))
+
+
+def test_modality_change_updates_the_scene_that_owns_the_setting():
+    """Presets follow the property's own scene, not the scene on screen."""
+    from types import SimpleNamespace
+
+    properties = load_module("properties")
+
+    def mesh(material):
+        return SimpleNamespace(type='MESH', dicomator_material=material, dicomator_hu=-1.0)
+
+    owned = [mesh("FAT"), mesh("CUSTOM"), SimpleNamespace(type='CAMERA')]
+    on_screen = [mesh("FAT")]
+    settings = SimpleNamespace(
+        imaging_modality=constants.MODALITY_MRI_T1,
+        id_data=SimpleNamespace(objects=owned),
+    )
+    properties.update_imaging_modality(
+        settings, SimpleNamespace(scene=SimpleNamespace(objects=on_screen))
+    )
+    assert owned[0].dicomator_hu == constants.MATERIAL_INTENSITIES["FAT"][constants.MODALITY_MRI_T1]
+    assert owned[1].dicomator_hu == -1.0  # custom meshes keep their value
+    assert on_screen[0].dicomator_hu == -1.0
+
+    # Without a resolvable owner the context scene is still used.
+    fallback = SimpleNamespace(imaging_modality=constants.MODALITY_CT)
+    properties.update_imaging_modality(
+        fallback, SimpleNamespace(scene=SimpleNamespace(objects=on_screen))
+    )
+    assert on_screen[0].dicomator_hu == constants.MATERIAL_INTENSITIES["FAT"][constants.MODALITY_CT]
+    properties.update_imaging_modality(fallback, None)
