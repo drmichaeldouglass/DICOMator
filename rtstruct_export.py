@@ -25,8 +25,9 @@ ROI colour
 ----------
 Each ROI's display colour in the structure set is read from the **diffuse
 colour** of the first material slot of the corresponding Blender object
-(``obj.material_slots[0].material.diffuse_color``).  If the object has no
-material, a deterministic colour is drawn from a clinical-style palette
+(``obj.material_slots[0].material.diffuse_color``), converted from Blender's
+linear colour storage to the 8-bit sRGB values shown in the viewport.  If the
+object has no material, a deterministic colour is drawn from a clinical-style palette
 indexed by the ROI number so that structures remain distinguishable.
 """
 from __future__ import annotations
@@ -76,20 +77,34 @@ _DEFAULT_ROI_COLOURS: list[tuple[int, int, int]] = [
 ]
 
 
+def _linear_to_srgb_8bit(value: float) -> int:
+    """Convert one scene-linear colour channel (0-1) to an 8-bit sRGB value.
+
+    Blender stores material colours as linear light and applies the sRGB
+    transfer curve when it draws them, whereas ROI Display Color (3006,002A)
+    holds the 0-255 values a viewer puts on screen. Scaling the stored number
+    by 255 directly would write every mid-tone darker than the viewport shows
+    it: Blender's default grey material (0.8) is displayed as 231, not 204.
+    """
+    linear = max(0.0, min(1.0, float(value)))
+    if linear <= 0.0031308:
+        encoded = 12.92 * linear
+    else:
+        encoded = 1.055 * linear ** (1.0 / 2.4) - 0.055
+    return int(round(encoded * 255.0))
+
+
 def _roi_colour_from_object(obj: bpy.types.Object, fallback_index: int) -> tuple[int, int, int]:
     """Return an RGB 0-255 tuple for ``obj``'s display colour in the RTSTRUCT.
 
-    The colour is taken from the first material's ``diffuse_color`` if
+    The colour is taken from the first material's ``diffuse_color`` (converted
+    from Blender's linear storage to the sRGB values seen in the viewport) if
     available, otherwise a deterministic palette entry is used.
     """
     if obj.material_slots and obj.material_slots[0].material is not None:
         mat = obj.material_slots[0].material
         r, g, b = mat.diffuse_color[:3]
-        return (
-            int(round(max(0.0, min(1.0, r)) * 255)),
-            int(round(max(0.0, min(1.0, g)) * 255)),
-            int(round(max(0.0, min(1.0, b)) * 255)),
-        )
+        return (_linear_to_srgb_8bit(r), _linear_to_srgb_8bit(g), _linear_to_srgb_8bit(b))
     return _DEFAULT_ROI_COLOURS[fallback_index % len(_DEFAULT_ROI_COLOURS)]
 
 

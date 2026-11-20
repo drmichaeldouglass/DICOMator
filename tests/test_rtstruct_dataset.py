@@ -361,3 +361,26 @@ def test_structure_set_carries_the_mandatory_approval_module(tmp_path):
     output = tmp_path / "rs.dcm"
     ds.save_as(output, enforce_file_format=True)
     assert pydicom.dcmread(output).ApprovalStatus == "UNAPPROVED"
+
+
+def test_roi_colour_matches_the_material_colour_shown_in_the_viewport():
+    """Material colours are stored linear; ROI Display Color is 8-bit sRGB.
+
+    Blender's default grey material stores 0.8 and is drawn as 231. Scaling
+    the stored value by 255 wrote 204, so every ROI came out darker than the
+    material the user picked for it.
+    """
+    from types import SimpleNamespace
+
+    def object_with_colour(*rgb):
+        material = SimpleNamespace(diffuse_color=(*rgb, 1.0))
+        return SimpleNamespace(material_slots=[SimpleNamespace(material=material)])
+
+    colour = rtstruct_export._roi_colour_from_object
+    assert colour(object_with_colour(0.8, 0.8, 0.8), 0) == (231, 231, 231)
+    assert colour(object_with_colour(0.5, 0.2, 0.05), 0) == (188, 124, 63)
+    # Pure primaries and out-of-range values are unaffected / clamped.
+    assert colour(object_with_colour(1.0, 0.0, 0.0), 0) == (255, 0, 0)
+    assert colour(object_with_colour(2.0, -1.0, 0.0), 0) == (255, 0, 0)
+    # No material: the palette fallback is already display-referred.
+    assert colour(SimpleNamespace(material_slots=[]), 1) == (255, 165, 0)

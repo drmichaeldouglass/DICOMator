@@ -317,6 +317,25 @@ def test_metal_artifacts_round_symmetrically_about_zero():
     assert abs(run(75) - run(-75)) < 0.05
 
 
+@pytest.mark.parametrize("position", [0.1, 0.5, 0.9])
+def test_resize_bilinear_undoes_area_resample_without_shifting(position):
+    """Reducing a field and enlarging it again must not move it.
+
+    ``add_metal_artifacts`` works on a reduced copy of large slices and
+    enlarges the streak field afterwards. The enlargement used to align the
+    corner pixel centres, which stretched the field about the slice centre
+    and moved streaks of an off-centre implant up to several voxels outward.
+    """
+
+    size, reduced = 1024, 256
+    axis = np.arange(size, dtype=np.float64)
+    centre = position * size
+    blob = np.exp(-((axis[:, None] - centre) ** 2 + (axis[None, :] - size / 2) ** 2) / (2 * 25.0**2))
+    restored = artifacts._resize_bilinear(artifacts._area_resample(blob, (reduced, reduced)), (size, size))
+    restored_centre = float((restored.sum(axis=1) * axis).sum() / restored.sum())
+    assert abs(restored_centre - centre) < 0.05
+
+
 @pytest.mark.parametrize("shape,out_shape", [((1, 6), (8, 8)), ((6, 1), (8, 8)), ((1, 1), (4, 5))])
 def test_resize_bilinear_repeats_a_degenerate_source_axis(shape, out_shape):
     """A length-1 source axis must broadcast, not fall outside the image.
